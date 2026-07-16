@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "enabled": true,
+      "kind": "real",
+      "match_keywords": [
+        "bein",
+        "bein sports"
+      ],
+      "name": "BEIN1",
+      "region": "BEIN",
+      "source_code": "BEIN1",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_BEIN1.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_BEIN1.xml.gz"
+    },
+    {
+      "enabled": true,
+      "kind": "real",
+      "match_keywords": [],
+      "name": "CA2",
+      "region": "CA",
+      "source_code": "CA2",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_CA2.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_CA2.xml.gz"
+    },
+    {
+      "enabled": true,
+      "kind": "dummy",
+      "match_keywords": [],
+      "name": "DUMMY_CHANNELS",
+      "region": "DUMMY",
+      "source_code": "DUMMY_CHANNELS",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_DUMMY_CHANNELS.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_DUMMY_CHANNELS.xml.gz"
+    },
+    {
+      "enabled": true,
+      "kind": "real",
+      "match_keywords": [],
+      "name": "FANDUEL1",
+      "region": "US",
+      "source_code": "FANDUEL1",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_FANDUEL1.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_FANDUEL1.xml.gz"
+    },
+    {
+      "enabled": true,
+      "kind": "real",
+      "match_keywords": [],
+      "name": "IN1",
+      "region": "IN",
+      "source_code": "IN1",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_IN1.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_IN1.xml.gz"
+    },
+    {
+      "enabled": true,
+      "kind": "real",
+      "match_keywords": [],
+      "name": "IN2",
+      "region": "IN",
+      "source_code": "IN2",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_IN2.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_IN2.xml.gz"
+    },
+    {
+      "enabled": true,
+      "kind": "real",
+      "match_keywords": [],
+      "name": "IN4",
+      "region": "IN",
+      "source_code": "IN4",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_IN4.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_IN4.xml.gz"
+    },
+    {
+      "enabled": true,
+      "kind": "real",
+      "match_keywords": [],
+      "name": "UK1",
+      "region": "UK",
+      "source_code": "UK1",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_UK1.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_UK1.xml.gz"
+    },
+    {
+      "enabled": true,
+      "kind": "real",
+      "match_keywords": [],
+      "name": "US2",
+      "region": "US",
+      "source_code": "US2",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_US2.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_US2.xml.gz"
+    },
+    {
+      "enabled": true,
+      "kind": "real",
+      "match_keywords": [],
+      "name": "US_LOCALS1",
+      "region": "US",
+      "source_code": "US_LOCALS1",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_US_LOCALS1.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_US_LOCALS1.xml.gz"
+    },
+    {
+      "enabled": true,
+      "kind": "real",
+      "match_keywords": [],
+      "name": "US_SPORTS1",
+      "region": "US",
+      "source_code": "US_SPORTS1",
+      "txt_url": "https://epgshare01.online/epgshare01/epg_ripper_US_SPORTS1.txt",
+      "use_for_matching": true,
+      "xml_url": "https://epgshare01.online/epgshare01/epg_ripper_US_SPORTS1.xml.gz"
+    }
+  ]
+}
+

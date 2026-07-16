@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "createdUtc": "2026-07-15T00:00:00Z",
+  "matcherVersion": "7.0",
+  "matcherBuildId": "SKYTV-SMART-RULES-7.0-2026-07-15",
+  "builderVersion": "7.1",
+  "builderBuildId": "SKYTV-TIVIMATE-BUILDER-7.1-2026-07-15",
+  "originalNotebookName": "SKYTV_EPG_3_Servers_TiviMate_Smart_Rules_v7_1_BUILD_FIXED(1).ipynb",
+  "originalNotebookSha256": "c3388902d30a2f9930282cefe7d08f6e936057d78fc62174210cd32641ac1110",
+  "engineSha256": "8040562b85758a6b0c7b59a7d0e7918f313f3ccf7829498401a8815d097bddf4",
+  "originalEngineCell3Sha256": "b49665052f281f3fd10e493c19655dd106a70b5162d6f1541631835aaf64aa85",
+  "originalEngineCell4Sha256": "3a4b8c0f24b0f04e9d5a9e17b7d80e538705300bae0e55dac35dfe81bee90560",
+  "engineAssembly": "originalEngineCell3 + one newline + originalEngineCell4",
+  "functionSha256": {
+    "_resolve_post_panel_v7": "7ffa442723597bce77dc9ccc8ddd9a74f0832e1f8e64c2229d8f01bdf0b77921",
+    "_resolve_pre_panel_v7": "301ffa3a8e73091582f30a00eeb18c6a92399c767c2280bb91cbaf851887fc28",
+    "_smart_v7_prepare_matcher": "4703ba9ae14354888d356ddf4787992088b944c47fd4c5885274a4fd07a65888",
+    "build_tivimate_package": "b8877764b1a7d945a4770e6ffb762842515274828c654963a31c422c22099b42",
+    "make_matching_report_v7": "bfa4b04f292a4f1bafba8248ab465f4cb7198085acc6c389653372413743394d",
+    "parse_xmltv": "e38799f8e4c626ad1b52c1f90cb2d5c40d2e3deaa4a42fa725c6147692196699",
+    "run_smart_rules_v7_self_test": "2e9682e6f85f19b189f69cd5c3b943940ed52e3686e5d04db129d0d18baf346c",
+    "write_tivimate_xmltv": "2a0b6905051210f79e4706598fc7192ab61b831f17782a4022493662305b9388"
+  },
+  "optimizationBoundary": [
+    "No matcher or builder function body is edited.",
+    "The exact same v7 matcher indexes are reused only when the complete candidate catalog fingerprint is unchanged.",
+    "Independent text catalogs are fetched concurrently and processed in the original configured order.",
+    "Scheduled production builds use approved mapping CSVs and never run fuzzy rematching.",
+    "EPG XML source downloads are shared across the three builds within one workflow run."
+  ]
+}
