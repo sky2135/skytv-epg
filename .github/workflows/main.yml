@@ -1,0 +1,140 @@
+name: Update TiviMate EPG
+
+on:
+  schedule:
+    # Check four times per day, away from the top of the hour. The due-check
+    # below performs the real build only after 72 hours have elapsed.
+    - cron: "37 */6 * * *"
+      timezone: "America/Toronto"
+  workflow_dispatch:
+
+concurrency:
+  group: skytv-epg-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  due-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      due: ${{ steps.due.outputs.due }}
+      reason: ${{ steps.due.outputs.reason }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Decide whether the 72-hour interval is due
+        id: due
+        shell: bash
+        run: |
+          args=(--state state/last_success.json --interval-hours 72)
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            args+=(--force)
+          fi
+          python scripts/should_run.py "${args[@]}"
+
+      - name: Show decision
+        run: echo "Build due=${{ steps.due.outputs.due }}; ${{ steps.due.outputs.reason }}"
+
+  build:
+    needs: due-check
+    if: needs.due-check.outputs.due == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    env:
+      SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+      SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+      SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
+      SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
+      SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
+      SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
+      SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+      SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+      SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+      EPG_DOWNLOAD_WORKERS: "4"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install tested dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Verify matcher integrity and regression cases
+        run: python -m unittest discover -s tests -v
+
+      - name: Build all approved server EPG files
+        run: python scripts/build_all_servers.py
+
+      - name: Retain private build reports for troubleshooting
+        uses: actions/upload-artifact@v4
+        with:
+          name: skytv-epg-build-reports-${{ github.run_id }}
+          path: .build/work/*/output/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out repository for success state
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Record successful deployment
+        run: python scripts/mark_success.py --state state/last_success.json
+
+      - name: Commit the new success timestamp
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/last_success.json
+          if git diff --cached --quiet; then
+            echo "Success state is already current."
+          else
+            git commit -m "Record successful EPG refresh [skip ci]"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
