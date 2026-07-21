@@ -6,7 +6,7 @@ from functools import wraps
 from typing import Any
 
 
-_OPTIMIZATION_VERSION = "1.0"
+_OPTIMIZATION_VERSION = "1.1"
 
 
 def _catalog_fingerprint(
@@ -33,12 +33,13 @@ def _catalog_fingerprint(
 
 
 def install_performance_optimizations(engine: Any, *, max_catalog_workers: int = 6) -> dict[str, Any]:
-    """Install deterministic runtime optimizations around the frozen v7 engine.
+    """Install deterministic runtime optimizations around the engine.
 
-    The matcher functions, thresholds, aliases, tie-breaking, and builder rules are
-    not edited. The wrappers only (1) reuse already-built indexes when the exact
-    same source catalog is used twice and (2) fetch independent EPGShare text
-    catalogs concurrently, then process them in the original configured order.
+    The wrapper preserves catalog order, parallelizes independent text-catalog
+    downloads, and caches the legacy v7 compatibility indexes by a complete
+    catalog fingerprint.  Smart Rules v8 maintains its own structural-index
+    fingerprint and exposes those counters through :func:`optimization_status`.
+    No matching threshold or tie-breaking rule is changed here.
     """
     existing = getattr(engine, "_SKYTV_PERFORMANCE_PATCH", None)
     if isinstance(existing, dict):
@@ -125,22 +126,23 @@ def install_performance_optimizations(engine: Any, *, max_catalog_workers: int =
             feed = result["feed"]
             status = result["status"]
             if status == "skipped":
-                print(f"{feed_name}: available for builds, skipped during matching")
+                print(f"{feed_name}: available for builds, skipped during matching", flush=True)
                 continue
             if status == "missing_url":
-                print(f"Warning: {feed_name} has no text catalog; skipped during matching.")
+                print(f"Warning: {feed_name} has no text catalog; skipped during matching.", flush=True)
                 continue
             if status == "http_error":
                 print(
-                    f"Warning: {feed_name} returned HTTP {result['status_code']}; continuing."
+                    f"Warning: {feed_name} returned HTTP {result['status_code']}; continuing.",
+                    flush=True,
                 )
                 continue
             if status == "download_error":
-                print(f"Warning: could not download {feed_name}; continuing.")
+                print(f"Warning: could not download {feed_name}; continuing.", flush=True)
                 continue
 
             ids = result["ids"]
-            print(f"{feed_name}: {len(ids):,} EPG IDs")
+            print(f"{feed_name}: {len(ids):,} EPG IDs", flush=True)
             if feed["kind"] == "dummy":
                 for epg_id in ids:
                     dummy_ids[epg_id.casefold()] = epg_id
@@ -181,11 +183,18 @@ def install_performance_optimizations(engine: Any, *, max_catalog_workers: int =
 def optimization_status(engine: Any) -> dict[str, Any]:
     patch = getattr(engine, "_SKYTV_PERFORMANCE_PATCH", {})
     state = patch.get("prepare_state", {}) if isinstance(patch, dict) else {}
+    v8_resolver = getattr(engine, "_SKYTV_CONTEXTUAL_V8", None)
+    v8_state = getattr(v8_resolver, "state", None)
     return {
         "installed": bool(patch),
         "version": patch.get("version", "") if isinstance(patch, dict) else "",
+        "legacy_index_builds": int(state.get("builds", 0) or 0),
+        "legacy_index_reuses": int(state.get("reuses", 0) or 0),
+        # Backward-compatible names retained for the original v7 tests/tools.
         "matcher_index_builds": int(state.get("builds", 0) or 0),
         "matcher_index_reuses": int(state.get("reuses", 0) or 0),
+        "contextual_index_builds": int(getattr(v8_state, "index_builds", 0) or 0),
+        "contextual_index_reuses": int(getattr(v8_state, "index_reuses", 0) or 0),
         "max_catalog_workers": int(patch.get("max_catalog_workers", 0) or 0)
         if isinstance(patch, dict)
         else 0,

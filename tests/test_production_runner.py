@@ -36,7 +36,7 @@ class ProductionRunnerTests(unittest.TestCase):
             now = datetime.now(timezone.utc).replace(microsecond=0)
             source_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <tv>
-  <channel id="Channel.One.test"><display-name>Channel One</display-name></channel>
+  <channel id="Channel.One.test"><display-name>Channel One</display-name><icon src="https://logos.example/channel-one.png"/></channel>
   <programme start="{xmltv_time(now - timedelta(hours=1))}" stop="{xmltv_time(now + timedelta(hours=1))}" channel="Channel.One.test"><title>Current Programme</title></programme>
   <programme start="{xmltv_time(now + timedelta(hours=1))}" stop="{xmltv_time(now + timedelta(hours=5))}" channel="Channel.One.test"><title>Future Programme</title></programme>
 </tv>
@@ -46,7 +46,7 @@ class ProductionRunnerTests(unittest.TestCase):
 
             panel_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <tv>
-  <channel id="Panel.Three"><display-name>Panel Three</display-name></channel>
+  <channel id="Panel.Three"><display-name>Panel Three</display-name><icon src="/logos/panel-three.png"/></channel>
   <programme start="{xmltv_time(now - timedelta(hours=1))}" stop="{xmltv_time(now + timedelta(hours=4))}" channel="Panel.Three"><title>Panel Programme</title></programme>
 </tv>
 '''
@@ -165,9 +165,24 @@ class ProductionRunnerTests(unittest.TestCase):
                 index = json.loads((public_dir / "epg" / "index.json").read_text())
                 self.assertEqual(len(index["builds"]), 3)
                 for server_id in rows:
-                    self.assertTrue(
-                        (public_dir / "epg" / f"{server_id}_tivimate.xml.gz").is_file()
+                    epg_file = public_dir / "epg" / f"{server_id}_tivimate.xml.gz"
+                    self.assertTrue(epg_file.is_file())
+                    with gzip.open(epg_file, "rt", encoding="utf-8") as handle:
+                        xml = handle.read()
+                    if server_id in {"server_1", "server_2"}:
+                        self.assertIn(
+                            '<icon src="https://logos.example/channel-one.png"/>', xml
+                        )
+                    else:
+                        self.assertIn(
+                            f'<icon src="http://127.0.0.1:{port}/logos/panel-three.png"/>',
+                            xml,
+                        )
+                    manifest = json.loads(
+                        (work_dir / server_id / "output" / f"{server_id}_tivimate_manifest.json").read_text()
                     )
+                    self.assertGreater(manifest["channelsWithIcons"], 0)
+                    self.assertGreater(manifest["iconCoveragePercent"], 0)
             finally:
                 server.shutdown()
                 server.server_close()

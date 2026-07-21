@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build all approved TiviMate EPG files with the frozen v7.1 engine.
+"""Build all approved XMLTV EPG files with Builder v7.1.
 
-This production runner never performs fuzzy channel matching. It consumes only
-reviewed mapping CSV files and uses the original build_tivimate_package function.
+Smart Rules v8 is used interactively to create/review mappings.  This production
+runner deliberately performs no automatic rematching: it consumes only approved
+mapping CSV files and uses the unchanged build_tivimate_package function.
 Independent source files are downloaded once per workflow run and reused by all
 three server builds.
 """
@@ -29,6 +30,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import skytv_epg_engine as engine  # noqa: E402
+import skytv_epg_icons as icon_layer  # noqa: E402
 
 SERVER_IDS = ("server_1", "server_2", "server_3")
 PUBLIC_REPORT_SUFFIXES = (
@@ -103,7 +105,7 @@ def load_source_registry(config_path: Path) -> None:
         raise FileNotFoundError(f"EPG source configuration is missing: {config_path}")
     engine.reset_epgshare_sources()
     engine.load_epg_source_config(config_path, overwrite=True)
-    print(f"Loaded {len(engine.EPGSHARE_FEEDS):,} configured EPG sources.")
+    print(f"Loaded {len(engine.EPGSHARE_FEEDS):,} configured EPG sources.", flush=True)
 
 
 def secret_name(server_id: str, field: str) -> str:
@@ -202,7 +204,8 @@ def prefetch_sources(
     workers = max(1, min(int(max_workers), len(epg_feeds) + len(panel_servers) or 1))
     print(
         f"Downloading {len(epg_feeds)} distinct EPGShare file(s) and "
-        f"{len(panel_servers)} panel file(s) with up to {workers} workers."
+        f"{len(panel_servers)} panel file(s) with up to {workers} workers.",
+        flush=True,
     )
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=workers,
@@ -230,7 +233,7 @@ def prefetch_sources(
         # the network work itself happens concurrently.
         for label, future in jobs:
             downloaded = future.result()
-            print(f"Ready: {label} ({downloaded.stat().st_size:,} bytes)")
+            print(f"Ready: {label} ({downloaded.stat().st_size:,} bytes)", flush=True)
 
     return epg_paths, panel_paths
 
@@ -270,6 +273,143 @@ def install_shared_download_cache(epg_paths: dict[str, Path]) -> Any:
 
     engine.download_streamed = cached_download
     return original
+
+
+def derive_public_base_url(explicit: str = "") -> str:
+    """Return the Pages base URL used for locally hosted logos."""
+    configured = str(explicit or os.environ.get("EPG_PUBLIC_BASE_URL", "")).strip().rstrip("/")
+    if configured:
+        return configured
+    repository = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not repository or "/" not in repository:
+        return ""
+    owner, repo = repository.split("/", 1)
+    if repo.casefold() == f"{owner.casefold()}.github.io":
+        return f"https://{owner}.github.io"
+    return f"https://{owner}.github.io/{repo}"
+
+
+def source_base_urls_for_icons(
+    epg_paths: dict[str, Path],
+    panel_paths: dict[str, Path],
+    server_id: str,
+) -> dict[str, str]:
+    urls = {
+        feed: str(engine.EPGSHARE_FEEDS.get(feed, {}).get("xml_url", ""))
+        for feed in epg_paths
+    }
+    if server_id in panel_paths:
+        try:
+            base_url, _username, _password = panel_credentials(server_id)
+            urls["PANEL"] = base_url + "/"
+        except Exception:
+            urls["PANEL"] = ""
+    return urls
+
+
+def prefetch_source_icon_catalogs(
+    inputs: list[ServerInput],
+    epg_paths: dict[str, Path],
+    panel_paths: dict[str, Path],
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+    """Parse each downloaded source at most once for all mapped icon IDs."""
+    wanted_shared: dict[str, set[str]] = {}
+    for item in inputs:
+        for feed, group in item.prepared.groupby("feed_key", sort=True):
+            feed = str(feed)
+            if feed == "PANEL":
+                continue
+            wanted_shared.setdefault(feed, set()).update(group["epg_id"].astype(str))
+    shared = icon_layer.extract_icons_by_feed(
+        wanted_shared,
+        epg_paths,
+        {
+            feed: str(engine.EPGSHARE_FEEDS.get(feed, {}).get("xml_url", ""))
+            for feed in epg_paths
+        },
+    )
+
+    panels: dict[str, dict[str, str]] = {}
+    for item in inputs:
+        if item.server_id not in panel_paths:
+            continue
+        wanted = set(
+            item.prepared.loc[item.prepared["feed_key"].eq("PANEL"), "epg_id"].astype(str)
+        )
+        base_url, _username, _password = panel_credentials(item.server_id)
+        panels[item.server_id] = icon_layer.extract_source_icons(
+            panel_paths[item.server_id], wanted, base_url=base_url + "/"
+        )
+    print(
+        "Source icon catalog: "
+        f"{sum(len(value) for value in shared.values()):,} EPGShare icon(s), "
+        f"{sum(len(value) for value in panels.values()):,} panel icon(s).",
+        flush=True,
+    )
+    return shared, panels
+
+
+def enrich_server_icons(
+    *,
+    item: ServerInput,
+    output_dir: Path,
+    manifest: dict[str, Any],
+    shared_source_icons: dict[str, dict[str, str]],
+    panel_source_icons: dict[str, dict[str, str]],
+    icon_overrides: icon_layer.IconOverrides,
+) -> dict[str, Any]:
+    """Add exact XMLTV icon metadata without changing any mapping decision."""
+    source_icons = dict(shared_source_icons)
+    if item.server_id in panel_source_icons:
+        source_icons["PANEL"] = panel_source_icons[item.server_id]
+    assignments, report_rows = icon_layer.resolve_icon_assignments(
+        item.prepared,
+        server_id=item.server_id,
+        source_icons_by_feed=source_icons,
+        overrides=icon_overrides,
+    )
+    data_file = output_dir / str(manifest["dataFile"])
+    icon_stats = icon_layer.inject_icons_into_xmltv(data_file, assignments)
+    validation = engine.validate_tivimate_xmltv(data_file)
+    validation.update(icon_stats)
+    coverage = round(
+        icon_stats["channels_with_icons"] * 100.0 / max(1, icon_stats["xmltv_channels"]),
+        2,
+    )
+    manifest.update({
+        "dataSha256": sha256_file(data_file),
+        "compressedBytes": data_file.stat().st_size,
+        "channelsWithIcons": icon_stats["channels_with_icons"],
+        "channelsWithoutIcons": icon_stats["channels_without_icons"],
+        "iconCoveragePercent": coverage,
+        "iconAssignments": len(assignments),
+        "iconPolicy": "mapping_exact_then_config_exact_then_source_xmltv_exact_no_fuzzy",
+        "validation": validation,
+    })
+    manifest_path = output_dir / f"{item.server_id}_tivimate_manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    (output_dir / f"{item.server_id}_validation.json").write_text(
+        json.dumps(validation, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    pd.DataFrame(
+        report_rows,
+        columns=[
+            "server_id", "channel_name", "epg_id", "feed",
+            "icon_url", "icon_source", "matched_by",
+        ],
+    ).to_csv(
+        output_dir / f"{item.server_id}_icon_report.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    print(
+        f"  Icons: {icon_stats['channels_with_icons']:,}/{icon_stats['xmltv_channels']:,} "
+        f"XMLTV channel entries ({coverage:.2f}%).",
+        flush=True,
+    )
+    return manifest
 
 
 def clear_public_dir(public_dir: Path) -> None:
@@ -316,6 +456,8 @@ def publish_server_output(
         ),
         "builderVersion": manifest.get("builderVersion"),
         "builderBuildId": manifest.get("builderBuildId"),
+        "channelsWithIcons": manifest.get("channelsWithIcons", 0),
+        "iconCoveragePercent": manifest.get("iconCoveragePercent", 0),
     }
 
 
@@ -323,7 +465,7 @@ def write_public_index(public_dir: Path, builds: list[dict[str, Any]]) -> None:
     payload = {
         "schemaVersion": 1,
         "generatedAtUtc": utc_now_iso(),
-        "targetApp": "TiviMate",
+        "targetApp": "TVMeta / TiviMate",
         "matcherPolicy": "APPROVED_MAPPINGS_ONLY_NO_AUTOMATIC_REMATCH",
         "builds": builds,
     }
@@ -359,6 +501,7 @@ def write_public_index(public_dir: Path, builds: list[dict[str, Any]]) -> None:
             f"<td><a href=\"{href}\">{filename}</a></td>"
             f"<td>{generated}</td>"
             f"<td>{coverage}%</td>"
+            f"<td>{html.escape(str(item.get('iconCoveragePercent', 0)))}%</td>"
             "</tr>"
         )
     document = """<!doctype html>
@@ -366,7 +509,7 @@ def write_public_index(public_dir: Path, builds: list[dict[str, Any]]) -> None:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>SKY TV EPG</title>
+  <title>SKY TV XMLTV EPG</title>
   <style>
     body { font: 16px/1.5 system-ui, sans-serif; max-width: 980px; margin: 3rem auto; padding: 0 1rem; }
     table { border-collapse: collapse; width: 100%; }
@@ -376,10 +519,10 @@ def write_public_index(public_dir: Path, builds: list[dict[str, Any]]) -> None:
   </style>
 </head>
 <body>
-  <h1>SKY TV EPG files</h1>
+  <h1>SKY TV XMLTV EPG files</h1>
   <p>Generated from reviewed mappings. Automatic fuzzy rematching is disabled in scheduled builds.</p>
   <table>
-    <thead><tr><th>Server</th><th>EPG download</th><th>Generated UTC</th><th>Programme coverage</th></tr></thead>
+    <thead><tr><th>Server</th><th>EPG download</th><th>Generated UTC</th><th>Programme coverage</th><th>Icon coverage</th></tr></thead>
     <tbody>
 """ + "\n".join(rows) + """
     </tbody>
@@ -440,6 +583,23 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=int(os.environ.get("EPG_DOWNLOAD_WORKERS", "4")),
     )
+    parser.add_argument(
+        "--icon-config",
+        type=Path,
+        default=REPO_ROOT / "config" / "channel_icons.csv",
+        help="Exact optional icon overrides; source XMLTV icons are used automatically.",
+    )
+    parser.add_argument(
+        "--logo-assets-dir",
+        type=Path,
+        default=REPO_ROOT / "assets" / "logos",
+        help="Locally hosted logo files copied to GitHub Pages.",
+    )
+    parser.add_argument(
+        "--public-base-url",
+        default=os.environ.get("EPG_PUBLIC_BASE_URL", ""),
+        help="Pages/custom-domain base URL for local logo files.",
+    )
     return parser.parse_args()
 
 
@@ -451,7 +611,8 @@ def main() -> int:
     for item in inputs:
         print(
             f"{item.server_id}: {len(item.prepared):,} approved mapping rows "
-            f"from {item.mapping_path.name}"
+            f"from {item.mapping_path.name}",
+            flush=True,
         )
 
     epg_paths, panel_paths = prefetch_sources(
@@ -460,7 +621,30 @@ def main() -> int:
         args.download_workers,
     )
     original_download = install_shared_download_cache(epg_paths)
+    public_base_url = derive_public_base_url(args.public_base_url)
+    icon_overrides = icon_layer.load_icon_overrides(
+        args.icon_config.resolve(),
+        public_base_url=public_base_url,
+    )
+    print(
+        f"Icon overrides: {icon_overrides.rows_loaded:,} loaded, "
+        f"{icon_overrides.rows_rejected:,} rejected. "
+        f"Local-logo base URL: {public_base_url or 'not configured'}",
+        flush=True,
+    )
+    shared_source_icons, panel_source_icons = prefetch_source_icon_catalogs(
+        inputs, epg_paths, panel_paths
+    )
     clear_public_dir(args.public_dir.resolve())
+    asset_stats = icon_layer.stage_logo_assets(
+        args.logo_assets_dir.resolve(),
+        args.public_dir.resolve() / "logos",
+    )
+    print(
+        f"Staged {asset_stats['files']:,} local logo/attribution file(s) "
+        f"({asset_stats['bytes']:,} bytes).",
+        flush=True,
+    )
 
     if args.work_dir.exists():
         shutil.rmtree(args.work_dir)
@@ -469,7 +653,7 @@ def main() -> int:
     published: list[dict[str, Any]] = []
     try:
         for item in inputs:
-            print(f"\nBuilding {item.server_id} with the frozen v7.1 builder...")
+            print(f"\nBuilding {item.server_id} with Builder v7.1 + XMLTV icon layer...", flush=True)
             server_work = args.work_dir / item.server_id
             _zip_path, manifest = engine.build_tivimate_package(
                 mapping=item.mapping,
@@ -479,6 +663,14 @@ def main() -> int:
                 channel_report=item.channel_report,
                 past_days=args.past_days,
                 refresh_safety_hours=args.refresh_safety_hours,
+            )
+            manifest = enrich_server_icons(
+                item=item,
+                output_dir=server_work / "output",
+                manifest=manifest,
+                shared_source_icons=shared_source_icons,
+                panel_source_icons=panel_source_icons,
+                icon_overrides=icon_overrides,
             )
             published.append(
                 publish_server_output(
@@ -492,11 +684,12 @@ def main() -> int:
         engine.download_streamed = original_download
 
     write_public_index(args.public_dir.resolve(), published)
-    print("\nBuild and publication staging complete.")
+    print("\nBuild and publication staging complete.", flush=True)
     for item in published:
         print(
             f"  {item['serverId']}: {item['file']} "
-            f"({item['compressedBytes']:,} bytes, SHA-256 {item['sha256'][:12]}...)"
+            f"({item['compressedBytes']:,} bytes, SHA-256 {item['sha256'][:12]}...)",
+            flush=True,
         )
     return 0
 
@@ -505,7 +698,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        print(f"ERROR: {exc}", file=sys.stderr, flush=True)
         if os.environ.get("SKYTV_DEBUG", "").strip() == "1":
             raise
         raise SystemExit(1) from None

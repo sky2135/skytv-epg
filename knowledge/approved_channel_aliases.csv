@@ -1,0 +1,2 @@
+alias,regions,epg_ids,relationship,note
+ptc chak de,IN,PTC.CHAK.DE.in|PTC.Chak.De.in|PTC.NEWS.in|PTC.News.in,verified_identity_with_news_fallback,Prefer the dedicated PTC Chak De schedule; use PTC News only if the dedicated ID disappears.

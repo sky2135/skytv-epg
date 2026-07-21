@@ -1,48 +1,16 @@
-# SKY TV EPG — optimized v7.1 matcher and GitHub automation
+# SKY TV EPG — Smart Rules v8.4 + approved-mapping GitHub builder
 
-This package keeps the proven Smart Rules v7 matcher and Builder v7.1 intact,
-while making the surrounding runtime and three-server refresh process more
-efficient.
+This repository contains:
 
-## What is included
+- the Smart Rules v8.4 contextual matcher used in Colab to create reviewed mappings;
+- the unchanged Smart Rules v7 compatibility engine and Builder v7.1;
+- a three-server GitHub Actions build that uses approved mapping CSV files only;
+- exact XMLTV channel-icon enrichment;
+- GitHub Pages publication for TVMeta and TiviMate.
 
-- `SKYTV_EPG_v7_1_Optimized_Matcher_Frozen.ipynb` — the Colab notebook. The
-  original engine cells are unchanged; a separate performance cell is added.
-- `src/skytv_epg_engine.py` — byte-for-byte assembly of the two original engine
-  cells from the supplied notebook.
-- `src/skytv_epg_optimizations.py` — deterministic wrappers for parallel text
-  catalog downloads and exact-catalog index reuse.
-- `scripts/build_all_servers.py` — production builder for three reviewed
-  mappings. It downloads each distinct XMLTV source once per workflow run.
-- `.github/workflows/update_epg.yml` — GitHub Actions build and Pages deployment.
-- `tests/test_matcher_regression.py` — matcher/output equality and ordering tests.
-- `MATCHER_INTEGRITY.json` — SHA-256 fingerprints of the frozen engine and key
-  functions.
-- `config/epg_sources.json` — the original source registry, including `BEIN1`.
+## Safety boundary
 
-## Important design rule
-
-The scheduled job **never performs fuzzy channel matching**. It consumes only
-mapping CSVs that have already been approved. This prevents a changed provider
-channel name or changed catalog from silently attaching the wrong schedule.
-
-The interactive Colab notebook remains the place to inventory channels, run the
-v7 matcher, inspect doubtful rows, and approve a new mapping.
-
-# Part A — prepare the three approved mapping files
-
-Do this once before enabling the GitHub workflow, and repeat it only when the
-channel lineup or mappings change.
-
-1. Open `SKYTV_EPG_v7_1_Optimized_Matcher_Frozen.ipynb` in Google Colab.
-2. Run the cells from the top.
-3. Run Stage 1 for `server_1`, review doubtful rows as usual, and run Stage 2.
-4. Download the Stage 2 output ZIP.
-5. Extract `server_1_final_mapping.csv` and place it in this repository's
-   `mappings` folder.
-6. Repeat for `server_2` and `server_3`.
-
-The final folder must contain:
+The scheduled GitHub workflow never rematches channels. It reads only:
 
 ```text
 mappings/server_1_final_mapping.csv
@@ -50,203 +18,250 @@ mappings/server_2_final_mapping.csv
 mappings/server_3_final_mapping.csv
 ```
 
-The workflow deliberately stops with a clear error if any file is missing.
+A provider rename therefore cannot silently change an approved channel-to-EPG decision during an unattended refresh.
 
-# Part B — create the GitHub repository
-
-1. Sign in to GitHub and create a new repository, for example `skytv-epg`.
-2. Upload the **contents** of this folder to the repository. Preserve the hidden
-   `.github` folder and its `workflows/update_epg.yml` path.
-3. Add the three approved mapping CSVs described above.
-4. Commit the files to the default branch, normally `main`.
-
-A public repository makes the mappings and configuration public. The server
-credentials are still protected because they are stored only as encrypted
-GitHub Actions secrets. Use a private repository only when the GitHub plan being
-used supports the desired Pages publication setup.
-
-# Part C — add GitHub Actions secrets
-
-Open the repository, then go to:
-
-`Settings` → `Secrets and variables` → `Actions` → `New repository secret`
-
-Create the following secrets for each server whose mapping contains panel rows.
-A panel row has `source=panel`, `feed_key=PANEL`, or
-`epg_feed=server xmltv.php`.
-
-| Secret name | Value |
-|---|---|
-| `SERVER_1_BASE_URL` | Base URL only, such as `https://provider.example` |
-| `SERVER_1_USERNAME` | Dedicated catalog account username |
-| `SERVER_1_PASSWORD` | Dedicated catalog account password |
-| `SERVER_2_BASE_URL` | Server 2 base URL |
-| `SERVER_2_USERNAME` | Server 2 username |
-| `SERVER_2_PASSWORD` | Server 2 password |
-| `SERVER_3_BASE_URL` | Server 3 base URL |
-| `SERVER_3_USERNAME` | Server 3 username |
-| `SERVER_3_PASSWORD` | Server 3 password |
-
-Secrets for a server are not required when that server's mapping uses only
-EPGShare/dummy feeds.
-
-Use a dedicated read-only/catalog account. Prefer HTTPS. With an HTTP panel,
-credentials are not encrypted while travelling between the GitHub runner and
-the panel.
-
-Never put credentials, playable URLs, or tokens in a CSV, notebook, JSON file,
-commit, issue, or workflow log.
-
-# Part D — enable workflow permissions and GitHub Pages
-
-## Workflow write permission
-
-Go to:
-
-`Settings` → `Actions` → `General` → `Workflow permissions`
-
-Select **Read and write permissions**, then save. This allows the workflow to
-record the timestamp of the last successful deployment in
-`state/last_success.json`.
-
-A branch-protection rule must also permit the GitHub Actions bot to update that
-one state file. If the Pages deployment succeeds but the final state commit
-fails, the due-check cannot remember the success and may rebuild too often.
-
-## GitHub Pages
-
-Go to:
-
-`Settings` → `Pages` → `Build and deployment` → `Source`
-
-Choose **GitHub Actions**.
-
-# Part E — run the first build
-
-1. Open the repository's **Actions** tab.
-2. Select **Update TiviMate EPG**.
-3. Select **Run workflow**.
-4. Open the run and confirm that all three jobs are green:
-   `due-check`, `build`, and `deploy`.
-5. Open `Settings` → `Pages` to see the published site address.
-
-A manual run always forces a build, even when 72 hours have not passed.
-
-# Final TiviMate/TVMeta download addresses
-
-For a repository named `skytv-epg`, the stable addresses are:
+Smart Rules v8.4 remains available in:
 
 ```text
-https://YOUR_GITHUB_USERNAME.github.io/skytv-epg/epg/server_1_tivimate.xml.gz
-https://YOUR_GITHUB_USERNAME.github.io/skytv-epg/epg/server_2_tivimate.xml.gz
-https://YOUR_GITHUB_USERNAME.github.io/skytv-epg/epg/server_3_tivimate.xml.gz
+SKYTV_EPG_v8_4_Colab_Only.ipynb
+src/skytv_epg_contextual_v8.py
 ```
 
-Use the address for the corresponding server as the EPG source in TiviMate.
-The Pages home page also lists the current files, generation time, and coverage.
-A machine-readable index is published at:
+Use the notebook when a server lineup changes, review uncertain rows, then replace only the affected approved mapping CSV.
+
+## Repository layout
+
+Upload the contents of this package directly to the root of a dedicated repository:
 
 ```text
-https://YOUR_GITHUB_USERNAME.github.io/skytv-epg/epg/index.json
+.github/workflows/main.yml
+assets/logos/
+config/channel_icons.csv
+config/epg_sources.json
+knowledge/
+mappings/
+scripts/
+src/
+state/last_success.json
+tests/
+README.md
+requirements.txt
 ```
 
-# How the three-day schedule works
+Do not upload another outer folder above `.github`.
 
-The workflow checks at minute 37 every six hours in the `America/Toronto` time
-zone. The expensive build runs only when at least 72 hours have elapsed since
-the last successful Pages deployment. This is more reliable than a day-of-month
-`*/3` expression, which resets at month boundaries.
+## Scheduled refresh behavior
 
-The actual refresh is therefore normally between 72 and 78 hours after the
-previous successful deployment, plus any delay imposed by GitHub's scheduled
-runner queue. A failed build does not advance the success timestamp, so the next
-scheduled check retries it.
+The workflow is intentionally a two-stage scheduler:
 
-# What is and is not published
+1. GitHub starts a lightweight due-check every six hours at minute 37.
+2. The expensive build and deploy run only after at least 72 hours have elapsed since the last successful deployment.
 
-GitHub Pages receives only:
-
-- the three `.xml.gz` files;
-- a small manifest, validation file, and refresh plan per server;
-- `epg/index.json`, `health.json`, and a simple download page.
-
-The full builder reports are retained for 14 days as a GitHub Actions artifact
-for repository collaborators. Credentials are never written to either output.
-
-# Updating feeds or mappings later
-
-## Add or change an EPGShare source
-
-Edit `config/epg_sources.json`. The scheduled builder loads that file before it
-validates the mappings. A mapping that references an unknown feed stops rather
-than silently falling back.
-
-## New, renamed, or removed channels
-
-Run Stage 1 in the optimized notebook again for that server, review the changed
-rows, run Stage 2, and replace only that server's
-`mappings/server_X_final_mapping.csv`. Do not enable scheduled fuzzy rematching.
-
-## Test without waiting three days
-
-Use **Actions** → **Update TiviMate EPG** → **Run workflow**. A manual run is
-forced and updates the successful-deployment timestamp after Pages is live.
-
-# Common failures
-
-### `Approved mapping files are required`
-
-One or more `mappings/server_X_final_mapping.csv` files are missing or named
-incorrectly.
-
-### `Unknown EPG feed names in mapping`
-
-The mapping references a source not present in `config/epg_sources.json`. Add the
-exact reviewed source record or correct the mapping.
-
-### `SERVER_X_... secret is missing`
-
-That mapping contains panel rows. Add all three secrets for that server. The
-base URL must not contain `/player_api.php`, `/xmltv.php`, a username, or a
-password.
-
-### Pages deployment succeeds but `Commit the new success timestamp` fails
-
-Enable Actions **Read and write permissions** and adjust branch protection so
-the workflow can push the state update.
-
-### The workflow does not appear in Actions
-
-Confirm this exact path exists on the default branch:
+Therefore, a scheduled run can legitimately show:
 
 ```text
-.github/workflows/update_epg.yml
+due-check   success
+build       skipped
+deploy      skipped
 ```
 
-### TiviMate still shows old data
+That means the current published EPG is still active and the next refresh is not due yet. GitHub displays a skipped job as a successful workflow result.
 
-Open the Pages home page or `epg/index.json` and check `generatedAtIso`. If it is
-current, trigger an EPG refresh inside TiviMate and verify that the configured
-URL is the Pages URL for the correct server.
+The v8.4 workflow adds a visible `Refresh not due - published EPG remains active` job and writes the last-success and next-due timestamps into the run summary.
 
-# Local validation commands
+A manual run defaults to `force_build = true`, so it builds and deploys immediately even when 72 hours have not elapsed.
+
+The rolling due-check is preferable to a calendar expression such as “every third day of the month,” which does not produce a reliable 72-hour interval across month boundaries.
+
+## XMLTV channel icons
+
+The generated `.xml.gz` files can now contain:
+
+```xml
+<channel id="PTC.PUNJABI.in">
+  <display-name>PTC Punjabi</display-name>
+  <icon src="https://example.org/logos/ptc-punjabi.png"/>
+</channel>
+```
+
+The icon layer is separate from channel matching and never changes an EPG decision.
+
+### Exact icon priority
+
+1. An exact icon URL already carried in an approved mapping row, if such a column exists.
+2. An exact row in `config/channel_icons.csv`.
+3. An exact `<icon>` already supplied by the selected source XMLTV channel.
+4. No icon.
+
+Logo filenames and channel names are never fuzzily matched. A missing icon is safer than the wrong network logo.
+
+### External URL override
+
+Add an exact row to `config/channel_icons.csv`:
+
+```csv
+enabled,server_id,epg_id,channel_name,icon_url,local_file,priority,notes
+true,*,PTC.PUNJABI.in,,https://example.org/ptc-punjabi.png,,100,Verified URL
+```
+
+### Locally hosted logo
+
+1. Put the permitted image in:
+
+```text
+assets/logos/india/ptc-punjabi-in.png
+```
+
+2. Add:
+
+```csv
+enabled,server_id,epg_id,channel_name,icon_url,local_file,priority,notes
+true,*,PTC.PUNJABI.in,,,india/ptc-punjabi-in.png,100,Locally hosted
+```
+
+The build copies approved local files to `public/logos/` and uses the GitHub Pages URL in the XMLTV file.
+
+For a normal repository Pages address, the workflow derives the base URL automatically. For a custom domain, create this Actions repository variable:
+
+```text
+EPG_PUBLIC_BASE_URL=https://epg.example.com
+```
+
+Keep attribution and usage records in:
+
+```text
+assets/logos/ATTRIBUTION.md
+```
+
+## Recommendation for `tv-logo/tv-logos`
+
+Use it as a selective source, not as an automatically mirrored or fuzzy-matched database.
+
+Recommended production policy:
+
+1. Keep source XMLTV icons when available.
+2. For a missing or incorrect logo, verify the exact channel and country manually.
+3. During personal testing, an exact raw image URL can be entered in `channel_icons.csv`.
+4. For long-term reliability, host only the small reviewed subset you need under `assets/logos/`, provided you have permission to redistribute it and record attribution.
+5. Do not copy the entire third-party repository into this project.
+
+The upstream project states that direct raw links can break, asks for reference when redistributing, and asks service operators to contact the maintainer. Channel logos are also trademarks belonging to their owners. Review those terms before public redistribution.
+
+## Required approved mappings
+
+The automated build stops when any required file is missing:
+
+```text
+mappings/server_1_final_mapping.csv
+mappings/server_2_final_mapping.csv
+mappings/server_3_final_mapping.csv
+```
+
+The upgrade overlay deliberately excludes `mappings/`, `state/`, and generated `public/` files so an existing repository is not reset.
+
+## GitHub secrets
+
+Add credentials only for a server whose approved mapping contains panel XMLTV rows:
+
+```text
+SERVER_1_BASE_URL
+SERVER_1_USERNAME
+SERVER_1_PASSWORD
+SERVER_2_BASE_URL
+SERVER_2_USERNAME
+SERVER_2_PASSWORD
+SERVER_3_BASE_URL
+SERVER_3_USERNAME
+SERVER_3_PASSWORD
+```
+
+The base URL should be the provider origin, including its required port or path, but not `/player_api.php`, `/xmltv.php`, username, or password.
+
+## GitHub settings
+
+Enable write permission for the successful-deployment timestamp:
+
+```text
+Settings
+→ Actions
+→ General
+→ Workflow permissions
+→ Read and write permissions
+```
+
+Enable Pages:
+
+```text
+Settings
+→ Pages
+→ Build and deployment
+→ Source
+→ GitHub Actions
+```
+
+A branch-protection rule must allow `github-actions[bot]` to update:
+
+```text
+state/last_success.json
+```
+
+## First run
+
+Open:
+
+```text
+Actions
+→ Update TVMeta and TiviMate EPG v8.4
+→ Run workflow
+```
+
+Leave `force_build` enabled for the first run.
+
+A forced successful run should execute:
+
+```text
+Check whether refresh is due
+Build approved EPG files and icons
+Deploy EPG files to GitHub Pages
+```
+
+## Published files
+
+For a repository named `skytv-epg`:
+
+```text
+https://YOUR_USERNAME.github.io/skytv-epg/epg/server_1_tivimate.xml.gz
+https://YOUR_USERNAME.github.io/skytv-epg/epg/server_2_tivimate.xml.gz
+https://YOUR_USERNAME.github.io/skytv-epg/epg/server_3_tivimate.xml.gz
+```
+
+Status and coverage:
+
+```text
+https://YOUR_USERNAME.github.io/skytv-epg/epg/index.json
+```
+
+The index includes programme coverage and icon coverage for each server.
+
+## Private diagnostic reports
+
+Each actual build retains a private GitHub Actions artifact for 14 days. It includes per-server reports, including:
+
+```text
+server_X_icon_report.csv
+server_X_tivimate_manifest.json
+server_X_validation.json
+server_X_missing_epg_ids.csv
+server_X_missing_future_epg_ids.csv
+```
+
+## Local validation
 
 From the repository root:
 
 ```bash
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-python scripts/build_all_servers.py
 ```
 
-The last command requires the three mapping files, Internet access, and panel
-secrets in environment variables when panel schedules are used.
-
-# Hosting limits to monitor
-
-GitHub currently documents a 1 GB maximum published Pages site, a 10-minute
-Pages deployment timeout, and a soft 100 GB/month bandwidth limit. The XMLTV
-files are compressed, so a normal three-server EPG should be far below these
-limits, but check the `compressedBytes` values in `epg/index.json` after the
-first run. Move the output to object storage/CDN if the published site or
-traffic approaches those limits.
+The test suite verifies Smart Rules v8.4, all embedded regression cases, frozen-engine integrity, ordered shared downloads, exact icon behavior, XMLTV icon insertion, and a three-server end-to-end build.

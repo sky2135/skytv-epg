@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "description": "Optional groups of XMLTV IDs verified to carry the same programme schedule. Keep empty until programme-title/time comparison confirms equivalence.",
+  "groups": []
+}
