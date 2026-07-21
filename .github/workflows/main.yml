@@ -1,12 +1,19 @@
-name: Update TiviMate EPG
+name: Update TVMeta and TiviMate EPG v8.4
+run-name: ${{ github.event_name == 'workflow_dispatch' && 'Manual EPG refresh v8.4' || 'Scheduled EPG due check v8.4' }}
 
 on:
   schedule:
-    # Check four times per day, away from the top of the hour. The due-check
-    # below performs the real build only after 72 hours have elapsed.
+    # GitHub checks four times per day. The due-check performs the expensive
+    # build only after 72 hours have elapsed since the last successful deploy.
     - cron: "37 */6 * * *"
       timezone: "America/Toronto"
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: "Build and deploy now even when 72 hours have not elapsed"
+        required: true
+        type: boolean
+        default: true
 
 concurrency:
   group: skytv-epg-pages
@@ -17,11 +24,14 @@ permissions:
 
 jobs:
   due-check:
+    name: Check whether refresh is due
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       due: ${{ steps.due.outputs.due }}
       reason: ${{ steps.due.outputs.reason }}
+      last_success_utc: ${{ steps.due.outputs.last_success_utc }}
+      next_due_utc: ${{ steps.due.outputs.next_due_utc }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -31,20 +41,55 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Decide whether the 72-hour interval is due
+      - name: Decide whether the rolling 72-hour interval is due
         id: due
         shell: bash
         run: |
           args=(--state state/last_success.json --interval-hours 72)
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.force_build }}" != "false" ]]; then
             args+=(--force)
           fi
           python scripts/should_run.py "${args[@]}"
 
-      - name: Show decision
-        run: echo "Build due=${{ steps.due.outputs.due }}; ${{ steps.due.outputs.reason }}"
+      - name: Show decision clearly
+        shell: bash
+        run: |
+          echo "Build due=${{ steps.due.outputs.due }}"
+          echo "Reason=${{ steps.due.outputs.reason }}"
+          echo "Last successful deploy=${{ steps.due.outputs.last_success_utc || 'not recorded' }}"
+          echo "Next scheduled due time=${{ steps.due.outputs.next_due_utc || 'not calculated' }}"
+          {
+            echo "## EPG refresh decision"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| Build due | \`${{ steps.due.outputs.due }}\` |"
+            echo "| Reason | ${{ steps.due.outputs.reason }} |"
+            echo "| Last successful deploy | ${{ steps.due.outputs.last_success_utc || 'not recorded' }} |"
+            echo "| Next due time | ${{ steps.due.outputs.next_due_utc || 'not calculated' }} |"
+            echo
+            if [[ "${{ steps.due.outputs.due }}" == "true" ]]; then
+              echo "The build and deploy jobs will run."
+            else
+              echo "This was only a scheduled due-check. The existing published EPG remains active and unchanged."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  not-due:
+    name: Refresh not due - published EPG remains active
+    needs: due-check
+    if: needs.due-check.outputs.due != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Explain the intentional skip
+        run: |
+          echo "No build was required."
+          echo "Reason: ${{ needs.due-check.outputs.reason }}"
+          echo "Next due: ${{ needs.due-check.outputs.next_due_utc || 'not calculated' }}"
 
   build:
+    name: Build approved EPG files and icons
     needs: due-check
     if: needs.due-check.outputs.due == 'true'
     runs-on: ubuntu-latest
@@ -62,6 +107,8 @@ jobs:
       SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
       SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
       EPG_DOWNLOAD_WORKERS: "4"
+      EPG_PUBLIC_BASE_URL: ${{ vars.EPG_PUBLIC_BASE_URL }}
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -75,29 +122,30 @@ jobs:
       - name: Install tested dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
-      - name: Verify matcher integrity and regression cases
+      - name: Verify Smart Rules v8.4, builder, and icon regression cases
         run: python -m unittest discover -s tests -v
 
       - name: Build all approved server EPG files
-        run: python scripts/build_all_servers.py
+        run: python -u scripts/build_all_servers.py
 
       - name: Retain private build reports for troubleshooting
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: skytv-epg-build-reports-${{ github.run_id }}
+          name: skytv-epg-v8-4-build-reports-${{ github.run_id }}
           path: .build/work/*/output/
           if-no-files-found: error
           retention-days: 14
 
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: public
 
   deploy:
+    name: Deploy EPG files to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -116,7 +164,7 @@ jobs:
 
       - name: Deploy GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
       - name: Set up Python
         uses: actions/setup-python@v6
