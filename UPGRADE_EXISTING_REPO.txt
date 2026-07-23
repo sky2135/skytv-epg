@@ -1,0 +1,54 @@
+SKY TV EPG v8.4 - SAFE UPGRADE FOR AN EXISTING GITHUB REPOSITORY
+=================================================================
+
+Use the v8.4 UPGRADE OVERLAY, not the full package, when your repository already
+contains approved mappings and a successful-run timestamp.
+
+The overlay excludes:
+- mappings/
+- state/
+- public/
+
+Therefore it does not replace:
+- mappings/server_1_final_mapping.csv
+- mappings/server_2_final_mapping.csv
+- mappings/server_3_final_mapping.csv
+- state/last_success.json
+- currently generated Pages files
+
+UPGRADE STEPS
+-------------
+1. Extract SKYTV_EPG_v8_4_GitHub_Upgrade_Overlay.zip.
+2. Open the extracted folder.
+3. Upload everything INSIDE it to the ROOT of your EPG repository.
+4. Allow GitHub to replace files with the same names.
+5. Confirm this exact path exists:
+      .github/workflows/main.yml
+6. Confirm your three mapping CSV files are still in mappings/.
+7. Commit to the default branch, normally main.
+8. Open Actions -> Update TVMeta and TiviMate EPG v8.4.
+9. Select Run workflow and leave force_build enabled.
+
+WHY SCHEDULED RUNS SOMETIMES SKIP BUILD/DEPLOY
+---------------------------------------------
+The workflow checks every six hours but builds only after a rolling 72 hours
+since the last successful deployment. A green due-check with grey build/deploy
+is intentional when the refresh is not due. The v8.4 run summary now displays
+the last-success and next-due timestamps.
+
+ICONS
+-----
+Source XMLTV icons are copied automatically when available.
+
+Exact overrides are configured in:
+    config/channel_icons.csv
+
+Permitted locally hosted logo files go in:
+    assets/logos/
+
+For a custom Pages domain, add the Actions repository variable:
+    EPG_PUBLIC_BASE_URL=https://your-domain.example
+
+Do not upload an entire third-party logo collection. Add only manually verified
+logos you have permission to use, and record attribution in:
+    assets/logos/ATTRIBUTION.md

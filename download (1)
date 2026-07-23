@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+.env
+.build/
+.DS_Store
+public/epg/*.xml.gz
+public/reports/
+public/health.json
+public/epg/index.json

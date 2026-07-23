@@ -1,0 +1,30 @@
+SKY TV EPG v8.4 - GITHUB CHECKLIST
+=================================
+
+[ ] Package contents are at repository root, not inside another outer folder.
+[ ] .github/workflows/main.yml exists on the default branch.
+[ ] mappings/server_1_final_mapping.csv exists.
+[ ] mappings/server_2_final_mapping.csv exists.
+[ ] mappings/server_3_final_mapping.csv exists.
+[ ] Required SERVER_X_* secrets are configured for panel-based mappings.
+[ ] Settings -> Actions -> General -> Workflow permissions is Read and write.
+[ ] Settings -> Pages -> Source is GitHub Actions.
+[ ] Branch protection permits github-actions[bot] to update state/last_success.json.
+[ ] Optional custom-domain variable EPG_PUBLIC_BASE_URL is configured.
+[ ] Optional exact icon overrides are in config/channel_icons.csv.
+[ ] Optional permitted local logos are in assets/logos/ with attribution.
+[ ] First manual run uses force_build=true.
+[ ] Build logs show Smart Rules v8.4 regression tests passing.
+[ ] Build logs show programme coverage and icon coverage for all three servers.
+[ ] Pages URLs return server_1/server_2/server_3 XMLTV gzip files.
+[ ] epg/index.json shows a recent generatedAtUtc value.
+
+EXPECTED SCHEDULED NON-BUILD RUN
+--------------------------------
+A scheduled check before 72 hours may show:
+  due-check  success
+  not-due    success
+  build      skipped
+  deploy     skipped
+
+That is intentional. The published EPG remains unchanged until the next due time.
