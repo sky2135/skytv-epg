@@ -1,19 +1,31 @@
-name: Update TVMeta and TiviMate EPG v8.4
-run-name: ${{ github.event_name == 'workflow_dispatch' && 'Manual EPG refresh v8.4' || 'Scheduled EPG due check v8.4' }}
+name: Update TiviMate and SKY TV App EPG v8.4
+run-name: EPG refresh v8.4 (${{ github.event_name }})
 
 on:
+  # Build immediately when an approved mapping or builder file changes.
+  push:
+    branches:
+      - main
+    paths:
+      - "mappings/server_1_final_mapping.csv"
+      - "mappings/server_2_final_mapping.csv"
+      - "mappings/server_3_final_mapping.csv"
+      - "config/epg_sources.json"
+      - "config/channel_icons.csv"
+      - "assets/logos/**"
+      - "scripts/**"
+      - "src/**"
+      - "tests/**"
+      - "requirements.txt"
+      - ".github/workflows/main.yml"
+
+  # One complete refresh every day at 4:37 AM Toronto time.
   schedule:
-    # GitHub checks four times per day. The due-check performs the expensive
-    # build only after 72 hours have elapsed since the last successful deploy.
-    - cron: "37 */6 * * *"
+    - cron: "37 4 * * *"
       timezone: "America/Toronto"
+
+  # Also allow a manual refresh from the Actions page.
   workflow_dispatch:
-    inputs:
-      force_build:
-        description: "Build and deploy now even when 72 hours have not elapsed"
-        required: true
-        type: boolean
-        default: true
 
 concurrency:
   group: skytv-epg-pages
@@ -23,79 +35,10 @@ permissions:
   contents: read
 
 jobs:
-  due-check:
-    name: Check whether refresh is due
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      due: ${{ steps.due.outputs.due }}
-      reason: ${{ steps.due.outputs.reason }}
-      last_success_utc: ${{ steps.due.outputs.last_success_utc }}
-      next_due_utc: ${{ steps.due.outputs.next_due_utc }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Decide whether the rolling 72-hour interval is due
-        id: due
-        shell: bash
-        run: |
-          args=(--state state/last_success.json --interval-hours 72)
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.force_build }}" != "false" ]]; then
-            args+=(--force)
-          fi
-          python scripts/should_run.py "${args[@]}"
-
-      - name: Show decision clearly
-        shell: bash
-        run: |
-          echo "Build due=${{ steps.due.outputs.due }}"
-          echo "Reason=${{ steps.due.outputs.reason }}"
-          echo "Last successful deploy=${{ steps.due.outputs.last_success_utc || 'not recorded' }}"
-          echo "Next scheduled due time=${{ steps.due.outputs.next_due_utc || 'not calculated' }}"
-          {
-            echo "## EPG refresh decision"
-            echo
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| Build due | \`${{ steps.due.outputs.due }}\` |"
-            echo "| Reason | ${{ steps.due.outputs.reason }} |"
-            echo "| Last successful deploy | ${{ steps.due.outputs.last_success_utc || 'not recorded' }} |"
-            echo "| Next due time | ${{ steps.due.outputs.next_due_utc || 'not calculated' }} |"
-            echo
-            if [[ "${{ steps.due.outputs.due }}" == "true" ]]; then
-              echo "The build and deploy jobs will run."
-            else
-              echo "This was only a scheduled due-check. The existing published EPG remains active and unchanged."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  not-due:
-    name: Refresh not due - published EPG remains active
-    needs: due-check
-    if: needs.due-check.outputs.due != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Explain the intentional skip
-        run: |
-          echo "No build was required."
-          echo "Reason: ${{ needs.due-check.outputs.reason }}"
-          echo "Next due: ${{ needs.due-check.outputs.next_due_utc || 'not calculated' }}"
-
   build:
-    name: Build approved EPG files and icons
-    needs: due-check
-    if: needs.due-check.outputs.due == 'true'
+    name: Build approved TiviMate XMLTV and SKY TV app JSON files
     runs-on: ubuntu-latest
-    timeout-minutes: 55
-    permissions:
-      contents: read
+    timeout-minutes: 70
     env:
       SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
       SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
@@ -109,6 +52,7 @@ jobs:
       EPG_DOWNLOAD_WORKERS: "4"
       EPG_PUBLIC_BASE_URL: ${{ vars.EPG_PUBLIC_BASE_URL }}
       PYTHONUNBUFFERED: "1"
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -122,67 +66,48 @@ jobs:
       - name: Install tested dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
-      - name: Verify Smart Rules v8.4, builder, and icon regression cases
+      - name: Run regression tests
         run: python -m unittest discover -s tests -v
 
-      - name: Build all approved server EPG files
+      - name: Build all approved TiviMate XMLTV files
         run: python -u scripts/build_all_servers.py
+
+      - name: Build all compact SKY TV app JSON files
+        run: python -u scripts/build_skytv_app_outputs.py
 
       - name: Retain private build reports for troubleshooting
         uses: actions/upload-artifact@v7
         with:
           name: skytv-epg-v8-4-build-reports-${{ github.run_id }}
-          path: .build/work/*/output/
+          path: |
+            .build/work/*/output/
+            public/reports/*/*app_export_validation.json
+            public/EPG/index.json
           if-no-files-found: error
           retention-days: 14
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
 
-      - name: Upload Pages artifact
+      - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
           path: public
 
   deploy:
-    name: Deploy EPG files to GitHub Pages
+    name: Deploy TiviMate and app EPG files to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
+      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Check out repository for success state
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
-      - name: Deploy GitHub Pages
+    steps:
+      - name: Deploy GitHub Pages artifact
         id: deployment
         uses: actions/deploy-pages@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Record successful deployment
-        run: python scripts/mark_success.py --state state/last_success.json
-
-      - name: Commit the new success timestamp
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/last_success.json
-          if git diff --cached --quiet; then
-            echo "Success state is already current."
-          else
-            git commit -m "Record successful EPG refresh [skip ci]"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
-          fi
