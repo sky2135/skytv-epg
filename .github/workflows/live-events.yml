@@ -3,7 +3,9 @@ run-name: Live sports feed (${{ github.event_name }})
 
 on:
   schedule:
-    # One request per provider per hour: 24/day, safely below both free quotas.
+    # CricketData: 24/day. API-Football: live + UTC date hourly, plus one
+    # midnight bridge request when needed (49/day scheduled baseline). Both fit
+    # free quotas; manual and push-triggered runs consume additional calls.
     - cron: "17 * * * *"
   workflow_dispatch:
   push:
