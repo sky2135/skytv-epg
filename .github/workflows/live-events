@@ -1,0 +1,74 @@
+name: Refresh SKY TV live sports feed
+run-name: Live sports feed (${{ github.event_name }})
+
+on:
+  schedule:
+    # One request per provider per hour: 24/day, safely below both free quotas.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/live-events.yml"
+      - "scripts/build_live_events.py"
+      - "tests/test_live_events.py"
+
+concurrency:
+  group: skytv-live-sports-feed
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    name: Build and publish normalized live events
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install lightweight HTTP dependency
+        run: python -m pip install --disable-pip-version-check requests==2.32.5
+
+      - name: Test live-event normalization and secret safety
+        run: python -m unittest tests.test_live_events -v
+
+      - name: Build live and starting-soon event feed
+        env:
+          CRICKETDATA_API_KEY: ${{ secrets.CRICKETDATA_API_KEY }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: >-
+          python -u scripts/build_live_events.py
+          --output .build/live-events.json
+          --starting-soon-minutes 90
+
+      - name: Publish one-file generated branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LIVE_FEED_BRANCH: live-data
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_dir="$(mktemp -d)"
+          cp .build/live-events.json "$publish_dir/live-events.json"
+
+          git -C "$publish_dir" init --quiet
+          git -C "$publish_dir" config user.name "github-actions[bot]"
+          git -C "$publish_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$publish_dir" add live-events.json
+          git -C "$publish_dir" commit --quiet -m "Update generated live event feed"
+
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$publish_dir" push --quiet --force "$remote" "HEAD:${LIVE_FEED_BRANCH}"
+
+          echo "Feed URL: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${LIVE_FEED_BRANCH}/live-events.json" >> "$GITHUB_STEP_SUMMARY"
