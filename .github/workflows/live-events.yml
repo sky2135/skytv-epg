@@ -3,9 +3,10 @@ run-name: Live sports feed (${{ github.event_name }})
 
 on:
   schedule:
-    # CricketData: 24/day. API-Football: live + UTC date hourly, plus one
-    # midnight bridge request when needed (49/day scheduled baseline). Both fit
-    # free quotas; manual and push-triggered runs consume additional calls.
+    # Each dashboard product has its own 100/day allowance. Date-based products
+    # use yesterday + today hourly and one midnight bridge query (49/day);
+    # Football/NFL use live + today with the same bridge ceiling. F1 uses 24/day.
+    # Manual and push-triggered runs consume additional calls.
     - cron: "17 * * * *"
   workflow_dispatch:
   push:
@@ -27,7 +28,7 @@ jobs:
   build-and-publish:
     name: Build and publish normalized live events
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -48,10 +49,12 @@ jobs:
       - name: Build live and starting-soon event feed
         env:
           CRICKETDATA_API_KEY: ${{ secrets.CRICKETDATA_API_KEY }}
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          # One API-Sports dashboard key authorizes every active sport product.
+          API_SPORTS_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: >-
           python -u scripts/build_live_events.py
           --output .build/live-events.json
+          --output-v2 .build/live-events-v2.json
           --starting-soon-minutes 90
 
       - name: Publish one-file generated branch
@@ -63,14 +66,16 @@ jobs:
           set -euo pipefail
           publish_dir="$(mktemp -d)"
           cp .build/live-events.json "$publish_dir/live-events.json"
+          cp .build/live-events-v2.json "$publish_dir/live-events-v2.json"
 
           git -C "$publish_dir" init --quiet
           git -C "$publish_dir" config user.name "github-actions[bot]"
           git -C "$publish_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git -C "$publish_dir" add live-events.json
-          git -C "$publish_dir" commit --quiet -m "Update generated live event feed"
+          git -C "$publish_dir" add live-events.json live-events-v2.json
+          git -C "$publish_dir" commit --quiet -m "Update generated live event feeds"
 
           remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git -C "$publish_dir" push --quiet --force "$remote" "HEAD:${LIVE_FEED_BRANCH}"
 
-          echo "Feed URL: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${LIVE_FEED_BRANCH}/live-events.json" >> "$GITHUB_STEP_SUMMARY"
+          echo "V1 feed: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${LIVE_FEED_BRANCH}/live-events.json" >> "$GITHUB_STEP_SUMMARY"
+          echo "V2 feed: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${LIVE_FEED_BRANCH}/live-events-v2.json" >> "$GITHUB_STEP_SUMMARY"
