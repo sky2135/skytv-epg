@@ -1,267 +1,120 @@
-# SKY TV EPG — Smart Rules v8.4 + approved-mapping GitHub builder
-
-This repository contains:
-
-- the Smart Rules v8.4 contextual matcher used in Colab to create reviewed mappings;
-- the unchanged Smart Rules v7 compatibility engine and Builder v7.1;
-- a three-server GitHub Actions build that uses approved mapping CSV files only;
-- exact XMLTV channel-icon enrichment;
-- GitHub Pages publication for TVMeta and TiviMate.
-
-## Safety boundary
-
-The scheduled GitHub workflow never rematches channels. It reads only:
-
-```text
-mappings/server_1_final_mapping.csv
-mappings/server_2_final_mapping.csv
-mappings/server_3_final_mapping.csv
-```
-
-A provider rename therefore cannot silently change an approved channel-to-EPG decision during an unattended refresh.
-
-Smart Rules v8.4 remains available in:
-
-```text
-SKYTV_EPG_v8_4_Colab_Only.ipynb
-src/skytv_epg_contextual_v8.py
-```
-
-Use the notebook when a server lineup changes, review uncertain rows, then replace only the affected approved mapping CSV.
-
-## Repository layout
-
-Upload the contents of this package directly to the root of a dedicated repository:
-
-```text
-.github/workflows/main.yml
-assets/logos/
-config/channel_icons.csv
-config/epg_sources.json
-knowledge/
-mappings/
-scripts/
-src/
-state/last_success.json
-tests/
-README.md
-requirements.txt
-```
-
-Do not upload another outer folder above `.github`.
-
-## Scheduled refresh behavior
-
-The workflow is intentionally a two-stage scheduler:
-
-1. GitHub starts a lightweight due-check every six hours at minute 37.
-2. The expensive build and deploy run only after at least 72 hours have elapsed since the last successful deployment.
-
-Therefore, a scheduled run can legitimately show:
-
-```text
-due-check   success
-build       skipped
-deploy      skipped
-```
-
-That means the current published EPG is still active and the next refresh is not due yet. GitHub displays a skipped job as a successful workflow result.
-
-The v8.4 workflow adds a visible `Refresh not due - published EPG remains active` job and writes the last-success and next-due timestamps into the run summary.
-
-A manual run defaults to `force_build = true`, so it builds and deploys immediately even when 72 hours have not elapsed.
-
-The rolling due-check is preferable to a calendar expression such as “every third day of the month,” which does not produce a reliable 72-hour interval across month boundaries.
-
-## XMLTV channel icons
-
-The generated `.xml.gz` files can now contain:
-
-```xml
-<channel id="PTC.PUNJABI.in">
-  <display-name>PTC Punjabi</display-name>
-  <icon src="https://example.org/logos/ptc-punjabi.png"/>
-</channel>
-```
-
-The icon layer is separate from channel matching and never changes an EPG decision.
-
-### Exact icon priority
-
-1. An exact icon URL already carried in an approved mapping row, if such a column exists.
-2. An exact row in `config/channel_icons.csv`.
-3. An exact `<icon>` already supplied by the selected source XMLTV channel.
-4. No icon.
-
-Logo filenames and channel names are never fuzzily matched. A missing icon is safer than the wrong network logo.
-
-### External URL override
-
-Add an exact row to `config/channel_icons.csv`:
-
-```csv
-enabled,server_id,epg_id,channel_name,icon_url,local_file,priority,notes
-true,*,PTC.PUNJABI.in,,https://example.org/ptc-punjabi.png,,100,Verified URL
-```
-
-### Locally hosted logo
-
-1. Put the permitted image in:
-
-```text
-assets/logos/india/ptc-punjabi-in.png
-```
-
-2. Add:
-
-```csv
-enabled,server_id,epg_id,channel_name,icon_url,local_file,priority,notes
-true,*,PTC.PUNJABI.in,,,india/ptc-punjabi-in.png,100,Locally hosted
-```
-
-The build copies approved local files to `public/logos/` and uses the GitHub Pages URL in the XMLTV file.
-
-For a normal repository Pages address, the workflow derives the base URL automatically. For a custom domain, create this Actions repository variable:
-
-```text
-EPG_PUBLIC_BASE_URL=https://epg.example.com
-```
-
-Keep attribution and usage records in:
-
-```text
-assets/logos/ATTRIBUTION.md
-```
-
-## Recommendation for `tv-logo/tv-logos`
-
-Use it as a selective source, not as an automatically mirrored or fuzzy-matched database.
-
-Recommended production policy:
-
-1. Keep source XMLTV icons when available.
-2. For a missing or incorrect logo, verify the exact channel and country manually.
-3. During personal testing, an exact raw image URL can be entered in `channel_icons.csv`.
-4. For long-term reliability, host only the small reviewed subset you need under `assets/logos/`, provided you have permission to redistribute it and record attribution.
-5. Do not copy the entire third-party repository into this project.
-
-The upstream project states that direct raw links can break, asks for reference when redistributing, and asks service operators to contact the maintainer. Channel logos are also trademarks belonging to their owners. Review those terms before public redistribution.
-
-## Required approved mappings
-
-The automated build stops when any required file is missing:
-
-```text
-mappings/server_1_final_mapping.csv
-mappings/server_2_final_mapping.csv
-mappings/server_3_final_mapping.csv
-```
-
-The upgrade overlay deliberately excludes `mappings/`, `state/`, and generated `public/` files so an existing repository is not reset.
-
-## GitHub secrets
-
-Add credentials only for a server whose approved mapping contains panel XMLTV rows:
-
-```text
-SERVER_1_BASE_URL
-SERVER_1_USERNAME
-SERVER_1_PASSWORD
-SERVER_2_BASE_URL
-SERVER_2_USERNAME
-SERVER_2_PASSWORD
-SERVER_3_BASE_URL
-SERVER_3_USERNAME
-SERVER_3_PASSWORD
-```
-
-The base URL should be the provider origin, including its required port or path, but not `/player_api.php`, `/xmltv.php`, username, or password.
-
-## GitHub settings
-
-Enable write permission for the successful-deployment timestamp:
-
-```text
-Settings
-→ Actions
-→ General
-→ Workflow permissions
-→ Read and write permissions
-```
-
-Enable Pages:
-
-```text
-Settings
-→ Pages
-→ Build and deployment
-→ Source
-→ GitHub Actions
-```
-
-A branch-protection rule must allow `github-actions[bot]` to update:
-
-```text
-state/last_success.json
-```
-
-## First run
-
-Open:
-
-```text
-Actions
-→ Update TVMeta and TiviMate EPG v8.4
-→ Run workflow
-```
-
-Leave `force_build` enabled for the first run.
-
-A forced successful run should execute:
-
-```text
-Check whether refresh is due
-Build approved EPG files and icons
-Deploy EPG files to GitHub Pages
-```
+# SKY TV EPG — Version 1
+
+This is the production setup for the SKY TV EPG repository.
+
+Start with [docs/START_HERE_VERSION_1.md](docs/START_HERE_VERSION_1.md). It is
+written as a beginning-to-end checklist and assumes no GitHub or Google Cloud
+experience.
+
+## Version 1 setup
+
+- Keep this existing repository and its `main` branch.
+- Keep the existing `live-data` branch and live-sports workflow unchanged.
+- Do not create a `gh-pages` branch.
+- Import the supplied Version 1 workbook into Google Sheets.
+- Keep the Google Sheet private; the workflows connect through a dedicated
+  Google service account.
+- Do not commit a generated mapping CSV. A temporary CSV snapshot exists only
+  inside each GitHub Actions run.
+
+The daily workflow asks all three configured providers for their live-channel
+inventories. Every valid unique stream returned by the API or playlist fallback
+is compared by `(server_id, stream_id)`; unseen pairs are appended to the
+`Mappings` tab as disabled `REVIEW` rows. Existing Sheet rows are never deleted
+or silently remapped. The same run then streams the combined EPGShare source,
+builds the TiviMate XMLTV and app JSON outputs, validates them, and deploys them
+through GitHub Pages.
+
+Server 1 programme data is always sourced from EPGShare. Server 1 credentials
+are used only by the inventory step to discover its channel list; they are not
+available to the EPG-building step.
+
+## Workflows
+
+- `1 - Sync channels to Google Sheet` — manual first-run and on-demand channel
+  inventory check; its safe default is report-only.
+- `2 - Build and publish EPG` — daily and manual inventory, build, validation,
+  and GitHub Pages deployment.
+
+Both workflows use the same non-cancelling concurrency group, so they cannot
+write to the Sheet at the same time. Neither workflow commits generated output
+or mapping data to a Git branch.
+
+## Google Sheet
+
+The supplied workbook and CSV seed both begin with the same 25,170 historical
+mapping rows. They include 11,939 approved dummy-guide placeholders and 171
+disabled rows that remain in `REVIEW`. Those 171 rows stay private and are
+excluded from schedules, public metadata, and personalization until reviewed,
+approved, and enabled. The files are migration starters, not proof of the
+providers' complete current lineups. The CSV seed is a frozen backup and never
+updates. The imported private Google Sheet becomes the live mapping authority.
+The first successful strict inventory sync asks each server for its live list
+and appends every missing valid, uniquely identified row returned in that run
+with `enabled=FALSE` and `action=REVIEW`. Later runs repeat that exact-key
+comparison automatically.
+
+New rows contain conservative metadata suggestions for sorting and review. They
+do not enter any public output, receive a trusted schedule, or become eligible
+for personalized groups until reviewed, approved, and explicitly changed to
+`enabled=TRUE`. Changing `action` alone is not enough. A fuzzy name match is
+never approved unattended.
+Possible stream-ID reuse is recorded in the private `Sync Alerts` tab and stays
+quarantined from builds while the alert status is `OPEN`.
+
+Schedule mapping and personalization review are separate jobs. All 25,170
+starter rows contain automatically inferred, unlocked metadata rather than
+human-approved metadata. The starter has 22,720 undetermined primary languages,
+11,447 unknown regions, and 8,030 unknown genres. Unknown values deliberately
+do not match a specific language, region, genre, sport, or religion preference.
+They can be reviewed gradually in the private Sheet without blocking ordinary
+guide generation.
+
+Version 1 publishes the metadata and taxonomy that a custom app needs for
+personalized groups. It does not add preference screens or filtering code to an
+app whose source code is not in this repository.
 
 ## Published files
 
-For a repository named `skytv-epg`:
+For this repository, the main endpoints are:
 
 ```text
-https://YOUR_USERNAME.github.io/skytv-epg/epg/server_1_tivimate.xml.gz
-https://YOUR_USERNAME.github.io/skytv-epg/epg/server_2_tivimate.xml.gz
-https://YOUR_USERNAME.github.io/skytv-epg/epg/server_3_tivimate.xml.gz
+https://sky2135.github.io/skytv-epg/health.json
+https://sky2135.github.io/skytv-epg/epg/server_1_tivimate.xml.gz
+https://sky2135.github.io/skytv-epg/epg/server_2_tivimate.xml.gz
+https://sky2135.github.io/skytv-epg/epg/server_3_tivimate.xml.gz
+https://sky2135.github.io/skytv-epg/EPG/server_1_epg.json.gz
+https://sky2135.github.io/skytv-epg/EPG/server_1_metadata.json.gz
 ```
 
-Status and coverage:
+Equivalent Server 2 and Server 3 app files, indexes, taxonomy, and validation
+reports are generated automatically.
 
-```text
-https://YOUR_USERNAME.github.io/skytv-epg/epg/index.json
-```
+## Implementation safety
 
-The index includes programme coverage and icon coverage for each server.
+- The roughly 2 GB expanded EPGShare document is parsed once with
+  `lxml.etree.iterparse`.
+- Selected schedules are staged in disk-backed SQLite.
+- XML and JSON outputs are written as deterministic gzip streams.
+- Untrusted downloads, XML structure, compressed/expanded sizes, Sheet rows,
+  duplicate identities, and output sizes are bounded and validated.
+- Generated Pages output is published atomically only after all checks pass.
+- The Pages payload is kept below a 900 MiB safety ceiling for GitHub Pages'
+  1 GB published-site limit.
+- Uncertain mappings and severe stream-identity changes fail safe to review.
+- The private mapping snapshot and every generated upload pass
+  credential-safety checks before the builder or Pages upload can continue;
+  gzip outputs are checked after streaming decompression.
 
-## Private diagnostic reports
-
-Each actual build retains a private GitHub Actions artifact for 14 days. It includes per-server reports, including:
-
-```text
-server_X_icon_report.csv
-server_X_tivimate_manifest.json
-server_X_validation.json
-server_X_missing_epg_ids.csv
-server_X_missing_future_epg_ids.csv
-```
-
-## Local validation
-
-From the repository root:
+## Developer validation
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install --only-binary=:all: -r requirements.txt -r requirements-sync.txt
 python -m unittest discover -s tests -v
 ```
 
-The test suite verifies Smart Rules v8.4, all embedded regression cases, frozen-engine integrity, ordered shared downloads, exact icon behavior, XMLTV icon insertion, and a three-server end-to-end build.
+See [docs/TECHNICAL_REFERENCE_VERSION_1.md](docs/TECHNICAL_REFERENCE_VERSION_1.md)
+for the schemas, command-line contracts, failure behavior, and security model.
+Files whose names contain v7 or v8 are frozen historical matcher components;
+their internal names are intentionally retained for compatibility and are not
+the current product version.

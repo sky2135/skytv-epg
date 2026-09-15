@@ -20,7 +20,18 @@ V8_PATH = REPO_ROOT / "src" / "skytv_epg_contextual_v8.py"
 OPT_PATH = REPO_ROOT / "src" / "skytv_epg_optimizations.py"
 ICON_PATH = REPO_ROOT / "src" / "skytv_epg_icons.py"
 RUNNER_PATH = REPO_ROOT / "scripts" / "build_all_servers.py"
+STREAMING_RUNNER_PATH = REPO_ROOT / "scripts" / "build_epg_streaming.py"
+CHANNEL_INVENTORY_RUNNER_PATH = (
+    REPO_ROOT / "scripts" / "sync_channel_inventory.py"
+)
+SHEET_SEED_EXPORTER_PATH = (
+    REPO_ROOT / "scripts" / "export_google_sheet_seed.py"
+)
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "main.yml"
+CHANNEL_INVENTORY_WORKFLOW_PATH = (
+    REPO_ROOT / ".github" / "workflows" / "channel_inventory_sync.yml"
+)
+CHANNEL_INVENTORY_REQUIREMENTS_PATH = REPO_ROOT / "requirements-sync.txt"
 NOTEBOOK_PATH = REPO_ROOT / "SKYTV_EPG_v8_4_Colab_Only.ipynb"
 SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
@@ -39,7 +50,11 @@ from skytv_epg_optimizations import (  # noqa: E402
 
 
 def load_engine(alias: str):
-    spec = importlib.util.spec_from_file_location(alias, ENGINE_PATH)
+    return load_module(alias, ENGINE_PATH)
+
+
+def load_module(alias: str, path: Path):
+    spec = importlib.util.spec_from_file_location(alias, path)
     if spec is None or spec.loader is None:
         raise RuntimeError("Could not load frozen compatibility engine module")
     module = importlib.util.module_from_spec(spec)
@@ -130,15 +145,78 @@ def catalog_for_all_self_tests(engine):
 class MatcherIntegrityTests(unittest.TestCase):
     def test_integrity_manifest_hashes(self) -> None:
         manifest = json.loads((REPO_ROOT / "MATCHER_INTEGRITY.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["schemaVersion"], 5)
         self.assertEqual(manifest["matcherVersion"], "8.4")
         self.assertEqual(manifest["builderVersion"], "7.1")
+        self.assertEqual(manifest["streamingPipelineVersion"], "1.0")
+        self.assertEqual(
+            manifest["streamingPipelineBuildId"],
+            "SKYTV-EPG-V1-2026-09-15",
+        )
+        self.assertEqual(manifest["githubRelease"], "1.0-private-google-sheets")
+        self.assertEqual(
+            manifest["architecture"],
+            "contextual_v8_matcher_frozen_with_private_google_sheets_epg_v1_"
+            "and_separate_exact_icon_layer",
+        )
+        self.assertEqual(
+            manifest["productionArchitecture"],
+            "single_epgshare_all_iterparse_sqlite_spool_private_google_sheets_"
+            "api_mapping_and_inventory_sync_server1_epgshare_only",
+        )
+        decision_boundary = " ".join(manifest["decisionBoundary"])
+        self.assertIn("private Google Sheet", decision_boundary)
+        self.assertIn("Sync Alerts", decision_boundary)
+        self.assertNotIn("published Google Sheet CSV", decision_boundary)
         self.assertEqual(manifest["legacyEngineSha256"], hashlib.sha256(ENGINE_PATH.read_bytes()).hexdigest())
         self.assertEqual(manifest["contextualV8Sha256"], hashlib.sha256(V8_PATH.read_bytes()).hexdigest())
         self.assertEqual(manifest["optimizationSha256"], hashlib.sha256(OPT_PATH.read_bytes()).hexdigest())
         self.assertEqual(manifest["iconLayerSha256"], hashlib.sha256(ICON_PATH.read_bytes()).hexdigest())
         self.assertEqual(manifest["productionRunnerSha256"], hashlib.sha256(RUNNER_PATH.read_bytes()).hexdigest())
+        self.assertEqual(
+            manifest["legacyProductionRunnerSha256"],
+            hashlib.sha256(RUNNER_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["streamingRunnerSha256"],
+            hashlib.sha256(STREAMING_RUNNER_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["sheetSeedExporterSha256"],
+            hashlib.sha256(SHEET_SEED_EXPORTER_PATH.read_bytes()).hexdigest(),
+        )
         self.assertEqual(manifest["workflowSha256"], hashlib.sha256(WORKFLOW_PATH.read_bytes()).hexdigest())
+        self.assertEqual(
+            manifest["channelInventoryRunnerSha256"],
+            hashlib.sha256(CHANNEL_INVENTORY_RUNNER_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["channelInventoryWorkflowSha256"],
+            hashlib.sha256(CHANNEL_INVENTORY_WORKFLOW_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["channelInventoryRequirementsSha256"],
+            hashlib.sha256(CHANNEL_INVENTORY_REQUIREMENTS_PATH.read_bytes()).hexdigest(),
+        )
         self.assertEqual(manifest["notebookSha256"], hashlib.sha256(NOTEBOOK_PATH.read_bytes()).hexdigest())
+
+    def test_frozen_function_hashes(self) -> None:
+        manifest = json.loads((REPO_ROOT / "MATCHER_INTEGRITY.json").read_text(encoding="utf-8"))
+        modules = {
+            "engine": load_engine("skytv_v1_frozen_engine_hashes"),
+            "v8": load_module("skytv_v1_frozen_v8_hashes", V8_PATH),
+            "icons": load_module("skytv_v1_frozen_icon_hashes", ICON_PATH),
+        }
+        for reference, expected_hash in manifest["functionSha256"].items():
+            module_name, *attributes = reference.split(".")
+            value = modules[module_name]
+            for attribute in attributes:
+                value = getattr(value, attribute)
+            with self.subTest(reference=reference):
+                actual_hash = hashlib.sha256(
+                    inspect.getsource(value).encode("utf-8")
+                ).hexdigest()
+                self.assertEqual(actual_hash, expected_hash)
 
     def test_notebook_preserves_legacy_cells_and_embeds_v8(self) -> None:
         manifest = json.loads((REPO_ROOT / "MATCHER_INTEGRITY.json").read_text(encoding="utf-8"))
