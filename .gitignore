@@ -12,3 +12,7 @@ public/epg/*.xml.gz
 public/reports/
 public/health.json
 public/epg/index.json
+public/EPG/
+public/logos/
+public/index.html
+public/.nojekyll
