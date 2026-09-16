@@ -750,45 +750,124 @@ jobs:
                   raise SystemExit(0)
 
               payload = json.loads(path.read_text(encoding="utf-8"))
-              labels = (
-                  ("inventory_rows", "Channels found at providers"),
-                  ("new_rows", "New channels found"),
-                  ("auto_matched_rows", "New channels safely matched automatically"),
-                  ("auto_match_review_rows", "New channels left for review"),
-                  ("review_recheck_mode", "Existing REVIEW recheck mode"),
-                  ("review_recheck_eligible_rows", "Existing REVIEW channels eligible"),
-                  ("review_recheck_considered_rows", "Existing REVIEW channels checked"),
-                  ("review_recheck_safe_matches", "Existing REVIEW channels safely matched"),
-                  ("review_recheck_still_review_rows", "Existing channels still requiring review"),
-                  ("review_recheck_skipped_rows", "Existing REVIEW channels skipped by safety checks"),
-                  ("review_recheck_deferred_rows", "Safe matches deferred by the write limit"),
-                  ("review_recheck_rows_updated", "Existing REVIEW rows updated in Google Sheet"),
-                  ("ai_review_considered_rows", "Channels considered by Gemini"),
-                  ("ai_review_high_suggestions_found", "Gemini HIGH suggestions found"),
-                  ("ai_review_high_suggestions_persisted", "Gemini HIGH suggestions saved for manual approval"),
-                  ("ai_review_abstained_rows", "Gemini reviews left unresolved"),
-                  ("ai_review_error_rows", "Gemini reviews unavailable or rejected"),
-                  ("cross_server_aliases_registered", "Safe cross-server rules learned this run"),
-                  ("cross_server_alias_groups_rejected", "Unsafe learned-rule groups rejected"),
-                  ("epgshare_catalog_corroboration_mode", "EPG catalog alignment mode"),
-                  ("epgshare_shared_catalog_channels", "EPG IDs confirmed in both catalogs"),
-                  ("epgshare_xml_only_catalog_channels", "XML-only EPG IDs quarantined"),
-                  ("epgshare_text_only_catalog_channels", "Text-only EPG IDs quarantined"),
-                  ("appended_rows", "Rows added to Google Sheet"),
-                  ("changed_rows", "Changed channel details"),
-                  ("possible_id_reuse_rows", "Possible reused stream IDs"),
-                  ("missing_rows", "Previously listed channels not found"),
-                  ("new_sync_alerts", "New alerts found"),
-                  ("sync_alerts_appended", "Alerts added to Sync Alerts tab"),
-                  ("open_sync_alerts", "Open alerts in Google Sheet"),
-                  ("projected_sheet_rows", "Total Sheet rows after this check"),
+              statuses = payload.get("channel_status_by_server")
+              if not isinstance(statuses, dict):
+                  raise SystemExit("Compact channel status is missing from summary.json.")
+
+              def count(stats, key):
+                  value = stats.get(key)
+                  if isinstance(value, bool) or not isinstance(value, int):
+                      raise SystemExit(f"Invalid compact channel count: {key}.")
+                  if value < 0 or value > 250_000:
+                      raise SystemExit(f"Out-of-range compact channel count: {key}.")
+                  return value
+
+              handle.write("| Server | Total channels | EPGShare enabled | Server EPG enabled | To review | Other / placeholder |\n")
+              handle.write("|---|---:|---:|---:|---:|---:|\n")
+              totals = {
+                  "provider_channels": 0,
+                  "epgshare_enabled": 0,
+                  "native_enabled": 0,
+                  "needs_review": 0,
+                  "excluded_or_placeholder": 0,
+              }
+              for server_id in ("server_1", "server_2", "server_3"):
+                  stats = statuses.get(server_id)
+                  if not isinstance(stats, dict):
+                      raise SystemExit(f"Compact status is missing {server_id}.")
+                  available = stats.get("provider_available")
+                  if not isinstance(available, bool):
+                      raise SystemExit(f"Invalid availability status for {server_id}.")
+                  label = server_id.replace("_", " ").title()
+                  if not available:
+                      handle.write(f"| {label} | Unavailable | — | — | — | — |\n")
+                      continue
+                  values = {key: count(stats, key) for key in totals}
+                  if any(value > values["provider_channels"] for value in values.values()):
+                      raise SystemExit(f"Compact counts do not reconcile for {server_id}.")
+                  if (
+                      values["epgshare_enabled"]
+                      + values["native_enabled"]
+                      + values["needs_review"]
+                      + values["excluded_or_placeholder"]
+                      != values["provider_channels"]
+                  ):
+                      raise SystemExit(f"Compact counts do not reconcile for {server_id}.")
+                  for key, value in values.items():
+                      totals[key] += value
+                  handle.write(
+                      f"| {label} | {values['provider_channels']:,} | "
+                      f"{values['epgshare_enabled']:,} | "
+                      f"{values['native_enabled']:,} | "
+                      f"{values['needs_review']:,} | "
+                      f"{values['excluded_or_placeholder']:,} |\n"
+                  )
+              handle.write(
+                  f"| **Total** | **{totals['provider_channels']:,}** | "
+                  f"**{totals['epgshare_enabled']:,}** | "
+                  f"**{totals['native_enabled']:,}** | "
+                  f"**{totals['needs_review']:,}** | "
+                  f"**{totals['excluded_or_placeholder']:,}** |\n"
               )
-              for key, label in labels:
-                  value = payload.get(key, 0)
-                  handle.write(f"- {label}: **{value}**\n")
+              handle.write(
+                  "\n_Enabled means an output-eligible mapping, not proof that "
+                  "programmes exist right now. To review includes missing or "
+                  "unresolved mappings and channels blocked by open safety "
+                  "alerts. Other / placeholder contains dummy-guide and "
+                  "deliberately excluded channels._\n"
+              )
+
+              handle.write("\n### This run\n\n")
+              mode = str(payload.get("review_recheck_mode", "off"))
+              if mode == "dry-run":
+                  handle.write(
+                      "- Smart Rules safe matches found: "
+                      f"**{int(payload.get('review_recheck_safe_matches', 0)):,}** "
+                      "(preview only)\n"
+                  )
+              elif mode == "apply":
+                  handle.write(
+                      "- Smart Rules EPG matches enabled: "
+                      f"**{int(payload.get('review_recheck_safe_matches_persisted', 0)):,}**\n"
+                  )
+              else:
+                  handle.write(
+                      "- New channels safely enabled: "
+                      f"**{int(payload.get('auto_matched_rows', 0)):,}**\n"
+                  )
+              deferred = int(payload.get("review_recheck_deferred_rows", 0))
+              if deferred:
+                  handle.write(
+                      f"- Safe matches waiting for the next apply run: **{deferred:,}**\n"
+                  )
+
+              if bool(payload.get("ai_review_enabled", False)):
+                  found = int(payload.get("ai_review_high_suggestions_found", 0))
+                  saved = int(payload.get("ai_review_high_suggestions_persisted", 0))
+                  unresolved = int(payload.get("ai_review_abstained_rows", 0))
+                  handle.write(
+                      f"- Gemini: **{found:,}** suggestions found; "
+                      f"**{saved:,}** saved for approval; "
+                      f"**{unresolved:,}** unresolved\n"
+                  )
+                  ai_errors = int(payload.get("ai_review_error_rows", 0))
+                  if ai_errors:
+                      handle.write(
+                          f"- Gemini unavailable or rejected: **{ai_errors:,}**\n"
+                      )
+              if int(payload.get("new_rows", 0)):
+                  handle.write(
+                      f"- New channels found: **{int(payload['new_rows']):,}**; "
+                      f"added to Sheet: **{int(payload.get('appended_rows', 0)):,}**\n"
+                  )
+              handle.write(
+                  f"- Safety alerts: **{int(payload.get('new_sync_alerts', 0)):,}** new; "
+                  f"**{int(payload.get('open_sync_alerts', 0)):,}** open\n"
+              )
               failures = payload.get("provider_failures", {})
               failure_count = len(failures) if isinstance(failures, dict) else 0
-              handle.write(f"- Provider checks that failed: **{failure_count}**\n")
+              if failure_count:
+                  handle.write(f"- Provider checks unavailable: **{failure_count}**\n")
           PY
 
       # The repository is public, so Actions artifacts are not used as private
