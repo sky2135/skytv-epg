@@ -1,0 +1,466 @@
+name: 3 - Analyze REVIEW backlog
+run-name: "Read-only backlog analysis #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+
+# This workflow is deliberately advisory. It reads the private Sheet and the
+# three providers, but it cannot update the Sheet, commit, push, deploy, or
+# publish EPG outputs. Its only retained artifact is the count-only report.
+concurrency:
+  group: ${{ github.repository }}-skytv-epg-v1
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONHASHSEED: "0"
+  PYTHONIOENCODING: "utf-8"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_INPUT: "1"
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
+  MALLOC_ARENA_MAX: "2"
+
+  GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID }}
+  GOOGLE_SHEET_TAB: ${{ vars.GOOGLE_SHEET_TAB || 'Mappings' }}
+  ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
+  EPG_ALL_SOURCE_URL: >-
+    https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz
+  EPG_ALL_CATALOG_URL: >-
+    https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.txt
+
+jobs:
+  analyze:
+    name: Classify the REVIEW backlog without writing
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-sync.txt
+
+      - name: Check settings without printing secrets
+        shell: bash
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
+          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
+          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
+          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
+          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from urllib.parse import urlsplit
+
+          def required(name: str) -> str:
+              value = os.environ.get(name, "").strip()
+              if not value:
+                  raise SystemExit(f"Required setting {name} is missing.")
+              return value
+
+          sheet_id = required("GOOGLE_SHEET_ID")
+          if not re.fullmatch(r"[A-Za-z0-9_-]{20,200}", sheet_id):
+              raise SystemExit("GOOGLE_SHEET_ID is not valid.")
+
+          tab = required("GOOGLE_SHEET_TAB")
+          if (
+              len(tab) > 100
+              or any(ord(character) < 32 for character in tab)
+              or any(character in "[]:*?/\\" for character in tab)
+          ):
+              raise SystemExit("GOOGLE_SHEET_TAB is not valid.")
+
+          allow_http = required("ALLOW_INSECURE_PANEL_HTTP").casefold()
+          if allow_http not in {"true", "false"}:
+              raise SystemExit(
+                  "ALLOW_INSECURE_PANEL_HTTP must be true or false."
+              )
+
+          source = urlsplit(required("EPG_ALL_SOURCE_URL"))
+          if (
+              source.scheme != "https"
+              or source.hostname != "epgshare01.online"
+              or source.path
+                  != "/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz"
+              or source.query
+              or source.fragment
+          ):
+              raise SystemExit("Unexpected EPG_ALL_SOURCE_URL.")
+
+          catalog = urlsplit(required("EPG_ALL_CATALOG_URL"))
+          if (
+              catalog.scheme != "https"
+              or catalog.hostname != "epgshare01.online"
+              or catalog.path
+                  != "/epgshare01/epg_ripper_ALL_SOURCES1.txt"
+              or catalog.query
+              or catalog.fragment
+          ):
+              raise SystemExit("Unexpected EPG_ALL_CATALOG_URL.")
+
+          try:
+              service_account = json.loads(
+                  required("GOOGLE_SERVICE_ACCOUNT_JSON")
+              )
+          except json.JSONDecodeError as exc:
+              raise SystemExit(
+                  "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON."
+              ) from exc
+          if service_account.get("type") != "service_account":
+              raise SystemExit(
+                  "GOOGLE_SERVICE_ACCOUNT_JSON is not a service-account key."
+              )
+          for field in ("client_email", "private_key", "token_uri"):
+              value = service_account.get(field)
+              if not isinstance(value, str) or not value.strip():
+                  raise SystemExit(
+                      "GOOGLE_SERVICE_ACCOUNT_JSON is missing a required "
+                      f"field: {field}."
+                  )
+
+          for number in (1, 2, 3):
+              base_name = f"SERVER_{number}_BASE_URL"
+              parsed = urlsplit(required(base_name))
+              if parsed.scheme not in {"https", "http"} or not parsed.hostname:
+                  raise SystemExit(
+                      f"{base_name} must be a complete HTTP or HTTPS URL."
+                  )
+              if parsed.scheme == "http" and allow_http != "true":
+                  raise SystemExit(
+                      f"{base_name} uses HTTP. Set repository variable "
+                      "ALLOW_INSECURE_PANEL_HTTP to true only if the provider "
+                      "does not support HTTPS."
+                  )
+              if (
+                  parsed.username
+                  or parsed.password
+                  or parsed.query
+                  or parsed.fragment
+              ):
+                  raise SystemExit(
+                      f"{base_name} must not contain credentials, a query, "
+                      "or a fragment."
+                  )
+              required(f"SERVER_{number}_USERNAME")
+              required(f"SERVER_{number}_PASSWORD")
+          PY
+
+      - name: Install pinned dependencies
+        shell: bash
+        run: |
+          python -m pip install --only-binary=:all: \
+            -r requirements.txt -r requirements-sync.txt
+          python -m pip check
+
+      - name: Test the analyzer and frozen matcher boundary
+        shell: bash
+        run: |
+          python -m unittest \
+            tests.test_backlog_analyzer \
+            tests.test_matcher_regression \
+            -v
+
+      - name: Download the exact EPGShare guide and official ID catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/skytv-epg-v1"
+          mkdir -p "$source_dir"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from scripts import build_epg_streaming as streaming
+          from scripts import epg_catalog_stream as catalog_stream
+
+          destination = (
+              Path(os.environ["RUNNER_TEMP"])
+              / "skytv-epg-v1"
+              / "epg_ripper_ALL_SOURCES1.xml.gz"
+          )
+          streaming.safe_download(
+              os.environ["EPG_ALL_SOURCE_URL"],
+              destination,
+              maximum_bytes=streaming.MAX_SOURCE_COMPRESSED_BYTES,
+              expected_gzip=True,
+              allowed_host_suffixes=("epgshare01.online",),
+          )
+          catalog_destination = (
+              Path(os.environ["RUNNER_TEMP"])
+              / "skytv-epg-v1"
+              / "epg_ripper_ALL_SOURCES1.txt"
+          )
+          streaming.safe_download(
+              os.environ["EPG_ALL_CATALOG_URL"],
+              catalog_destination,
+              maximum_bytes=catalog_stream.MAX_CATALOG_TEXT_BYTES,
+              expected_gzip=False,
+              allowed_host_suffixes=("epgshare01.online",),
+          )
+          PY
+
+      - name: Mint a short-lived read-only Google Sheets token
+        id: google_readonly
+        shell: bash
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from google.auth.transport.requests import Request
+          from google.oauth2 import service_account
+
+          try:
+              account = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+              credentials = service_account.Credentials.from_service_account_info(
+                  account,
+                  scopes=[
+                      "https://www.googleapis.com/auth/spreadsheets.readonly"
+                  ],
+              )
+              credentials.refresh(Request())
+              token = str(credentials.token or "").strip()
+          except Exception:
+              raise SystemExit(
+                  "Could not create the short-lived read-only Google token."
+              ) from None
+          if (
+              not 20 <= len(token) <= 4096
+              or any(character.isspace() for character in token)
+              or any(ord(character) < 33 or ord(character) > 126 for character in token)
+          ):
+              raise SystemExit("The short-lived read-only Google token is invalid.")
+          print(f"::add-mask::{token}")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
+              handle.write(f"token={token}\n")
+          PY
+
+      - name: Analyze the private REVIEW backlog without writing
+        shell: bash
+        env:
+          # The analyzer never receives the service-account private key. This
+          # short-lived token is restricted by Google to read-only Sheets calls.
+          GOOGLE_SHEETS_READONLY_TOKEN: ${{ steps.google_readonly.outputs.token }}
+          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
+          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
+          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
+          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
+          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p .build/backlog-analysis
+          private_work_dir="$RUNNER_TEMP/skytv-backlog-private"
+          mkdir -p "$private_work_dir"
+
+          command=(
+            python -u scripts/analyze_review_backlog.py
+              --sheet-id "$GOOGLE_SHEET_ID"
+              --sheet-tab "$GOOGLE_SHEET_TAB"
+              --output-dir .build/backlog-analysis
+              --private-work-dir "$private_work_dir"
+              --all-source-file
+                "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz"
+              --all-source-catalog-file
+                "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt"
+              --minimum-server-channels
+                server_1=4000
+                server_2=10500
+                server_3=9400
+          )
+
+          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
+            command+=(--allow-insecure-http)
+            echo "::warning::Provider credentials may be sent over unencrypted HTTP."
+          fi
+
+          "${command[@]}"
+
+      - name: Validate the aggregate-only public summary
+        id: aggregate_validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          from scripts.analyze_review_backlog import (
+              validate_public_summary_file,
+          )
+
+          output_dir = Path(".build/backlog-analysis")
+          summary_path = output_dir / "summary.json"
+          if (
+              not output_dir.is_dir()
+              or output_dir.is_symlink()
+              or not summary_path.is_file()
+              or summary_path.is_symlink()
+          ):
+              raise SystemExit(
+                  "The aggregate backlog summary is missing or unsafe."
+              )
+          files = sorted(
+              path.relative_to(output_dir).as_posix()
+              for path in output_dir.rglob("*")
+              if path.is_file() or path.is_symlink()
+          )
+          if files != ["summary.json"]:
+              raise SystemExit(
+                  "The public backlog output contains an unexpected file."
+              )
+          if summary_path.stat().st_size > 64 * 1024:
+              raise SystemExit("The aggregate backlog summary is too large.")
+          validate_public_summary_file(summary_path)
+          print("Aggregate-only backlog summary validation passed.")
+          PY
+
+      - name: Add read-only backlog summary
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from scripts.analyze_review_backlog import (
+              validate_public_summary_file,
+          )
+
+          path = Path(".build/backlog-analysis/summary.json")
+          validate_public_summary_file(path)
+          payload = json.loads(path.read_text(encoding="utf-8"))
+          totals = payload["totals"]
+          servers = payload["servers"]
+
+          def count(container: dict, key: str) -> str:
+              return f"{container[key]:,}"
+
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open(
+              "a", encoding="utf-8"
+          ) as handle:
+              handle.write("### REVIEW backlog analysis (read-only)\n\n")
+              handle.write(
+                  "| Server | Provider channels | To review | Review clusters | "
+                  "Safety blocked | Not eligible | Analysis eligible | "
+                  "Smart Rules eligible |\n"
+              )
+              handle.write("|---|---:|---:|---:|---:|---:|---:|---:|\n")
+              for server_id in ("server_1", "server_2", "server_3"):
+                  stats = servers[server_id]
+                  label = server_id.replace("_", " ").title()
+                  handle.write(
+                      f"| {label} | {count(stats, 'provider_channels')} | "
+                      f"{count(stats, 'review_rows')} | "
+                      f"{count(stats, 'review_clusters')} | "
+                      f"{count(stats, 'safety_blocked')} | "
+                      f"{count(stats, 'not_eligible')} | "
+                      f"{count(stats, 'analysis_eligible')} | "
+                      f"{count(stats, 'matcher_eligible')} |\n"
+                  )
+              handle.write(
+                  f"| **Total** | **{count(totals, 'provider_channels')}** | "
+                  f"**{count(totals, 'review_rows')}** | "
+                  f"**{count(totals, 'review_clusters')}** | "
+                  f"**{count(totals, 'safety_blocked')}** | "
+                  f"**{count(totals, 'not_eligible')}** | "
+                  f"**{count(totals, 'analysis_eligible')}** | "
+                  f"**{count(totals, 'matcher_eligible')}** |\n"
+              )
+
+              handle.write("\n### Automation analysis\n\n")
+              handle.write(
+                  "| Server | Native source | Native candidates | "
+                  "Native verified | EPGShare strict | Verified placeholder | "
+                  "No verified candidate |\n"
+              )
+              handle.write("|---|---|---:|---:|---:|---:|---:|\n")
+              for server_id in ("server_1", "server_2", "server_3"):
+                  stats = servers[server_id]
+                  label = server_id.replace("_", " ").title()
+                  handle.write(
+                      f"| {label} | {stats['native_source_status']} | "
+                      f"{count(stats, 'native_candidates')} | "
+                      f"{count(stats, 'native_verified')} | "
+                      f"{count(stats, 'strict_epgshare')} | "
+                      f"{count(stats, 'verified_placeholder')} | "
+                      f"{count(stats, 'no_verified_candidate')} |\n"
+                  )
+              handle.write(
+                  f"| **Total** | — | **{count(totals, 'native_candidates')}** | "
+                  f"**{count(totals, 'native_verified')}** | "
+                  f"**{count(totals, 'strict_epgshare')}** | "
+                  f"**{count(totals, 'verified_placeholder')}** | "
+                  f"**{count(totals, 'no_verified_candidate')}** |\n"
+              )
+
+              handle.write("\n### Catalog checks\n\n")
+              catalog = payload["catalog"]
+              handle.write(
+                  f"- EPG IDs confirmed in both catalogs: "
+                  f"**{count(catalog, 'confirmed_ids')}**\n"
+              )
+              handle.write(
+                  f"- XML-only IDs quarantined: "
+                  f"**{count(catalog, 'xml_only_ids')}**\n"
+              )
+              handle.write(
+                  f"- Text-only IDs quarantined: "
+                  f"**{count(catalog, 'text_only_ids')}**\n"
+              )
+              handle.write(
+                  "\n_This workflow only measures the backlog. It does not "
+                  "change the Google Sheet or any channel mapping. Each row is "
+                  "shown in one mutually exclusive lane by safety precedence. "
+                  "Not-eligible rows were not analyzed for application because "
+                  "Workflow 1's safety gate excludes them. "
+                  "Only EPGShare strict is already eligible for Workflow 1's "
+                  "current automatic approval; native and placeholder counts "
+                  "are advisory candidates for the later writer. Review "
+                  "clusters are server-local. Cross-provider reuse remains "
+                  "inside the sealed Smart Rules human-approved alias memory "
+                  "and must still pass exact catalog and programme validation._\n"
+              )
+          PY
+
+      - name: Retain aggregate backlog summary
+        if: ${{ success() && steps.aggregate_validation.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skytv-backlog-analysis-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/backlog-analysis/summary.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
