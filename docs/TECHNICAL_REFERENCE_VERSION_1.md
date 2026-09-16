@@ -233,11 +233,34 @@ Smart Rules run first against the same corroborated EPGShare catalog and
 same-snapshot programme gate used for new rows. `dry-run` does not write any
 existing `REVIEW` row. The separate new-channel append control remains
 independent, so operators should leave it off for a completely read-only
-preview. `apply` updates at most 100 verified Smart Rules matches per run;
+preview. `apply` updates at most 1,000 verified matches per run;
 additional verified rows are reported as deferred for a later run. An
 accepted row becomes `enabled=TRUE`, `action=AUTO_EPGSHARE`,
 `source=epgshare01`, and `epg_feed=ALL_SOURCES1` with its exact verified ID.
 Server 1 has no panel exception.
+
+For Server 2 and Server 3 rechecks, Workflow 1 also runs a separate native-EPG
+lane automatically. It first uses the current API `epg_channel_id`. When that
+field is blank, it may recover only the M3U `tvg-id` joined by the same numeric
+stream ID and the same Unicode-normalized provider name. The API inventory
+continues to own channel identity, name, and category. An API/M3U ID conflict,
+trimmed native ID, duplicate M3U attribute, conflicting `tvg-id`/`epg-id`
+alias, non-numeric join, name mismatch, manual edit, incomplete discovery note,
+provider drift, or `OPEN` alert leaves the row disabled.
+
+A native candidate is not enabled merely because its ID exists. The complete
+current panel XMLTV must contain that exact case-unique ID, an unambiguous
+compatible `<display-name>`, and at least two informative programme intervals
+starting within six hours and extending at least six hours beyond the check
+time. Display-name uniqueness is checked against the complete native catalog,
+not only the requested IDs. Immediately before a Sheet write, the provider API
+and M3U are fetched again; a changed, conflicting, or unavailable identity is
+removed from the write set. Only then may the guarded writer create an enabled
+`KEEP_PANEL` row. The
+writer accepts `KEEP_PANEL` only from the exact in-memory verified allowlist;
+the same 1,000-row deterministic cap, Sheet fingerprint, alert rereads, atomic
+update, post-write verification, and terminal snapshot checks still apply.
+Server 1 never enters this lane and its native XMLTV is never downloaded.
 
 Optional Gemini review occurs only after Smart Rules and is capped at 50
 unresolved rows per run. No fuzzy shortlist work runs when Gemini is off. When
@@ -565,8 +588,13 @@ provider-total subtraction:
 | Existing REVIEW channels safely matched | `review_recheck_safe_matches` | Rows that passed the deterministic matcher and programme gate. |
 | Existing channels still requiring review | `review_recheck_still_review_rows` | Checked rows that Smart Rules did not verify. |
 | Existing REVIEW channels skipped by safety checks | `review_recheck_skipped_rows` | Disabled REVIEW rows in the selected scope excluded because they were missing, drifted, alerted, or held an untracked manual candidate. |
-| Safe matches deferred by the write limit | `review_recheck_deferred_rows` | Verified rows held for a later run by the 100-row apply cap. |
+| Safe matches deferred by the write limit | `review_recheck_deferred_rows` | Verified rows held for a later run by the 1,000-row apply cap. |
 | Existing REVIEW rows updated in Google Sheet | `review_recheck_rows_updated` | Exact existing-row updates confirmed by the post-write reread. |
+| Native EPG candidates found | `native_review_candidates` | Eligible Server 2/3 rows with a fresh non-conflicting provider/M3U native ID. |
+| Native EPG matches verified | `native_review_verified` | Candidates that also passed exact XMLTV ID, display-name uniqueness, and current-programme gates. |
+| Native EPG matches persisted | `native_review_persisted` | Verified `KEEP_PANEL` updates confirmed after an apply write. This remains zero in dry-run. |
+| Native EPG matches deferred | `native_review_deferred` | Verified native rows held for the next apply run by the shared 1,000-row deterministic cap. |
+| Native EPG sources unavailable | `native_review_source_unavailable` | Server 2/3 native XMLTV sources that could not be safely validated; their rows remain REVIEW. |
 | Channels considered by Gemini | `ai_review_considered_rows` | Unresolved rows included in bounded Gemini review. |
 | Gemini HIGH suggestions found | `ai_review_high_suggestions_found` | Schema-valid `HIGH` suggestions backed by a supplied, locally verified candidate; in dry-run these are findings only. |
 | Gemini HIGH suggestions saved for manual approval | `ai_review_high_suggestions_persisted` | `HIGH` suggestions confirmed in the Sheet after an apply write while still disabled in `REVIEW`. |
@@ -655,7 +683,8 @@ happens to look like an EPGShare ID. Provider and EPGShare identifiers are
 different namespaces and are never treated as interchangeable.
 
 Servers 2 and 3 may use EPGShare or their native panel XMLTV row by row. Panel
-guides are downloaded only when an eligible mapping actually requests them.
+guides are downloaded when an eligible mapping requests them or when an
+explicit REVIEW recheck has current native-ID candidates to validate.
 
 ## GitHub configuration
 
@@ -836,7 +865,7 @@ hashes are checked before deployment.
   guide are activated automatically. All fuzzy, ambiguous, adult, dummy,
   generic-numbered, or weak-guide matches require human review.
 - Existing `REVIEW` rows are retried only through the manual Workflow 1
-  recheck. One apply run activates at most 100 verified Smart Rules matches;
+  recheck. One apply run activates at most 1,000 verified matches;
   reruns continue a larger backlog. Gemini inspects at most 50 unresolved rows
   and never activates them.
 - Provider channel totals, published-output totals, and EPG-covered totals do

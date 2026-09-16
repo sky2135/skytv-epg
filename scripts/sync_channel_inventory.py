@@ -29,7 +29,9 @@ import math
 import os
 import re
 import sys
+import tempfile
 import time
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -48,6 +50,11 @@ import build_epg_streaming as streaming  # noqa: E402
 import auto_match_inventory as automatch  # noqa: E402
 import ai_review_gemini as gemini_review  # noqa: E402
 
+try:  # Optional unless the explicit native REVIEW lane is enabled.
+    import native_epg_review as native_review  # type: ignore[import-not-found]  # noqa: E402
+except ImportError:  # pragma: no cover - exercised through the controlled gate.
+    native_review = None
+
 
 SYNC_VERSION = "1.1"
 DEFAULT_SERVERS = ("server_1", "server_2", "server_3")
@@ -58,11 +65,21 @@ MAX_SHEET_BYTES = 80 * 1024 * 1024
 MAX_GOOGLE_MAPPING_ROWS = 150_000
 MAX_SYNC_ALERT_ROWS = 10_000
 MAX_SYNC_ALERT_BYTES = 8 * 1024 * 1024
-MAX_RECHECK_CANDIDATES = 20_000
-MAX_RECHECK_APPLIES_PER_RUN = 100
+# The current three-server backlog is roughly 25,000 eligible rows.  Keep a
+# hard memory/CPU bound while allowing the workflow's explicit ``all`` scope
+# to analyze that backlog in one pass.
+MAX_RECHECK_CANDIDATES = 30_000
+# One atomic Google batch can safely carry roughly one thousand normal REVIEW
+# patches under the independent 2 MiB encoded-request ceiling. This keeps a
+# large verified backlog automated without removing the hard payload guard.
+MAX_RECHECK_APPLIES_PER_RUN = 1_000
 MAX_AI_REVIEW_ROWS = 50
 MAX_RECHECK_TOTAL_UPDATES = MAX_RECHECK_APPLIES_PER_RUN + MAX_AI_REVIEW_ROWS
 MAX_RECHECK_UPDATE_REQUEST_BYTES = 2 * 1024 * 1024
+# Reserve ample space for up to 50 advisory AI patches and for the real Sheet
+# and row indexes. Selection estimates each deterministic patch with worst-case
+# index widths; the writer still enforces the exact 2 MiB serialized ceiling.
+MAX_RECHECK_DETERMINISTIC_REQUEST_BYTES = 1_500_000
 REVIEW_QUEUE_ACTIONS = frozenset({"REVIEW", "UNMATCHED", "NO_EPG", "UNRESOLVED"})
 RECHECK_PATCH_COLUMNS = (
     "enabled",
@@ -457,6 +474,29 @@ def normalize_stream_row(
                 "inventory sync stopped rather than silently dropping it."
             )
         return None
+    epg_id_keys = (
+        "epg_channel_id",
+        "epgChannelId",
+        "epg_id",
+        "epgId",
+        "tvg_id",
+        "tvg-id",
+    )
+    raw_epg_values = [
+        str(item.get(key))
+        for key in epg_id_keys
+        if key in item
+        and item.get(key) is not None
+        and str(item.get(key)).strip()
+    ]
+    raw_epg_channel_id = first_present(item, epg_id_keys)
+    raw_epg_channel_id_text = str(raw_epg_channel_id or "")
+    conflicting_epg_aliases = len(set(raw_epg_values)) > 1
+    epg_channel_id = (
+        ""
+        if conflicting_epg_aliases
+        else streaming.clean_identifier(raw_epg_channel_id_text, 300)
+    )
     return {
         "stream_id": stream_id_text,
         "name": name_text,
@@ -471,20 +511,14 @@ def normalize_stream_row(
             ),
             200,
         ),
-        "epg_channel_id": streaming.clean_identifier(
-            first_present(
-                item,
-                (
-                    "epg_channel_id",
-                    "epgChannelId",
-                    "epg_id",
-                    "epgId",
-                    "tvg_id",
-                    "tvg-id",
-                ),
-            ),
-            300,
+        "epg_channel_id": epg_channel_id,
+        # Private integrity marker: native auto-approval may use the ID only
+        # when ingestion did not trim, clean, or truncate the provider value.
+        "_native_epg_id_exact": (
+            not conflicting_epg_aliases
+            and raw_epg_channel_id_text == epg_channel_id
         ),
+        "_native_epg_id_raw_present": bool(raw_epg_channel_id_text),
         "num": streaming.clean_text(
             first_present(
                 item,
@@ -686,7 +720,15 @@ def m3u_attributes(metadata: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for match in M3U_ATTRIBUTE_RE.finditer(metadata):
         value = next((group for group in match.groups()[1:] if group is not None), "")
-        result[match.group(1).casefold()] = value.strip()
+        key = match.group(1).casefold()
+        if key in result:
+            raise SyncError(
+                "An authenticated M3U entry contains a duplicate attribute."
+            )
+        # Preserve the quoted bytes as decoded text. Downstream display fields
+        # clean their own values, while native EPG IDs must retain evidence of
+        # any trimming/normalization so they can fail closed.
+        result[key] = value
     return result
 
 
@@ -951,8 +993,18 @@ def parse_xtream_m3u(
         categories.setdefault(
             category_id, {"category_id": category_id, "category_name": group}
         )
-        tvg_id = streaming.clean_identifier(
-            attributes.get("tvg-id") or attributes.get("epg-id") or "", 300
+        raw_tvg_attribute = str(attributes.get("tvg-id") or "")
+        raw_epg_attribute = str(attributes.get("epg-id") or "")
+        conflicting_id_aliases = bool(
+            raw_tvg_attribute
+            and raw_epg_attribute
+            and raw_tvg_attribute != raw_epg_attribute
+        )
+        raw_tvg_id = raw_tvg_attribute or raw_epg_attribute
+        tvg_id = (
+            ""
+            if conflicting_id_aliases
+            else streaming.clean_identifier(raw_tvg_id, 300)
         )
         stream_id = m3u_stream_id(
             line,
@@ -973,6 +1025,10 @@ def parse_xtream_m3u(
                 "category_id": category_id,
                 "category_name": group,
                 "epg_channel_id": tvg_id,
+                "_native_epg_id_exact": (
+                    not conflicting_id_aliases and raw_tvg_id == tvg_id
+                ),
+                "_native_epg_id_raw_present": bool(raw_tvg_id),
                 "num": streaming.clean_text(
                     attributes.get("tvg-chno")
                     or attributes.get("channel-number")
@@ -1432,6 +1488,11 @@ QUALITY_SUFFIX_RE = re.compile(
     r"h\.?26[45]|hevc|backup|raw))+$",
     flags=re.IGNORECASE,
 )
+AUTO_DISCOVERY_PROVENANCE_RE = re.compile(
+    r"Automatically discovered "
+    r"(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z); "
+    r"existing Sheet rows were not changed\."
+)
 
 
 def comparison_name_key(value: object) -> str:
@@ -1439,6 +1500,328 @@ def comparison_name_key(value: object) -> str:
     text = streaming.clean_identifier(value, 300)
     text = QUALITY_SUFFIX_RE.sub("", text).strip()
     return " ".join(text.casefold().split())
+
+
+def exact_inventory_name_key(value: object) -> str:
+    """Normalize Unicode, case and whitespace without discarding name tokens."""
+
+    text = unicodedata.normalize(
+        "NFKC", streaming.clean_identifier(value, 300)
+    ).casefold()
+    return " ".join(text.split())
+
+
+def has_exact_auto_discovery_provenance(value: object) -> bool:
+    notes = streaming.clean_text(value, 2000)
+    matched = AUTO_DISCOVERY_PROVENANCE_RE.fullmatch(notes)
+    if matched is None:
+        return False
+    try:
+        parsed = datetime.fromisoformat(
+            matched.group("timestamp").replace("Z", "+00:00")
+        )
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(parsed)
+
+
+def enrich_review_inventories_from_m3u(
+    session: Any,
+    inventories: Sequence[PanelInventory],
+    server_configs: Sequence[ServerConfig],
+    *,
+    selected_servers: Iterable[str],
+    allow_insecure_http: bool,
+) -> tuple[list[PanelInventory], dict[str, int]]:
+    """Add only corroborated M3U EPG IDs to private REVIEW-mode copies.
+
+    Xtream's otherwise-authoritative ``get_live_streams`` response commonly
+    omits ``epg_channel_id``.  The authenticated M3U is therefore consulted as
+    a narrow secondary attribute source.  It can never replace API identity,
+    name, category, ordering, or availability: an ID is copied only after an
+    exact numeric stream-ID join and the same normalized channel name.
+    """
+
+    allowed_servers = {
+        streaming.normalize_server_id(value) for value in selected_servers
+    }.intersection({"server_2", "server_3"})
+    configs = {config.server_id: config for config in server_configs}
+    stats = {
+        "native_review_provider_ids_present": 0,
+        "native_review_m3u_servers_attempted": 0,
+        "native_review_m3u_servers_available": 0,
+        "native_review_m3u_ids_recovered": 0,
+        "native_review_m3u_ids_corroborated": 0,
+        "native_review_m3u_id_conflicts": 0,
+        "native_review_m3u_name_mismatches": 0,
+        "native_review_m3u_missing_rows": 0,
+        "native_review_invalid_provider_ids": 0,
+    }
+    enriched: list[PanelInventory] = []
+    for inventory in inventories:
+        copied = PanelInventory(
+            server_id=inventory.server_id,
+            server_label=inventory.server_label,
+            categories=[dict(row) for row in inventory.categories],
+            channels=[dict(row) for row in inventory.channels],
+            source=inventory.source,
+            diagnostics=list(inventory.diagnostics),
+        )
+        config = configs.get(inventory.server_id)
+        if inventory.server_id in allowed_servers:
+            for channel in copied.channels:
+                if (
+                    channel.get(
+                        "_native_epg_id_raw_present",
+                        bool(
+                            streaming.clean_identifier(
+                                channel.get("epg_channel_id", ""), 300
+                            )
+                        ),
+                    )
+                    and channel.get("_native_epg_id_exact", True) is not True
+                ):
+                    channel["epg_channel_id"] = ""
+                    channel["_native_epg_id_conflict"] = True
+                    stats["native_review_invalid_provider_ids"] += 1
+        if (
+            inventory.server_id not in allowed_servers
+            or inventory.source != "player_api"
+            or config is None
+        ):
+            enriched.append(copied)
+            continue
+
+        stats["native_review_m3u_servers_attempted"] += 1
+        diagnostics: list[str] = []
+        try:
+            m3u_inventory = fetch_m3u_inventory(
+                session,
+                config,
+                panel_base_candidates(
+                    config.base_url, allow_insecure_http=allow_insecure_http
+                ),
+                diagnostics,
+                allow_insecure_http=allow_insecure_http,
+            )
+        except SyncError:
+            m3u_inventory = None
+        if m3u_inventory is None:
+            copied.diagnostics.append(
+                "Authenticated M3U EPG-ID enrichment was unavailable."
+            )
+            enriched.append(copied)
+            continue
+        validate_provider_inventory_secret_safe(
+            m3u_inventory.categories,
+            m3u_inventory.channels,
+            provider_reflection_needles(
+                config,
+                panel_base_candidates(
+                    config.base_url, allow_insecure_http=allow_insecure_http
+                ),
+            ),
+        )
+        stats["native_review_m3u_servers_available"] += 1
+        m3u_by_stream: dict[str, Mapping[str, Any]] = {}
+        for channel in m3u_inventory.channels:
+            stream_id = streaming.clean_identifier(
+                channel.get("stream_id", ""), 120
+            )
+            if re.fullmatch(r"[0-9]+", stream_id):
+                m3u_by_stream[stream_id] = channel
+
+        for channel in copied.channels:
+            stream_id = streaming.clean_identifier(
+                channel.get("stream_id", ""), 120
+            )
+            if not re.fullmatch(r"[0-9]+", stream_id):
+                continue
+            m3u_channel = m3u_by_stream.get(stream_id)
+            if m3u_channel is None:
+                stats["native_review_m3u_missing_rows"] += 1
+                continue
+            if channel.get("_native_epg_id_conflict") is True:
+                continue
+            if exact_inventory_name_key(
+                channel.get("name", "")
+            ) != exact_inventory_name_key(m3u_channel.get("name", "")):
+                # A same-ID M3U row describing another channel is fresh,
+                # contradictory identity evidence.  Do not auto-approve even
+                # when the API supplied a native ID of its own.
+                if streaming.clean_identifier(
+                    channel.get("epg_channel_id", ""), 300
+                ):
+                    channel["epg_channel_id"] = ""
+                stats["native_review_m3u_name_mismatches"] += 1
+                continue
+            m3u_epg_id = streaming.clean_identifier(
+                m3u_channel.get("epg_channel_id", ""), 300
+            )
+            if (
+                m3u_channel.get(
+                    "_native_epg_id_raw_present", bool(m3u_epg_id)
+                )
+                and m3u_channel.get("_native_epg_id_exact", True) is not True
+            ):
+                channel["epg_channel_id"] = ""
+                channel["_native_epg_id_conflict"] = True
+                stats["native_review_invalid_provider_ids"] += 1
+                continue
+            if not m3u_epg_id:
+                continue
+            api_epg_id = streaming.clean_identifier(
+                channel.get("epg_channel_id", ""), 300
+            )
+            if not api_epg_id:
+                channel["epg_channel_id"] = m3u_epg_id
+                stats["native_review_m3u_ids_recovered"] += 1
+            elif api_epg_id == m3u_epg_id:
+                stats["native_review_m3u_ids_corroborated"] += 1
+            else:
+                # Contradictory fresh provider evidence is never eligible for
+                # unattended approval, even though API name/category identity
+                # remains authoritative for ordinary inventory reporting.
+                channel["epg_channel_id"] = ""
+                stats["native_review_m3u_id_conflicts"] += 1
+        copied.diagnostics.append(
+            "Authenticated M3U was used only for exact REVIEW EPG-ID hints."
+        )
+        enriched.append(copied)
+    stats["native_review_provider_ids_present"] = sum(
+        1
+        for inventory in enriched
+        if inventory.server_id in allowed_servers
+        for channel in inventory.channels
+        if streaming.clean_identifier(channel.get("epg_channel_id", ""), 300)
+    )
+    return enriched, stats
+
+
+def revalidate_native_review_updates(
+    updates: Sequence[Mapping[str, str]],
+    proposal_inventories: Sequence[PanelInventory],
+    server_configs: Sequence[ServerConfig],
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Refetch exact native target identities immediately before a Sheet write."""
+
+    stats = {
+        "native_review_revalidation_checked": len(updates),
+        "native_review_revalidation_rejected": 0,
+        "native_review_revalidation_unavailable": 0,
+    }
+    if not updates:
+        return [], stats
+    expected_channels: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for inventory in proposal_inventories:
+        server_id = streaming.normalize_server_id(inventory.server_id)
+        for channel in inventory.channels:
+            key = (
+                server_id,
+                streaming.clean_identifier(channel.get("stream_id", ""), 120),
+            )
+            if key in expected_channels:
+                raise SyncError("Provider inventories contain a duplicate stream identity.")
+            expected_channels[key] = channel
+
+    updates_by_server: dict[str, list[dict[str, str]]] = {
+        "server_2": [],
+        "server_3": [],
+    }
+    for raw in updates:
+        row = {column: str(raw.get(column, "")) for column in streaming.SHEET_COLUMNS}
+        key = _row_identity(row)
+        if key[0] not in updates_by_server or key not in expected_channels:
+            stats["native_review_revalidation_rejected"] += 1
+            continue
+        updates_by_server[key[0]].append(row)
+
+    configs = {config.server_id: config for config in server_configs}
+    allow_insecure_http = (
+        str(os.environ.get("ALLOW_INSECURE_PANEL_HTTP", "")).strip().casefold()
+        in streaming.TRUE_VALUES
+    )
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": f"SKYTV-Channel-Inventory/{SYNC_VERSION}",
+            "Accept": "application/json,text/plain,application/x-mpegURL,*/*",
+        }
+    )
+    verified: list[dict[str, str]] = []
+    try:
+        for server_id in ("server_2", "server_3"):
+            server_updates = updates_by_server[server_id]
+            if not server_updates:
+                continue
+            config = configs.get(server_id)
+            if config is None:
+                stats["native_review_revalidation_unavailable"] += len(
+                    server_updates
+                )
+                continue
+            try:
+                current_inventory = fetch_panel_inventory(
+                    session,
+                    config,
+                    allow_insecure_http=allow_insecure_http,
+                )
+                enriched, _m3u_stats = enrich_review_inventories_from_m3u(
+                    session,
+                    [current_inventory],
+                    [config],
+                    selected_servers={server_id},
+                    allow_insecure_http=allow_insecure_http,
+                )
+            except SyncError:
+                stats["native_review_revalidation_unavailable"] += len(
+                    server_updates
+                )
+                continue
+            current_by_key = {
+                (
+                    server_id,
+                    streaming.clean_identifier(channel.get("stream_id", ""), 120),
+                ): channel
+                for channel in enriched[0].channels
+            }
+            for row in server_updates:
+                key = _row_identity(row)
+                expected = expected_channels[key]
+                current = current_by_key.get(key)
+                if current is None:
+                    stats["native_review_revalidation_rejected"] += 1
+                    continue
+                expected_tuple = (
+                    streaming.clean_identifier(expected.get("name", ""), 300),
+                    streaming.clean_identifier(expected.get("category_id", ""), 120),
+                    streaming.clean_text(expected.get("category_name", ""), 200),
+                    streaming.clean_identifier(expected.get("epg_channel_id", ""), 300),
+                )
+                current_tuple = (
+                    streaming.clean_identifier(current.get("name", ""), 300),
+                    streaming.clean_identifier(current.get("category_id", ""), 120),
+                    streaming.clean_text(current.get("category_name", ""), 200),
+                    streaming.clean_identifier(current.get("epg_channel_id", ""), 300),
+                )
+                if (
+                    expected_tuple != current_tuple
+                    or current_tuple[3]
+                    != streaming.clean_identifier(row.get("epg_id", ""), 300)
+                    or current.get("_native_epg_id_conflict") is True
+                    or current.get("_native_epg_id_exact", True) is not True
+                ):
+                    stats["native_review_revalidation_rejected"] += 1
+                    continue
+                verified.append(row)
+    finally:
+        session.close()
+    verified.sort(
+        key=lambda row: (
+            row["server_id"], streaming.stream_sort_key(row["stream_id"])
+        )
+    )
+    return verified, stats
 
 
 NAME_NOISE_TOKENS = frozenset(
@@ -1618,6 +2001,14 @@ def select_review_recheck_rows(
         for inventory in inventories
         for channel in inventory.channels
     }
+    current_native_ids = {
+        (
+            streaming.normalize_server_id(inventory.server_id),
+            streaming.clean_identifier(channel.get("stream_id", ""), 120),
+        ): streaming.clean_identifier(channel.get("epg_channel_id", ""), 300)
+        for inventory in inventories
+        for channel in inventory.channels
+    }
     blocked_alerts = frozenset(quarantined_keys)
     changed_keys = {
         (
@@ -1676,9 +2067,23 @@ def select_review_recheck_rows(
         epg_id = streaming.clean_identifier(row.get("epg_id", ""), 300)
         notes = streaming.clean_text(row.get("notes", ""), 2000).casefold()
         source = streaming.clean_text(row.get("source", ""), 40).casefold()
+        feed = streaming.clean_text(row.get("epg_feed", ""), 80).casefold()
         provenance_known = "auto-map-v1" in notes or "ai-review-v1" in notes
         legacy_server1_panel = server_id == "server_1" and source == "panel"
-        if epg_id and not provenance_known and not legacy_server1_panel:
+        exact_current_native_id = (
+            server_id in {"server_2", "server_3"}
+            and bool(current_native_ids.get(key))
+            and epg_id == current_native_ids[key]
+            and source == "panel"
+            and feed in {"panel", "server xmltv.php"}
+            and has_exact_auto_discovery_provenance(row.get("notes", ""))
+        )
+        if (
+            epg_id
+            and not provenance_known
+            and not legacy_server1_panel
+            and not exact_current_native_id
+        ):
             stats["review_recheck_excluded_manual_candidate"] += 1
             continue
         selected.append(dict(row))
@@ -3526,7 +3931,12 @@ def _mapping_rows_by_key(
 
 
 def _validate_review_update(
-    before: Mapping[str, str], after: Mapping[str, str]
+    before: Mapping[str, str],
+    after: Mapping[str, str],
+    *,
+    verified_native_updates: Mapping[
+        tuple[str, str], Mapping[str, str]
+    ] | None = None,
 ) -> None:
     changed = {
         header
@@ -3554,9 +3964,35 @@ def _validate_review_update(
     source = streaming.clean_text(after.get("source", ""), 40).casefold()
     feed = streaming.clean_text(after.get("epg_feed", ""), 80).upper()
     epg_id = streaming.clean_identifier(after.get("epg_id", ""), 300)
+    key = (
+        server_id,
+        streaming.clean_identifier(before.get("stream_id", ""), 120),
+    )
+    is_verified_native = False
     if after_action == "AUTO_EPGSHARE":
         if not after_enabled:
             raise SyncError("A verified Smart-Rules approval must be enabled.")
+    elif after_action == "KEEP_PANEL":
+        expected_native = (verified_native_updates or {}).get(key)
+        if expected_native is None or any(
+            str(expected_native.get(header, "")) != str(after.get(header, ""))
+            for header in streaming.SHEET_COLUMNS
+        ):
+            raise SyncError(
+                "A native REVIEW approval lacks its exact verified allowlist entry."
+            )
+        if (
+            server_id not in {"server_2", "server_3"}
+            or not after_enabled
+            or source != "panel"
+            or feed != "PANEL"
+            or not epg_id
+            or "native-review-v1" not in streaming.clean_text(
+                after.get("notes", ""), 2000
+            ).casefold()
+        ):
+            raise SyncError("A native REVIEW approval violates the panel policy.")
+        is_verified_native = True
     elif after_action == "REVIEW":
         if after_enabled:
             raise SyncError("An AI suggestion must remain disabled in REVIEW.")
@@ -3575,7 +4011,11 @@ def _validate_review_update(
             for column in ("source", "epg_feed", "epg_id")
         )
     )
-    if not has_exact_ai_target and not is_ai_abstention_marker:
+    if (
+        not is_verified_native
+        and not has_exact_ai_target
+        and not is_ai_abstention_marker
+    ):
         raise SyncError(
             "A REVIEW update requires an exact EPGShare target or a bounded "
             "Gemini abstention marker."
@@ -3625,6 +4065,50 @@ def _review_update_requests(
     return requests_body
 
 
+def _bounded_deterministic_review_updates(
+    epgshare_updates: Sequence[dict[str, str]],
+    native_updates: Sequence[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Select a count- and byte-bounded deterministic write prefix.
+
+    EPGShare keeps its established priority. Native updates use the remaining
+    capacity. A conservative per-row JSON estimate prevents a large set of
+    maximum-length notes from making the exact Google request permanently too
+    large to send.
+    """
+
+    selected_epgshare: list[dict[str, str]] = []
+    selected_native: list[dict[str, str]] = []
+    estimated_bytes = 0
+    for lane, rows in (("epgshare", epgshare_updates), ("native", native_updates)):
+        for row in rows:
+            if (
+                len(selected_epgshare) + len(selected_native)
+                >= MAX_RECHECK_APPLIES_PER_RUN
+            ):
+                return selected_epgshare, selected_native
+            requests_for_row = _review_update_requests(
+                numeric_sheet_id=2_147_483_647,
+                row_number=MAX_GOOGLE_MAPPING_ROWS + 1,
+                row=row,
+            )
+            row_estimate = len(
+                json.dumps(
+                    {"requests": requests_for_row},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if estimated_bytes + row_estimate > MAX_RECHECK_DETERMINISTIC_REQUEST_BYTES:
+                return selected_epgshare, selected_native
+            estimated_bytes += row_estimate
+            if lane == "epgshare":
+                selected_epgshare.append(row)
+            else:
+                selected_native.append(row)
+    return selected_epgshare, selected_native
+
+
 def _verify_review_update_result(
     before_table: MappingTable,
     after_table: MappingTable,
@@ -3661,6 +4145,7 @@ def update_google_sheet_review_rows(
     rows: Sequence[Mapping[str, str]],
     *,
     pre_write_check: Callable[[], None] | None = None,
+    verified_native_rows: Sequence[Mapping[str, str]] = (),
 ) -> tuple[int, MappingTable]:
     """Atomically patch a bounded set of existing disabled REVIEW rows."""
 
@@ -3669,6 +4154,17 @@ def update_google_sheet_review_rows(
     if len(rows) > MAX_RECHECK_TOTAL_UPDATES:
         raise SyncError("The REVIEW update batch exceeds its conservative limit.")
     desired: dict[tuple[str, str], dict[str, str]] = {}
+    verified_native_updates: dict[tuple[str, str], dict[str, str]] = {}
+    for raw in verified_native_rows:
+        key = (
+            streaming.normalize_server_id(raw.get("server_id", "")),
+            streaming.clean_identifier(raw.get("stream_id", ""), 120),
+        )
+        if key in verified_native_updates:
+            raise SyncError("The native REVIEW allowlist contains a duplicate identity.")
+        verified_native_updates[key] = {
+            header: str(raw.get(header, "")) for header in streaming.SHEET_COLUMNS
+        }
     base_by_key = _mapping_rows_by_key(base_table)
     for raw in rows:
         key = (
@@ -3679,8 +4175,22 @@ def update_google_sheet_review_rows(
             raise SyncError("A REVIEW update contains an unknown or duplicate identity.")
         _row_number, before = base_by_key[key]
         after = {header: str(raw.get(header, "")) for header in streaming.SHEET_COLUMNS}
-        _validate_review_update(before, after)
+        _validate_review_update(
+            before,
+            after,
+            verified_native_updates=verified_native_updates,
+        )
         desired[key] = after
+    native_desired_keys = {
+        key
+        for key, row in desired.items()
+        if streaming.clean_text(row.get("action", ""), 40).upper()
+        == "KEEP_PANEL"
+    }
+    if set(verified_native_updates) != native_desired_keys:
+        raise SyncError(
+            "The native REVIEW allowlist does not exactly match native updates."
+        )
 
     # This authoritative pre-read detects edits, inserts and sorting which
     # occurred after proposal generation. Users are instructed not to edit the
@@ -3706,7 +4216,11 @@ def update_google_sheet_review_rows(
         desired, key=lambda item: (item[0], streaming.stream_sort_key(item[1]))
     ):
         row_number, before = fresh_by_key[key]
-        _validate_review_update(before, desired[key])
+        _validate_review_update(
+            before,
+            desired[key],
+            verified_native_updates=verified_native_updates,
+        )
         requests_body.extend(
             _review_update_requests(
                 numeric_sheet_id=layout.numeric_sheet_id,
@@ -3905,16 +4419,256 @@ def _row_identity(row: Mapping[str, Any]) -> tuple[str, str]:
     )
 
 
+def _native_review_summary_defaults() -> dict[str, int]:
+    return {
+        "native_review_candidates": 0,
+        "native_review_verified": 0,
+        "native_review_persisted": 0,
+        "native_review_deferred": 0,
+        "native_review_source_unavailable": 0,
+        "native_review_rejected_stored_conflict": 0,
+        "native_review_rejected_invalid_id": 0,
+        "native_review_rejected_provenance": 0,
+        "native_review_rejected_schedule": 0,
+        "native_review_rejected_identity": 0,
+        "native_review_revalidation_checked": 0,
+        "native_review_revalidation_rejected": 0,
+        "native_review_revalidation_unavailable": 0,
+    }
+
+
+def _parse_generated_epoch(value: str) -> int:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SyncError("The REVIEW recheck timestamp is invalid.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.astimezone(timezone.utc).timestamp())
+
+
+def _build_verified_native_review_updates(
+    *,
+    review_input_rows: Sequence[Mapping[str, str]],
+    review_result_rows: Sequence[Mapping[str, str]],
+    inventories: Sequence[PanelInventory],
+    generated_at: str,
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Return exact Server 2/3 KEEP_PANEL updates after the native guide gate."""
+
+    summary = _native_review_summary_defaults()
+    if native_review is None:
+        raise SyncError(
+            "Native REVIEW validation was requested, but its verified module is missing."
+        )
+    before_by_key = {_row_identity(row): row for row in review_input_rows}
+    if len(before_by_key) != len(review_input_rows):
+        raise SyncError("The native REVIEW input contains duplicate identities.")
+    channels_by_key: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for inventory in inventories:
+        server_id = streaming.normalize_server_id(inventory.server_id)
+        for channel in inventory.channels:
+            key = (
+                server_id,
+                streaming.clean_identifier(channel.get("stream_id", ""), 120),
+            )
+            if key in channels_by_key:
+                raise SyncError("Provider inventories contain a duplicate stream identity.")
+            channels_by_key[key] = channel
+
+    candidates: dict[
+        str, dict[tuple[str, str], tuple[dict[str, str], str, str]]
+    ] = {"server_2": {}, "server_3": {}}
+    for raw_result in review_result_rows:
+        key = _row_identity(raw_result)
+        before = before_by_key.get(key)
+        if before is None or key[0] not in candidates:
+            continue
+        if streaming.clean_text(raw_result.get("action", ""), 40).upper() != "REVIEW":
+            # A deterministic EPGShare approval wins and is never overwritten.
+            continue
+        try:
+            enabled = streaming.parse_bool(
+                raw_result.get("enabled", ""),
+                default=False,
+                field_name="mapping enabled",
+            )
+        except streaming.BuildError as exc:
+            raise SyncError("A native REVIEW result has invalid enabled state.") from exc
+        if enabled:
+            raise SyncError("A native REVIEW candidate unexpectedly became enabled.")
+        channel = channels_by_key.get(key)
+        if channel is None:
+            continue
+        if (
+            channel.get(
+                "_native_epg_id_raw_present",
+                bool(channel.get("epg_channel_id", "")),
+            )
+            and channel.get("_native_epg_id_exact", True) is not True
+        ):
+            summary["native_review_rejected_invalid_id"] += 1
+            continue
+        raw_current_id = str(channel.get("epg_channel_id", "") or "")
+        current_id = streaming.clean_identifier(raw_current_id, 300)
+        if not current_id:
+            continue
+        if current_id != raw_current_id:
+            summary["native_review_rejected_invalid_id"] += 1
+            continue
+        raw_stored_id = str(before.get("epg_id", "") or "")
+        stored_id = streaming.clean_identifier(raw_stored_id, 300)
+        if stored_id != raw_stored_id:
+            summary["native_review_rejected_invalid_id"] += 1
+            continue
+        source = streaming.clean_text(before.get("source", ""), 40).casefold()
+        feed = streaming.clean_text(before.get("epg_feed", ""), 80).casefold()
+        notes = streaming.clean_text(before.get("notes", ""), 2000)
+        auto_discovered = has_exact_auto_discovery_provenance(notes)
+        if stored_id and stored_id != current_id:
+            summary["native_review_rejected_stored_conflict"] += 1
+            continue
+        if not stored_id:
+            if (
+                not auto_discovered
+                or source != "epgshare01"
+                or feed != "all_sources1"
+            ):
+                summary["native_review_rejected_provenance"] += 1
+                continue
+        elif (
+            source != "panel"
+            or feed not in {"panel", "server xmltv.php"}
+            or not auto_discovered
+        ):
+            summary["native_review_rejected_provenance"] += 1
+            continue
+        provider_name = streaming.clean_identifier(channel.get("name", ""), 300)
+        candidate_row = {column: str(before.get(column, "")) for column in streaming.SHEET_COLUMNS}
+        candidates[key[0]][key] = (candidate_row, current_id, provider_name)
+
+    summary["native_review_candidates"] = sum(
+        len(rows) for rows in candidates.values()
+    )
+    if not summary["native_review_candidates"]:
+        return [], summary
+
+    now_epoch = _parse_generated_epoch(generated_at)
+    verified_updates: list[dict[str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="skytv-native-review-") as temporary:
+        private_root = Path(temporary)
+        for server_id in ("server_2", "server_3"):
+            server_candidates = candidates[server_id]
+            if not server_candidates:
+                continue
+            requested_ids = frozenset(
+                epg_id for _row, epg_id, _name in server_candidates.values()
+            )
+            try:
+                panel_path, _details = streaming.download_panel_xmltv(
+                    server_id, private_root / f"{server_id}.xmltv"
+                )
+                validation = native_review.validate_native_xmltv(
+                    panel_path,
+                    server_id=server_id,
+                    requested_ids=requested_ids,
+                    now_epoch=now_epoch,
+                )
+            except (native_review.NativeReviewError, streaming.BuildError):
+                summary["native_review_source_unavailable"] += 1
+                continue
+
+            names_by_id = getattr(validation, "display_names_by_id", None)
+            if (
+                int(getattr(validation, "requested_ids", -1))
+                != len(requested_ids)
+                or not set(validation.verified_ids).issubset(requested_ids)
+                or not isinstance(names_by_id, Mapping)
+                or not set(names_by_id).issubset(requested_ids)
+            ):
+                raise SyncError(
+                    "Native EPG validation returned an inconsistent identity set."
+                )
+            compatible_ids_by_name: dict[str, set[str]] = {}
+            for epg_id, display_names in names_by_id.items():
+                for display_name in tuple(display_names or ()):
+                    name_key = native_review.native_display_name_key(display_name)
+                    if name_key:
+                        compatible_ids_by_name.setdefault(name_key, set()).add(
+                            str(epg_id)
+                        )
+            for key, (row, epg_id, provider_name) in server_candidates.items():
+                if epg_id not in validation.verified_ids:
+                    summary["native_review_rejected_schedule"] += 1
+                    continue
+                display_names = tuple(names_by_id.get(epg_id, ()))
+                provider_key = native_review.native_display_name_key(provider_name)
+                if (
+                    not provider_key
+                    or not native_review.native_names_compatible(
+                        provider_name, display_names
+                    )
+                    or compatible_ids_by_name.get(provider_key) != {epg_id}
+                ):
+                    summary["native_review_rejected_identity"] += 1
+                    continue
+                marker = (
+                    "native-review-v1; exact current provider EPG ID, XMLTV "
+                    "display name, and current schedule verified"
+                )
+                prior_notes = streaming.clean_text(row.get("notes", ""), 2000)
+                row.update(
+                    {
+                        "enabled": "TRUE",
+                        "action": "KEEP_PANEL",
+                        "source": "panel",
+                        "epg_feed": "panel",
+                        "epg_id": epg_id,
+                        "reason": (
+                            "Native panel EPG identity and current programme "
+                            "schedule verified."
+                        ),
+                        "notes": (
+                            prior_notes
+                            if marker.casefold() in prior_notes.casefold()
+                            else streaming.clean_text(
+                                "; ".join(
+                                    value for value in (prior_notes, marker) if value
+                                ),
+                                2000,
+                            )
+                        ),
+                    }
+                )
+                if key[0] == "server_1":  # Defensive; candidates excludes it.
+                    raise SyncError("Server 1 native panel EPG is forbidden.")
+                verified_updates.append(row)
+
+    verified_updates.sort(
+        key=lambda row: (
+            row["server_id"], streaming.stream_sort_key(row["stream_id"])
+        )
+    )
+    summary["native_review_verified"] = len(verified_updates)
+    return verified_updates, summary
+
+
 def _gemini_review_updates(
     *,
     outcome: automatch.AutoMatchOutcome,
     authoritative_table: MappingTable,
     api_key: str,
     limit: int,
+    excluded_keys: Iterable[tuple[str, str]] = (),
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """Convert HIGH Gemini suggestions into disabled, manual-review patches."""
 
-    available = tuple(getattr(outcome, "ai_review_shortlists", ()) or ())
+    excluded = frozenset(excluded_keys)
+    available = tuple(
+        shortlist
+        for shortlist in (getattr(outcome, "ai_review_shortlists", ()) or ())
+        if (str(shortlist.server_id), str(shortlist.stream_id)) not in excluded
+    )
     selected = available[: min(int(limit), MAX_AI_REVIEW_ROWS)]
     summary: dict[str, Any] = {
         "ai_review_enabled": True,
@@ -4102,6 +4856,8 @@ def _run_sync_review_mode(
     use_gemini_ai: bool,
     gemini_api_key: str,
     ai_review_limit: int,
+    validate_native_review: bool,
+    native_hint_summary: Mapping[str, int] | None,
 ) -> dict[str, Any]:
     """Run the opt-in REVIEW backlog path without changing the legacy default."""
 
@@ -4257,9 +5013,49 @@ def _run_sync_review_mode(
             streaming.stream_sort_key(row["stream_id"]),
         )
     )
-    deterministic_updates = safe_review_matches[:MAX_RECHECK_APPLIES_PER_RUN]
+    native_verified_updates: list[dict[str, str]] = []
+    native_summary = _native_review_summary_defaults()
+    if validate_native_review and set(selected_servers).intersection(
+        {"server_2", "server_3"}
+    ):
+        native_verified_updates, native_summary = (
+            _build_verified_native_review_updates(
+                review_input_rows=review_recheck_rows,
+                review_result_rows=review_results,
+                inventories=inventories,
+                generated_at=generated_at,
+            )
+        )
+
+    (
+        deterministic_epgshare_updates,
+        deterministic_native_updates,
+    ) = _bounded_deterministic_review_updates(
+        safe_review_matches,
+        native_verified_updates,
+    )
+    deterministic_updates = [
+        *deterministic_epgshare_updates,
+        *deterministic_native_updates,
+    ]
     deferred_safe_matches = max(
-        0, len(safe_review_matches) - len(deterministic_updates)
+        0,
+        len(safe_review_matches)
+        + len(native_verified_updates)
+        - len(deterministic_updates),
+    )
+    native_summary["native_review_deferred"] = max(
+        0, len(native_verified_updates) - len(deterministic_native_updates)
+    )
+    # This count means locally verified proposals. Persistence remains zero in
+    # dry-run and is filled only after Google's authoritative post-write read.
+    auto_match_summary["review_recheck_safe_matches"] = int(
+        auto_match_summary.get("review_recheck_safe_matches", 0)
+    ) + len(native_verified_updates)
+    auto_match_summary["review_recheck_still_review_rows"] = max(
+        0,
+        int(auto_match_summary.get("review_recheck_still_review_rows", 0))
+        - len(native_verified_updates),
     )
 
     ai_updates: list[dict[str, str]] = []
@@ -4281,6 +5077,7 @@ def _run_sync_review_mode(
             authoritative_table=authoritative_table,
             api_key=gemini_api_key,
             limit=int(ai_review_limit),
+            excluded_keys=(_row_identity(row) for row in native_verified_updates),
         )
 
     review_updates = [*deterministic_updates, *ai_updates]
@@ -4336,9 +5133,18 @@ def _run_sync_review_mode(
         **recheck_selection_summary,
         **auto_match_summary,
         **ai_summary,
+        **dict(native_hint_summary or {}),
+        **native_summary,
     }
     status_table = authoritative_table
     status_quarantine_keys = match_time_quarantine_keys
+    native_results_by_key = {
+        _row_identity(row): row for row in native_verified_updates
+    }
+    reported_review_results = [
+        native_results_by_key.get(_row_identity(row), row)
+        for row in review_results
+    ]
 
     def persist_reports() -> None:
         add_channel_status_to_summary(
@@ -4354,7 +5160,7 @@ def _run_sync_review_mode(
             changed_rows=changed_rows,
             missing_rows=missing_rows,
             review_recheck_rows=review_recheck_rows,
-            review_recheck_results=review_results,
+            review_recheck_results=reported_review_results,
             ai_review_results=ai_updates,
             summary=summary,
         )
@@ -4512,16 +5318,61 @@ def _run_sync_review_mode(
                 authoritative_table, new_rows, final_table
             )
 
+    if mode == "apply" and deterministic_native_updates:
+        attempted_native_keys = {
+            _row_identity(row) for row in deterministic_native_updates
+        }
+        revalidated_native_updates, revalidation_summary = (
+            revalidate_native_review_updates(
+                deterministic_native_updates,
+                inventories,
+                server_configs,
+            )
+        )
+        summary.update(revalidation_summary)
+        deterministic_native_updates = revalidated_native_updates
+        deterministic_updates = [
+            *deterministic_epgshare_updates,
+            *deterministic_native_updates,
+        ]
+        review_updates = [*deterministic_updates, *ai_updates]
+        proposed_review_keys = {_row_identity(row) for row in review_updates}
+        revalidated_native_keys = {
+            _row_identity(row) for row in deterministic_native_updates
+        }
+        rejected_native_keys = attempted_native_keys.difference(
+            revalidated_native_keys
+        )
+        native_results_by_key = {
+            key: row
+            for key, row in native_results_by_key.items()
+            if key not in rejected_native_keys
+        }
+        reported_review_results = [
+            native_results_by_key.get(_row_identity(row), row)
+            for row in review_results
+        ]
+        # Persist the aggregate revalidation outcome before the Sheet writer;
+        # no provider response values enter reports.
+        persist_reports()
+
     if mode == "apply" and review_updates:
         refresh_alert_safety_before_mapping_write()
         try:
+            writer_kwargs: dict[str, Any] = {
+                "pre_write_check": refresh_alert_safety_before_mapping_write,
+            }
+            if deterministic_native_updates:
+                writer_kwargs["verified_native_rows"] = (
+                    deterministic_native_updates
+                )
             updated_count, final_table = update_google_sheet_review_rows(
                 google_session,
                 validate_sheet_id(sheet_id),
                 sheet_tab,
                 final_table,
                 review_updates,
-                pre_write_check=refresh_alert_safety_before_mapping_write,
+                **writer_kwargs,
             )
         except SheetWriteError as exc:
             summary["review_recheck_write_error"] = str(exc)
@@ -4530,6 +5381,9 @@ def _run_sync_review_mode(
         summary["review_recheck_rows_updated"] = updated_count
         summary["review_recheck_safe_matches_persisted"] = len(
             deterministic_updates
+        )
+        summary["native_review_persisted"] = len(
+            deterministic_native_updates
         )
         intentional_mapping_write = intentional_mapping_write or bool(updated_count)
         summary["ai_review_high_suggestions_persisted"] = int(
@@ -4642,12 +5496,16 @@ def run_sync(
     use_gemini_ai: bool = False,
     gemini_api_key: str = "",
     ai_review_limit: int = 25,
+    validate_native_review: bool = False,
+    native_hint_summary: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     normalized_recheck_mode = streaming.clean_text(
         review_recheck_mode, 20
     ).casefold() or "off"
     if normalized_recheck_mode not in {"off", "dry-run", "apply"}:
         raise SyncError("The REVIEW recheck mode must be off, dry-run, or apply.")
+    if validate_native_review and normalized_recheck_mode == "off":
+        raise SyncError("Native REVIEW validation requires REVIEW recheck mode.")
     if normalized_recheck_mode != "off" or use_gemini_ai:
         if normalized_recheck_mode == "off":
             raise SyncError("Gemini review requires REVIEW recheck mode.")
@@ -4674,6 +5532,8 @@ def run_sync(
             use_gemini_ai=use_gemini_ai,
             gemini_api_key=gemini_api_key,
             ai_review_limit=ai_review_limit,
+            validate_native_review=validate_native_review,
+            native_hint_summary=native_hint_summary,
         )
     effective_snapshot_path = Path(snapshot_out)
     authoritative_snapshot_path = (
@@ -4806,6 +5666,8 @@ def run_sync(
         "ai_review_suggestion_rows": 0,
         "ai_review_abstained_rows": 0,
         "ai_review_error_rows": 0,
+        **_native_review_summary_defaults(),
+        **dict(native_hint_summary or {}),
         "inventory_rows": sum(len(inventory.channels) for inventory in inventories),
         "new_rows": len(new_rows),
         "appended_rows": 0,
@@ -5098,6 +5960,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Ask Gemini to suggest only among locally verified candidates.",
     )
     parser.add_argument(
+        "--validate-native-review",
+        action="store_true",
+        help=(
+            "Validate fresh Server 2/3 native IDs for eligible REVIEW rows; "
+            "Server 1 native EPG remains forbidden."
+        ),
+    )
+    parser.add_argument(
         "--ai-review-limit",
         type=int,
         choices=range(1, MAX_AI_REVIEW_ROWS + 1),
@@ -5168,6 +6038,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.use_gemini_ai and args.review_recheck_mode == "off":
         raise SyncError("--use-gemini-ai requires REVIEW recheck mode.")
+    if args.validate_native_review and args.review_recheck_mode == "off":
+        raise SyncError("--validate-native-review requires REVIEW recheck mode.")
     if (
         args.write_to_sheet or args.review_recheck_mode != "off"
     ) and not args.all_source_file:
@@ -5245,6 +6117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     try:
         inventories: list[PanelInventory] = []
+        native_hint_summary: dict[str, int] = {}
         for config in configs:
             try:
                 inventories.append(
@@ -5256,6 +6129,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             except SyncError as exc:
                 provider_failures[config.server_id] = str(exc)
+        if args.validate_native_review:
+            inventories, native_hint_summary = enrich_review_inventories_from_m3u(
+                session,
+                inventories,
+                configs,
+                selected_servers=args.review_recheck_servers,
+                allow_insecure_http=args.allow_insecure_http,
+            )
     finally:
         session.close()
 
@@ -5307,6 +6188,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             use_gemini_ai=args.use_gemini_ai and not bootstrap_error,
             gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
             ai_review_limit=args.ai_review_limit,
+            validate_native_review=args.validate_native_review,
+            native_hint_summary=native_hint_summary,
         )
         if bootstrap_error:
             raise SyncError(bootstrap_error)

@@ -120,6 +120,27 @@ class NativeProgrammeGateTests(unittest.TestCase):
                 now_epoch=self.NOW,
             )
 
+    def test_analyzer_delegates_to_the_shared_native_validator(self) -> None:
+        expected = analyzer.NativeValidation(frozenset({"Exact.ID"}), 1)
+        with mock.patch.object(
+            analyzer.native_review,
+            "validate_native_xmltv",
+            return_value=expected,
+        ) as shared:
+            actual = analyzer.validate_native_xmltv(
+                Path("unused-native.xml"),
+                server_id="server_2",
+                requested_ids={"Exact.ID"},
+                now_epoch=self.NOW,
+            )
+        self.assertIs(actual, expected)
+        shared.assert_called_once_with(
+            Path("unused-native.xml"),
+            server_id="server_2",
+            requested_ids={"Exact.ID"},
+            now_epoch=self.NOW,
+        )
+
     def test_native_id_requires_exact_case_and_rejects_casefold_collisions(self) -> None:
         programmes = [
             ("Exact.ID", "20260101000000 +0000", "20260101030000 +0000", "Morning News"),
@@ -366,6 +387,62 @@ class EligibilityAndNativeAdvisoryTests(unittest.TestCase):
 
         self.assertEqual(candidate_for(row), frozenset({("server_2", "2")}))
 
+        # The live API can omit epg_channel_id while the authenticated M3U
+        # supplies it later.  The untouched discovery row is then blank and
+        # EPGShare-routed, but the fresh exact provider ID remains eligible for
+        # read-only native validation.
+        blank_discovery_row = sync.new_mapping_row(
+            inventory("server_2", [channel("2", "US: Example")]),
+            channel("2", "US: Example"),
+            discovered_at="2026-09-16T12:34:56Z",
+        )
+        self.assertEqual(
+            candidate_for(blank_discovery_row),
+            frozenset({("server_2", "2")}),
+        )
+        legacy_blank_panel_row = dict(blank_discovery_row)
+        legacy_blank_panel_row.update(
+            {"source": "panel", "epg_feed": "Server xmltv.php"}
+        )
+        self.assertEqual(
+            candidate_for(legacy_blank_panel_row),
+            frozenset(),
+        )
+        blank_source_epgshare_row = dict(blank_discovery_row)
+        blank_source_epgshare_row["source"] = ""
+        self.assertEqual(
+            candidate_for(blank_source_epgshare_row),
+            frozenset(),
+        )
+        blank_source_panel_row = dict(row)
+        blank_source_panel_row["source"] = ""
+        self.assertEqual(
+            candidate_for(blank_source_panel_row),
+            frozenset(),
+        )
+        truncated_provider_id = dict(provider_channel)
+        truncated_provider_id.update(
+            {
+                "epg_channel_id": "X" * 300,
+                "_native_epg_id_raw_present": True,
+                "_native_epg_id_exact": False,
+            }
+        )
+        truncated_item = analyzer.ReviewItem(
+            server_id="server_2",
+            stream_id="2",
+            row=row,
+            channel=truncated_provider_id,
+            cluster_key=("server_2", "example"),
+            safety_blocked=False,
+        )
+        selected = analyzer.select_native_advisory_candidates(
+            review_items=[truncated_item],
+            inventory_channels={truncated_item.key: truncated_provider_id},
+            changed_keys=(),
+        )
+        self.assertFalse(selected["server_2"])
+
         mutations = (
             ({"enabled": "TRUE"}, False, False),
             ({"action": "APPROVED"}, False, False),
@@ -411,6 +488,57 @@ class EligibilityAndNativeAdvisoryTests(unittest.TestCase):
             changed_keys=(),
         )
         self.assertFalse(selected["server_1"])
+
+    def test_native_identity_gate_rejects_display_name_mismatch(self) -> None:
+        channels = {
+            ("server_2", "1"): channel(
+                "1", "US: Example News HD", epg_id="Native.Example"
+            ),
+            ("server_2", "2"): channel(
+                "2", "CA: Unique Network FHD", epg_id="Native.Unique"
+            ),
+        }
+        validation = analyzer.NativeValidation(
+            frozenset({"Native.Example", "Native.Unique"}),
+            2,
+            {
+                "Native.Example": ("Completely Different",),
+                "Native.Unique": ("[CA] Unique Network HD",),
+            },
+        )
+        self.assertEqual(
+            analyzer._identity_verified_native_keys(
+                candidate_keys=channels,
+                inventory_channels=channels,
+                validation=validation,
+            ),
+            frozenset({("server_2", "2")}),
+        )
+
+    def test_native_identity_gate_rejects_one_name_shared_by_two_ids(self) -> None:
+        channels = {
+            ("server_3", "1"): channel(
+                "1", "US: Shared News HD", epg_id="Native.East"
+            ),
+            ("server_3", "2"): channel(
+                "2", "US: Shared News SD", epg_id="Native.West"
+            ),
+        }
+        validation = analyzer.NativeValidation(
+            frozenset({"Native.East", "Native.West"}),
+            2,
+            {
+                "Native.East": ("Shared News",),
+                "Native.West": ("[US] Shared News FHD",),
+            },
+        )
+        self.assertFalse(
+            analyzer._identity_verified_native_keys(
+                candidate_keys=channels,
+                inventory_channels=channels,
+                validation=validation,
+            )
+        )
 
     def test_run_analysis_unions_native_advisory_and_matcher_eligibility(self) -> None:
         inventories = [
@@ -507,7 +635,9 @@ class EligibilityAndNativeAdvisoryTests(unittest.TestCase):
                 analyzer,
                 "validate_native_xmltv",
                 return_value=analyzer.NativeValidation(
-                    frozenset({"Exact.Native.ID"}), 1
+                    frozenset({"Exact.Native.ID"}),
+                    1,
+                    {"Exact.Native.ID": ("US: Second",)},
                 ),
             ), mock.patch.object(
                 analyzer,
@@ -603,6 +733,67 @@ class EligibilityAndNativeAdvisoryTests(unittest.TestCase):
                 args, initial_table=table, initial_alerts=alerts
             )
 
+    def test_live_inputs_runs_read_only_m3u_id_enrichment_for_servers_two_and_three(
+        self,
+    ) -> None:
+        table = self.mapping_table([])
+        configs = [
+            SimpleNamespace(server_id="server_1", base_url="https://one.invalid"),
+            SimpleNamespace(server_id="server_2", base_url="https://two.invalid"),
+            SimpleNamespace(server_id="server_3", base_url="https://three.invalid"),
+        ]
+        base = [
+            inventory("server_1", [channel("1", "First")]),
+            inventory("server_2", [channel("2", "Second")]),
+            inventory("server_3", [channel("3", "Third")]),
+        ]
+        enriched = copy.deepcopy(base)
+        enriched[1].channels[0]["epg_channel_id"] = "Recovered.Native.ID"
+        session = mock.Mock()
+        with mock.patch.object(
+            analyzer,
+            "_load_sheet_snapshot",
+            return_value=(table, []),
+        ), mock.patch.object(
+            analyzer.sync,
+            "load_server_configs",
+            return_value=configs,
+        ), mock.patch.object(
+            analyzer.requests,
+            "Session",
+            return_value=session,
+        ), mock.patch.object(
+            analyzer.sync,
+            "fetch_panel_inventory",
+            side_effect=base,
+        ), mock.patch.object(
+            analyzer.sync,
+            "validate_provider_inventory_secret_safe",
+        ), mock.patch.object(
+            analyzer.sync,
+            "provider_reflection_needles",
+            return_value=(),
+        ), mock.patch.object(
+            analyzer.sync,
+            "enrich_review_inventories_from_m3u",
+            return_value=(enriched, {"native_review_m3u_ids_recovered": 1}),
+        ) as enrich:
+            _table, _alerts, _configs, loaded = analyzer._load_live_inputs(
+                SimpleNamespace(allow_insecure_http=False)
+            )
+
+        self.assertEqual(
+            loaded[1].channels[0]["epg_channel_id"], "Recovered.Native.ID"
+        )
+        enrich.assert_called_once_with(
+            session,
+            base,
+            configs,
+            selected_servers=("server_2", "server_3"),
+            allow_insecure_http=False,
+        )
+        session.close.assert_called_once_with()
+
     def test_uncontrolled_exception_text_is_never_public(self) -> None:
         secret = "server_3 stream=PRIVATE-991 password=PRIVATE-PASSWORD"
         message = analyzer._public_error_message(sync.SyncError(secret))
@@ -678,7 +869,7 @@ class PublicSummaryTests(unittest.TestCase):
             catalog=self.CATALOG,
         )
 
-    def test_lane_precedence_is_safety_native_epgshare_placeholder_unresolved(self) -> None:
+    def test_lane_precedence_is_safety_epgshare_native_placeholder_unresolved(self) -> None:
         summary = self.build_summary()
         servers = summary["servers"]
         self.assertEqual(servers["server_1"]["safety_blocked"], 1)
@@ -691,6 +882,38 @@ class PublicSummaryTests(unittest.TestCase):
         self.assertEqual(summary["totals"]["analysis_eligible"], 5)
         self.assertEqual(summary["totals"]["matcher_eligible"], 4)
         self.assertEqual(summary["totals"]["review_rows"], 7)
+
+    def test_strict_epgshare_precedes_native_if_sets_overlap_defensively(self) -> None:
+        summary = self.build_summary()
+        overlap_key = ("server_2", "2")
+        overlap = analyzer.build_public_summary(
+            generated_at=self.GENERATED_AT,
+            inventories=[
+                inventory("server_1", [channel("1", "PRIVATE-S1")]),
+                inventory("server_2", [channel("2", "PRIVATE-S2")]),
+                inventory("server_3", [channel("3", "PRIVATE-S3")]),
+            ],
+            review_items=[review_item("server_2", "2", "cluster")],
+            analysis_eligible=frozenset({overlap_key}),
+            matcher_eligible=frozenset({overlap_key}),
+            native_candidates={
+                "server_1": frozenset(),
+                "server_2": frozenset({overlap_key}),
+                "server_3": frozenset(),
+            },
+            native_verified={
+                "server_1": frozenset(),
+                "server_2": frozenset({overlap_key}),
+                "server_3": frozenset(),
+            },
+            native_status={"server_2": "available", "server_3": "not-checked"},
+            strict_epgshare=frozenset({overlap_key}),
+            verified_placeholders=frozenset(),
+            catalog=self.CATALOG,
+        )
+
+        self.assertEqual(overlap["servers"]["server_2"]["strict_epgshare"], 1)
+        self.assertEqual(overlap["servers"]["server_2"]["native_verified"], 0)
 
     def test_public_summary_is_exactly_allowlisted_and_contains_no_private_values(self) -> None:
         summary = self.build_summary()

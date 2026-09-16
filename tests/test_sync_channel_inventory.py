@@ -258,6 +258,102 @@ http://panel.test/movie/user/secret/999.mp4
         self.assertEqual(channels[0]["stream_icon"], "")
         self.assertNotIn("secret", json.dumps(channels))
 
+    def test_native_id_ingestion_marks_cleaned_provider_value_ineligible(self) -> None:
+        rows = sync.normalize_panel_action_rows(
+            {
+                "streams": [
+                    {
+                        "stream_id": "101",
+                        "name": "BBC One",
+                        "epg_channel_id": " bbc.one ",
+                    }
+                ]
+            },
+            "get_live_streams",
+        )
+        self.assertEqual(rows[0]["epg_channel_id"], "bbc.one")
+        self.assertFalse(rows[0]["_native_epg_id_exact"])
+        provider = inventory("server_2", rows)
+        config = sync.ServerConfig(
+            "server_2", "Server 2", "https://panel.example", "user123", "pass123"
+        )
+        with mock.patch.object(sync, "fetch_m3u_inventory", return_value=None):
+            enriched, stats = sync.enrich_review_inventories_from_m3u(
+                object(),
+                [provider],
+                [config],
+                selected_servers={"server_2"},
+                allow_insecure_http=False,
+            )
+        self.assertEqual(enriched[0].channels[0]["epg_channel_id"], "")
+        self.assertEqual(stats["native_review_invalid_provider_ids"], 1)
+
+    def test_api_conflicting_native_id_aliases_are_ineligible(self) -> None:
+        rows = sync.normalize_panel_action_rows(
+            {
+                "streams": [
+                    {
+                        "stream_id": "101",
+                        "name": "BBC One",
+                        "epg_channel_id": "bbc.one",
+                        "tvg_id": "different.id",
+                    },
+                    {
+                        "stream_id": "102",
+                        "name": "BBC Two",
+                        "epg_channel_id": "bbc.two",
+                        "tvg_id": "bbc.two",
+                    },
+                ]
+            },
+            "get_live_streams",
+        )
+        self.assertEqual(rows[0]["epg_channel_id"], "")
+        self.assertTrue(rows[0]["_native_epg_id_raw_present"])
+        self.assertFalse(rows[0]["_native_epg_id_exact"])
+        self.assertEqual(rows[1]["epg_channel_id"], "bbc.two")
+        self.assertTrue(rows[1]["_native_epg_id_exact"])
+
+    def test_m3u_native_id_preserves_trim_evidence_and_is_ineligible(self) -> None:
+        content = """#EXTM3U
+#EXTINF:-1 tvg-id=" bbc.one " tvg-name="BBC One" group-title="UK",BBC One
+https://panel.example/live/user123/pass123/101.ts
+"""
+        _categories, channels = sync.parse_xtream_m3u(
+            content,
+            username="user123",
+            password="pass123",
+        )
+        self.assertEqual(channels[0]["epg_channel_id"], "bbc.one")
+        self.assertTrue(channels[0]["_native_epg_id_raw_present"])
+        self.assertFalse(channels[0]["_native_epg_id_exact"])
+
+    def test_m3u_duplicate_attributes_are_rejected(self) -> None:
+        content = """#EXTM3U
+#EXTINF:-1 tvg-id="wrong.id" TVG-ID="right.id",BBC One
+https://panel.example/live/user123/pass123/101.ts
+"""
+        with self.assertRaisesRegex(sync.SyncError, "duplicate attribute"):
+            sync.parse_xtream_m3u(
+                content,
+                username="user123",
+                password="pass123",
+            )
+
+    def test_m3u_conflicting_id_aliases_are_native_ineligible(self) -> None:
+        content = """#EXTM3U
+#EXTINF:-1 tvg-id="bbc.one" epg-id="different.id",BBC One
+https://panel.example/live/user123/pass123/101.ts
+"""
+        _categories, channels = sync.parse_xtream_m3u(
+            content,
+            username="user123",
+            password="pass123",
+        )
+        self.assertEqual(channels[0]["epg_channel_id"], "")
+        self.assertTrue(channels[0]["_native_epg_id_raw_present"])
+        self.assertFalse(channels[0]["_native_epg_id_exact"])
+
     def test_m3u_duplicate_live_ids_fail(self) -> None:
         content = """#EXTM3U
 #EXTINF:-1,One
@@ -3501,13 +3597,22 @@ class ReportsAndSheetsTests(unittest.TestCase):
             "Server EPG enabled",
             "To review",
             "Other / placeholder",
-            "Smart Rules EPG matches enabled",
+            "Total verified EPG matches enabled",
             "Safe matches waiting for the next apply run",
+            "Native EPG candidates found",
+            "Native EPG matches verified",
+            "Native EPG matches enabled (included in total above)",
+            "Native EPG sources unavailable",
             "saved for approval",
             "Gemini unavailable or rejected",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, summary_section)
+        self.assertNotIn(
+            "Verified native matches waiting for the next apply run",
+            summary_section,
+        )
+        self.assertIn("tests.test_native_epg_review", workflow)
         for removed in (
             "EPG catalog alignment mode",
             "Changed channel details",
@@ -3516,6 +3621,28 @@ class ReportsAndSheetsTests(unittest.TestCase):
         ):
             with self.subTest(removed=removed):
                 self.assertNotIn(removed, summary_section)
+
+    def test_workflow_native_review_is_automatic_and_safely_scoped(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "channel_inventory_sync.yml"
+        ).read_text(encoding="utf-8")
+        dispatch_section = workflow.split("workflow_dispatch:", 1)[1].split(
+            "# This workflow never commits", 1
+        )[0]
+        self.assertNotIn("validate_native_review:", dispatch_section)
+
+        command_section = workflow.split(
+            "- name: Find new, changed, and missing channels", 1
+        )[1].split("- name: Verify reports contain no passwords", 1)[0]
+        self.assertIn(
+            'if [[ "$REVIEW_RECHECK_MODE" != "off" ]]', command_section
+        )
+        self.assertIn("server_2|server_3|all)", command_section)
+        self.assertIn("command+=(--validate-native-review)", command_section)
+        self.assertIn(
+            "Server 1 is deliberately excluded because its",
+            command_section,
+        )
 
     def test_workflow_two_requires_the_hash_bound_snapshot_bundle(self) -> None:
         workflow = (
@@ -3662,6 +3789,356 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(selected, [])
         self.assertEqual(stats["review_recheck_excluded_changed_identity"], 1)
+
+    def test_review_selector_allows_only_auto_discovered_exact_native_candidate(self) -> None:
+        provenance = (
+            "Automatically discovered 2026-09-16T00:00:00Z; "
+            "existing Sheet rows were not changed."
+        )
+        exact = mapping_row(
+            "server_2",
+            "101",
+            "Native One",
+            action="REVIEW",
+            source="panel",
+            epg_feed="panel",
+            epg_id="native.one",
+        )
+        exact.update({"enabled": "FALSE", "notes": provenance})
+        manual = dict(exact)
+        manual.update({"stream_id": "102", "notes": "operator candidate"})
+        wrong_source = dict(exact)
+        wrong_source.update(
+            {"stream_id": "103", "source": "epgshare01", "epg_feed": "ALL_SOURCES1"}
+        )
+        provider = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": row["stream_id"],
+                    "name": row["channel_name"],
+                    "category_name": "General",
+                    "epg_channel_id": "native.one",
+                }
+                for row in (exact, manual, wrong_source)
+            ],
+        )
+
+        selected, stats = sync.select_review_recheck_rows(
+            table([exact, manual, wrong_source]),
+            [provider],
+            selected_servers={"server_2"},
+        )
+
+        self.assertEqual([row["stream_id"] for row in selected], ["101"])
+        self.assertEqual(stats["review_recheck_excluded_manual_candidate"], 2)
+
+    def test_m3u_enrichment_copies_only_exact_numeric_name_join(self) -> None:
+        api = inventory(
+            "server_2",
+            [
+                {"stream_id": "101", "name": "UK | BBC One HD", "epg_channel_id": ""},
+                {"stream_id": "102", "name": "Different Name", "epg_channel_id": "api.other"},
+                {"stream_id": "103", "name": "CTV", "epg_channel_id": "api.ctv"},
+                {"stream_id": "opaque", "name": "Opaque", "epg_channel_id": ""},
+            ],
+        )
+        m3u = inventory(
+            "server_2",
+            [
+                {"stream_id": "101", "name": "uk |  BBC One HD", "epg_channel_id": "bbc.one"},
+                {"stream_id": "102", "name": "Other Name", "epg_channel_id": "other"},
+                {"stream_id": "103", "name": "CTV", "epg_channel_id": "m3u.ctv"},
+                {"stream_id": "opaque", "name": "Opaque", "epg_channel_id": "opaque.id"},
+            ],
+            source="authenticated_m3u",
+        )
+        config = sync.ServerConfig(
+            "server_2", "Server 2", "https://panel.example", "user123", "pass123"
+        )
+
+        with mock.patch.object(sync, "fetch_m3u_inventory", return_value=m3u):
+            enriched, stats = sync.enrich_review_inventories_from_m3u(
+                object(),
+                [api],
+                [config],
+                selected_servers={"server_2"},
+                allow_insecure_http=False,
+            )
+
+        by_id = {row["stream_id"]: row for row in enriched[0].channels}
+        self.assertEqual(by_id["101"]["epg_channel_id"], "bbc.one")
+        self.assertEqual(by_id["102"]["epg_channel_id"], "")
+        self.assertEqual(by_id["103"]["epg_channel_id"], "")
+        self.assertEqual(by_id["opaque"]["epg_channel_id"], "")
+        self.assertEqual(api.channels[0]["epg_channel_id"], "")
+        self.assertEqual(stats["native_review_m3u_ids_recovered"], 1)
+        self.assertEqual(stats["native_review_m3u_name_mismatches"], 1)
+        self.assertEqual(stats["native_review_m3u_id_conflicts"], 1)
+
+    def test_native_update_requires_exact_verified_writer_allowlist(self) -> None:
+        before = mapping_row(
+            "server_2", "101", "BBC One", action="REVIEW", source="panel", epg_feed="panel", epg_id=""
+        )
+        before["enabled"] = "FALSE"
+        after = dict(before)
+        after.update(
+            {
+                "enabled": "TRUE",
+                "action": "KEEP_PANEL",
+                "epg_id": "bbc.one",
+                "reason": "Native schedule verified.",
+                "notes": "native-review-v1; exact verified fixture",
+            }
+        )
+        with self.assertRaisesRegex(sync.SyncError, "allowlist"):
+            sync.update_google_sheet_review_rows(
+                ReviewUpdateSession([before]),
+                "a" * 30,
+                "Mappings",
+                table([before]),
+                [after],
+            )
+
+        count, final_table = sync.update_google_sheet_review_rows(
+            ReviewUpdateSession([before]),
+            "a" * 30,
+            "Mappings",
+            table([before]),
+            [after],
+            verified_native_rows=[after],
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(final_table.rows[0]["action"], "KEEP_PANEL")
+
+    def test_native_review_builds_keep_panel_only_after_name_and_schedule_gate(self) -> None:
+        provenance = (
+            "Automatically discovered 2026-09-16T00:00:00Z; "
+            "existing Sheet rows were not changed."
+        )
+        before = mapping_row(
+            "server_2", "101", "UK | BBC One FHD", action="REVIEW", epg_id=""
+        )
+        before.update({"enabled": "FALSE", "notes": provenance})
+        provider = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": "101",
+                    "name": "UK | BBC One FHD",
+                    "category_name": "UK | General",
+                    "epg_channel_id": "bbc.one",
+                }
+            ],
+        )
+        validation = sync.native_review.NativeValidation(
+            frozenset({"bbc.one"}),
+            1,
+            {"bbc.one": ("BBC One HD",)},
+        )
+
+        with mock.patch.object(
+            sync.streaming,
+            "download_panel_xmltv",
+            return_value=(Path("/tmp/native.xml"), {}),
+        ) as download, mock.patch.object(
+            sync.native_review, "validate_native_xmltv", return_value=validation
+        ):
+            updates, summary = sync._build_verified_native_review_updates(
+                review_input_rows=[before],
+                review_result_rows=[before],
+                inventories=[provider],
+                generated_at="2026-09-16T00:00:00Z",
+            )
+
+        download.assert_called_once()
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0]["action"], "KEEP_PANEL")
+        self.assertEqual(updates[0]["source"], "panel")
+        self.assertEqual(updates[0]["epg_id"], "bbc.one")
+        self.assertEqual(summary["native_review_candidates"], 1)
+        self.assertEqual(summary["native_review_verified"], 1)
+
+    def test_native_review_rejects_cross_id_display_name_ambiguity(self) -> None:
+        provenance = (
+            "Automatically discovered 2026-09-16T00:00:00Z; "
+            "existing Sheet rows were not changed."
+        )
+        rows: list[dict[str, str]] = []
+        channels: list[dict[str, str]] = []
+        for stream_id, epg_id in (("101", "native.one"), ("102", "native.two")):
+            row = mapping_row(
+                "server_2", stream_id, "Shared Station HD", action="REVIEW", epg_id=""
+            )
+            row.update({"enabled": "FALSE", "notes": provenance})
+            rows.append(row)
+            channels.append(
+                {
+                    "stream_id": stream_id,
+                    "name": "Shared Station HD",
+                    "category_name": "General",
+                    "epg_channel_id": epg_id,
+                }
+            )
+        validation = sync.native_review.NativeValidation(
+            frozenset({"native.one", "native.two"}),
+            2,
+            {
+                "native.one": ("Shared Station",),
+                "native.two": ("Shared Station 4K",),
+            },
+        )
+        with mock.patch.object(
+            sync.streaming,
+            "download_panel_xmltv",
+            return_value=(Path("/tmp/native.xml"), {}),
+        ), mock.patch.object(
+            sync.native_review, "validate_native_xmltv", return_value=validation
+        ):
+            updates, summary = sync._build_verified_native_review_updates(
+                review_input_rows=rows,
+                review_result_rows=rows,
+                inventories=[inventory("server_2", channels)],
+                generated_at="2026-09-16T00:00:00Z",
+            )
+
+        self.assertEqual(updates, [])
+        self.assertEqual(summary["native_review_rejected_identity"], 2)
+
+    def test_native_review_blank_id_requires_full_exact_discovery_note(self) -> None:
+        row = mapping_row(
+            "server_2", "101", "BBC One", action="REVIEW", epg_id=""
+        )
+        row.update(
+            {
+                "enabled": "FALSE",
+                "notes": (
+                    "Automatically discovered 2026-09-16T00:00:00Z; "
+                    "existing Sheet rows were not changed.; operator edited"
+                ),
+            }
+        )
+        provider = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": "101",
+                    "name": "BBC One",
+                    "category_name": "General",
+                    "epg_channel_id": "bbc.one",
+                }
+            ],
+        )
+
+        updates, summary = sync._build_verified_native_review_updates(
+            review_input_rows=[row],
+            review_result_rows=[row],
+            inventories=[provider],
+            generated_at="2026-09-16T00:00:00Z",
+        )
+
+        self.assertEqual(updates, [])
+        self.assertEqual(summary["native_review_candidates"], 0)
+        self.assertEqual(summary["native_review_rejected_provenance"], 1)
+
+    def test_native_apply_revalidation_requires_same_current_provider_tuple(self) -> None:
+        update = mapping_row(
+            "server_2",
+            "101",
+            "BBC One",
+            category_name="UK | General",
+            action="KEEP_PANEL",
+            source="panel",
+            epg_feed="panel",
+            epg_id="bbc.one",
+        )
+        proposal = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": "101",
+                    "name": "BBC One",
+                    "category_id": "uk",
+                    "category_name": "UK | General",
+                    "epg_channel_id": "bbc.one",
+                }
+            ],
+        )
+        config = sync.ServerConfig(
+            "server_2", "Server 2", "https://panel.example", "user123", "pass123"
+        )
+        unchanged = inventory(
+            "server_2", [dict(proposal.channels[0])]
+        )
+        with mock.patch.object(
+            sync, "fetch_panel_inventory", return_value=unchanged
+        ), mock.patch.object(
+            sync,
+            "enrich_review_inventories_from_m3u",
+            return_value=([unchanged], {}),
+        ):
+            verified, stats = sync.revalidate_native_review_updates(
+                [update], [proposal], [config]
+            )
+        self.assertEqual([row["stream_id"] for row in verified], ["101"])
+        self.assertEqual(stats["native_review_revalidation_rejected"], 0)
+
+        changed = inventory(
+            "server_2",
+            [
+                {
+                    **proposal.channels[0],
+                    "category_name": "UK | Reassigned",
+                }
+            ],
+        )
+        with mock.patch.object(
+            sync, "fetch_panel_inventory", return_value=changed
+        ), mock.patch.object(
+            sync,
+            "enrich_review_inventories_from_m3u",
+            return_value=([changed], {}),
+        ):
+            verified, stats = sync.revalidate_native_review_updates(
+                [update], [proposal], [config]
+            )
+        self.assertEqual(verified, [])
+        self.assertEqual(stats["native_review_revalidation_rejected"], 1)
+
+    def test_native_apply_revalidation_unavailable_fails_closed_per_row(self) -> None:
+        update = mapping_row(
+            "server_2",
+            "101",
+            "BBC One",
+            action="KEEP_PANEL",
+            source="panel",
+            epg_feed="panel",
+            epg_id="bbc.one",
+        )
+        proposal = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": "101",
+                    "name": "BBC One",
+                    "category_name": "General",
+                    "epg_channel_id": "bbc.one",
+                }
+            ],
+        )
+        config = sync.ServerConfig(
+            "server_2", "Server 2", "https://panel.example", "user123", "pass123"
+        )
+        with mock.patch.object(
+            sync,
+            "fetch_panel_inventory",
+            side_effect=sync.SyncError("unavailable"),
+        ):
+            verified, stats = sync.revalidate_native_review_updates(
+                [update], [proposal], [config]
+            )
+        self.assertEqual(verified, [])
+        self.assertEqual(stats["native_review_revalidation_unavailable"], 1)
 
     def test_review_update_is_one_atomic_seven_column_targeted_write(self) -> None:
         review = self.disabled_review("review-1")
@@ -3812,6 +4289,53 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(final_table.rows[0]["epg_id"], "Good.Channel.us2")
         self.assertEqual(session.values_reads, 2)
+
+    def test_native_review_update_recovers_ambiguous_committed_result(self) -> None:
+        review = mapping_row(
+            "server_2",
+            "native-1",
+            "Native One",
+            action="REVIEW",
+            source="epgshare01",
+            epg_feed="ALL_SOURCES1",
+            epg_id="",
+        )
+        review["enabled"] = "FALSE"
+        unaffected = mapping_row("server_2", "stable-2", "Stable")
+        desired = dict(review)
+        desired.update(
+            {
+                "enabled": "TRUE",
+                "action": "KEEP_PANEL",
+                "source": "panel",
+                "epg_feed": "panel",
+                "epg_id": "native.one",
+                "reason": "Native panel EPG identity and schedule verified.",
+                "notes": "native-review-v1; exact verified fixture",
+            }
+        )
+
+        for kwargs in (
+            {"valid_payload": False},
+            {"raise_after_commit": True},
+            {"status_code": 503},
+        ):
+            with self.subTest(kwargs=kwargs):
+                session = ReviewUpdateSession([review, unaffected], **kwargs)
+                count, final_table = sync.update_google_sheet_review_rows(
+                    session,
+                    "a" * 30,
+                    "Mappings",
+                    table([review, unaffected]),
+                    [desired],
+                    verified_native_rows=[desired],
+                )
+
+                self.assertEqual(count, 1)
+                self.assertEqual(final_table.rows[0]["action"], "KEEP_PANEL")
+                self.assertEqual(final_table.rows[0]["epg_id"], "native.one")
+                self.assertEqual(final_table.rows[1], unaffected)
+                self.assertEqual(session.values_reads, 2)
 
     @staticmethod
     def ai_shortlist(stream_id: str = "review-1"):
@@ -4613,11 +5137,14 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertFalse(by_stream["new-2"].runtime_eligible)
 
     def test_recheck_apply_caps_smart_rules_and_ai_outage_is_nonblocking(self) -> None:
-        originals = [self.disabled_review(f"r{index:03d}") for index in range(102)]
+        total_rows = sync.MAX_RECHECK_APPLIES_PER_RUN + 2
+        originals = [
+            self.disabled_review(f"r{index:04d}") for index in range(total_rows)
+        ]
         approved_rows: list[dict[str, str]] = []
         for index, original in enumerate(originals):
             row = dict(original)
-            if index < 101:
+            if index < total_rows - 1:
                 row.update(
                     {
                         "enabled": "TRUE",
@@ -4629,7 +5156,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                     }
                 )
             approved_rows.append(row)
-        shortlist = self.ai_shortlist("r101")
+        shortlist = self.ai_shortlist(f"r{total_rows - 1:04d}")
         outcome = self.fake_recheck_outcome(
             approved_rows, shortlists=(shortlist,)
         )
@@ -4722,15 +5249,442 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             all(row["action"] == "AUTO_EPGSHARE" for row in captured_updates)
         )
         self.assertEqual(summary["review_recheck_deferred_rows"], 1)
-        self.assertEqual(summary["review_recheck_rows_updated"], 100)
+        self.assertEqual(
+            summary["review_recheck_rows_updated"],
+            sync.MAX_RECHECK_APPLIES_PER_RUN,
+        )
         self.assertEqual(summary["ai_review_error_rows"], 1)
         self.assertEqual(summary["ai_review_status"], "failed_closed")
-        self.assertEqual(len(authoritative), 102)
-        self.assertEqual(sum(row.runtime_eligible for row in authoritative), 100)
+        self.assertEqual(len(authoritative), total_rows)
+        self.assertEqual(
+            sum(row.runtime_eligible for row in authoritative),
+            sync.MAX_RECHECK_APPLIES_PER_RUN,
+        )
         by_stream = {row.stream_id: row for row in authoritative}
-        self.assertTrue(by_stream["r099"].runtime_eligible)
-        self.assertFalse(by_stream["r100"].runtime_eligible)
-        self.assertFalse(by_stream["r101"].runtime_eligible)
+        self.assertTrue(
+            by_stream[f"r{sync.MAX_RECHECK_APPLIES_PER_RUN - 1:04d}"].runtime_eligible
+        )
+        self.assertFalse(
+            by_stream[f"r{sync.MAX_RECHECK_APPLIES_PER_RUN:04d}"].runtime_eligible
+        )
+        self.assertFalse(by_stream[f"r{total_rows - 1:04d}"].runtime_eligible)
+
+    def test_deterministic_write_selection_is_also_byte_bounded(self) -> None:
+        rows: list[dict[str, str]] = []
+        for index in range(sync.MAX_RECHECK_APPLIES_PER_RUN):
+            row = self.disabled_review(f"long-{index:04d}")
+            row.update(
+                {
+                    "enabled": "TRUE",
+                    "action": "AUTO_EPGSHARE",
+                    "source": "epgshare01",
+                    "epg_feed": "ALL_SOURCES1",
+                    "epg_id": f"Verified.{index:04d}.us2",
+                    "reason": "R" * 2_000,
+                    "notes": "N" * 2_000,
+                }
+            )
+            rows.append(row)
+
+        selected_epgshare, selected_native = (
+            sync._bounded_deterministic_review_updates(rows, ())
+        )
+        self.assertFalse(selected_native)
+        self.assertGreater(len(selected_epgshare), 0)
+        self.assertLess(
+            len(selected_epgshare), sync.MAX_RECHECK_APPLIES_PER_RUN
+        )
+        estimated = sum(
+            len(
+                json.dumps(
+                    {
+                        "requests": sync._review_update_requests(
+                            numeric_sheet_id=2_147_483_647,
+                            row_number=sync.MAX_GOOGLE_MAPPING_ROWS + 1,
+                            row=row,
+                        )
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            for row in selected_epgshare
+        )
+        self.assertLessEqual(
+            estimated, sync.MAX_RECHECK_DETERMINISTIC_REQUEST_BYTES
+        )
+
+    def test_recheck_apply_caps_mixed_epgshare_and_native_updates(self) -> None:
+        provenance = (
+            "Automatically discovered 2026-09-16T00:00:00Z; "
+            "existing Sheet rows were not changed."
+        )
+        originals: list[dict[str, str]] = []
+        result_rows: list[dict[str, str]] = []
+        native_updates: list[dict[str, str]] = []
+        epgshare_count = sync.MAX_RECHECK_APPLIES_PER_RUN - 10
+        total_rows = sync.MAX_RECHECK_APPLIES_PER_RUN + 10
+        for index in range(total_rows):
+            stream_id = f"r{index:04d}"
+            original = mapping_row(
+                "server_2",
+                stream_id,
+                f"Channel {stream_id}",
+                action="REVIEW",
+                source="epgshare01",
+                epg_feed="ALL_SOURCES1",
+                epg_id="",
+            )
+            original.update({"enabled": "FALSE", "notes": provenance})
+            originals.append(original)
+            result = dict(original)
+            if index < epgshare_count:
+                result.update(
+                    {
+                        "enabled": "TRUE",
+                        "action": "AUTO_EPGSHARE",
+                        "source": "epgshare01",
+                        "epg_feed": "ALL_SOURCES1",
+                        "epg_id": f"Verified.{index:03d}.us2",
+                        "reason": "Smart Rules verified",
+                    }
+                )
+            else:
+                native = dict(original)
+                native.update(
+                    {
+                        "enabled": "TRUE",
+                        "action": "KEEP_PANEL",
+                        "source": "panel",
+                        "epg_feed": "panel",
+                        "epg_id": f"native.{index:03d}",
+                        "reason": "Native panel EPG identity and schedule verified.",
+                        "notes": provenance + "; native-review-v1; exact verified fixture",
+                    }
+                )
+                native_updates.append(native)
+            result_rows.append(result)
+
+        outcome = self.fake_recheck_outcome(result_rows)
+        provider = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": row["stream_id"],
+                    "name": row["channel_name"],
+                    "category_name": "General",
+                }
+                for row in originals
+            ],
+        )
+        native_summary = sync._native_review_summary_defaults()
+        native_summary.update(
+            {
+                "native_review_candidates": 20,
+                "native_review_verified": 20,
+            }
+        )
+        captured_updates: list[dict[str, str]] = []
+        captured_native_allowlist: list[dict[str, str]] = []
+        current_mapping_rows = [dict(row) for row in originals]
+
+        def read_mapping(*_args, **_kwargs):
+            return mapping_values(current_mapping_rows)
+
+        def apply_updates(
+            _session,
+            _sheet_id,
+            _tab_name,
+            base_table,
+            rows,
+            *,
+            pre_write_check=None,
+            verified_native_rows=(),
+        ):
+            if pre_write_check is not None:
+                pre_write_check()
+            captured_updates.extend(dict(row) for row in rows)
+            captured_native_allowlist.extend(
+                dict(row) for row in verified_native_rows
+            )
+            by_key = {
+                (row["server_id"], row["stream_id"]): dict(row) for row in rows
+            }
+            final_rows = [
+                by_key.get((row["server_id"], row["stream_id"]), dict(row))
+                for row in base_table.rows
+            ]
+            current_mapping_rows[:] = [dict(row) for row in final_rows]
+            return len(rows), table(final_rows)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            sync, "google_sheet_values", side_effect=read_mapping
+        ), mock.patch.object(
+            sync,
+            "google_sync_alert_values",
+            return_value=[list(sync.ALERT_COLUMNS)],
+        ), mock.patch.object(
+            sync, "append_sync_alert_rows", return_value=0
+        ), mock.patch.object(
+            sync.automatch, "auto_match_and_spool", return_value=outcome
+        ), mock.patch.object(
+            sync,
+            "_build_verified_native_review_updates",
+            return_value=(native_updates, native_summary),
+        ), mock.patch.object(
+            sync,
+            "revalidate_native_review_updates",
+            side_effect=lambda updates, *_args: (
+                list(updates),
+                {
+                    "native_review_revalidation_checked": len(updates),
+                    "native_review_revalidation_rejected": 0,
+                    "native_review_revalidation_unavailable": 0,
+                },
+            ),
+        ), mock.patch.object(
+            sync, "update_google_sheet_review_rows", side_effect=apply_updates
+        ):
+            root = Path(temporary)
+            summary = sync.run_sync(
+                table=table([]),
+                inventories=[provider],
+                output_dir=root / "reports",
+                generated_at="2026-09-16T00:00:00Z",
+                snapshot_out=root / "effective.csv",
+                authoritative_snapshot_out=root / "authoritative.csv",
+                snapshot_manifest_out=root / "manifest.json",
+                google_session=object(),
+                sheet_id="a" * 30,
+                all_source_file=root / "all.xml.gz",
+                all_source_catalog_file=root / "all.txt",
+                epgshare_spool_out=root / "selected.sqlite3",
+                review_recheck_mode="apply",
+                review_recheck_servers=("server_2",),
+                validate_native_review=True,
+            )
+            by_stream = {
+                row.stream_id: row
+                for row in streaming.parse_mapping_csv(
+                    (root / "authoritative.csv").read_bytes(),
+                    {"server_2"},
+                    require_enabled_servers=False,
+                )
+            }
+
+        self.assertEqual(
+            len(captured_updates), sync.MAX_RECHECK_APPLIES_PER_RUN
+        )
+        self.assertEqual(
+            [row["action"] for row in captured_updates],
+            ["AUTO_EPGSHARE"] * epgshare_count + ["KEEP_PANEL"] * 10,
+        )
+        self.assertEqual(
+            [row["stream_id"] for row in captured_native_allowlist],
+            [f"r{index:04d}" for index in range(epgshare_count, epgshare_count + 10)],
+        )
+        self.assertEqual(summary["review_recheck_safe_matches"], total_rows)
+        self.assertEqual(
+            summary["review_recheck_safe_matches_persisted"],
+            sync.MAX_RECHECK_APPLIES_PER_RUN,
+        )
+        self.assertEqual(
+            summary["review_recheck_rows_updated"],
+            sync.MAX_RECHECK_APPLIES_PER_RUN,
+        )
+        self.assertEqual(summary["review_recheck_deferred_rows"], 10)
+        self.assertEqual(summary["native_review_verified"], 20)
+        self.assertEqual(summary["native_review_persisted"], 10)
+        self.assertEqual(summary["native_review_deferred"], 10)
+        self.assertTrue(by_stream[f"r{epgshare_count - 1:04d}"].runtime_eligible)
+        self.assertTrue(
+            by_stream[f"r{sync.MAX_RECHECK_APPLIES_PER_RUN - 1:04d}"].runtime_eligible
+        )
+        self.assertFalse(
+            by_stream[f"r{sync.MAX_RECHECK_APPLIES_PER_RUN:04d}"].runtime_eligible
+        )
+
+    def test_unavailable_native_source_does_not_block_other_verified_updates(self) -> None:
+        provenance = (
+            "Automatically discovered 2026-09-16T00:00:00Z; "
+            "existing Sheet rows were not changed."
+        )
+        rows: list[dict[str, str]] = []
+        for server_id, stream_id, channel_name in (
+            ("server_1", "epg-1", "EPGShare One"),
+            ("server_2", "native-2", "Server Two News"),
+            ("server_3", "native-3", "Server Three News"),
+        ):
+            row = mapping_row(
+                server_id,
+                stream_id,
+                channel_name,
+                action="REVIEW",
+                source="epgshare01",
+                epg_feed="ALL_SOURCES1",
+                epg_id="",
+            )
+            row.update({"enabled": "FALSE", "notes": provenance})
+            rows.append(row)
+
+        epgshare_result = dict(rows[0])
+        epgshare_result.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_EPGSHARE",
+                "epg_id": "EPGShare.One.us2",
+                "reason": "Smart Rules verified",
+            }
+        )
+        outcome = self.fake_recheck_outcome(
+            [epgshare_result, dict(rows[1]), dict(rows[2])]
+        )
+        inventories = [
+            inventory(
+                "server_1",
+                [
+                    {
+                        "stream_id": "epg-1",
+                        "name": "EPGShare One",
+                        "category_name": "General",
+                    }
+                ],
+            ),
+            inventory(
+                "server_2",
+                [
+                    {
+                        "stream_id": "native-2",
+                        "name": "Server Two News",
+                        "category_name": "General",
+                        "epg_channel_id": "native.two",
+                    }
+                ],
+            ),
+            inventory(
+                "server_3",
+                [
+                    {
+                        "stream_id": "native-3",
+                        "name": "Server Three News",
+                        "category_name": "General",
+                        "epg_channel_id": "native.three",
+                    }
+                ],
+            ),
+        ]
+        validation = sync.native_review.NativeValidation(
+            frozenset({"native.three"}),
+            1,
+            {"native.three": ("Server Three News",)},
+        )
+        current_mapping_rows = [dict(row) for row in rows]
+        captured_updates: list[dict[str, str]] = []
+        captured_native_allowlist: list[dict[str, str]] = []
+
+        def read_mapping(*_args, **_kwargs):
+            return mapping_values(current_mapping_rows)
+
+        def download_native(server_id, path):
+            if server_id == "server_2":
+                raise streaming.BuildError("fixture unavailable")
+            self.assertEqual(server_id, "server_3")
+            return Path(path), {}
+
+        def apply_updates(
+            _session,
+            _sheet_id,
+            _tab_name,
+            base_table,
+            desired_rows,
+            *,
+            pre_write_check=None,
+            verified_native_rows=(),
+        ):
+            if pre_write_check is not None:
+                pre_write_check()
+            captured_updates.extend(dict(row) for row in desired_rows)
+            captured_native_allowlist.extend(
+                dict(row) for row in verified_native_rows
+            )
+            by_key = {
+                (row["server_id"], row["stream_id"]): dict(row)
+                for row in desired_rows
+            }
+            final_rows = [
+                by_key.get((row["server_id"], row["stream_id"]), dict(row))
+                for row in base_table.rows
+            ]
+            current_mapping_rows[:] = [dict(row) for row in final_rows]
+            return len(desired_rows), table(final_rows)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            sync, "google_sheet_values", side_effect=read_mapping
+        ), mock.patch.object(
+            sync,
+            "google_sync_alert_values",
+            return_value=[list(sync.ALERT_COLUMNS)],
+        ), mock.patch.object(
+            sync, "append_sync_alert_rows", return_value=0
+        ), mock.patch.object(
+            sync.automatch, "auto_match_and_spool", return_value=outcome
+        ), mock.patch.object(
+            sync.streaming, "download_panel_xmltv", side_effect=download_native
+        ) as download, mock.patch.object(
+            sync.native_review, "validate_native_xmltv", return_value=validation
+        ) as validate, mock.patch.object(
+            sync,
+            "revalidate_native_review_updates",
+            side_effect=lambda updates, *_args: (
+                list(updates),
+                {
+                    "native_review_revalidation_checked": len(updates),
+                    "native_review_revalidation_rejected": 0,
+                    "native_review_revalidation_unavailable": 0,
+                },
+            ),
+        ), mock.patch.object(
+            sync, "update_google_sheet_review_rows", side_effect=apply_updates
+        ):
+            root = Path(temporary)
+            summary = sync.run_sync(
+                table=table([]),
+                inventories=inventories,
+                output_dir=root / "reports",
+                generated_at="2026-09-16T00:00:00Z",
+                snapshot_out=root / "effective.csv",
+                authoritative_snapshot_out=root / "authoritative.csv",
+                snapshot_manifest_out=root / "manifest.json",
+                google_session=object(),
+                sheet_id="a" * 30,
+                all_source_file=root / "all.xml.gz",
+                all_source_catalog_file=root / "all.txt",
+                epgshare_spool_out=root / "selected.sqlite3",
+                review_recheck_mode="apply",
+                review_recheck_servers=("server_1", "server_2", "server_3"),
+                validate_native_review=True,
+            )
+
+        self.assertEqual(download.call_count, 2)
+        validate.assert_called_once()
+        self.assertEqual(
+            [(row["server_id"], row["action"]) for row in captured_updates],
+            [
+                ("server_1", "AUTO_EPGSHARE"),
+                ("server_3", "KEEP_PANEL"),
+            ],
+        )
+        self.assertEqual(
+            [row["stream_id"] for row in captured_native_allowlist],
+            ["native-3"],
+        )
+        self.assertEqual(summary["native_review_candidates"], 2)
+        self.assertEqual(summary["native_review_source_unavailable"], 1)
+        self.assertEqual(summary["native_review_verified"], 1)
+        self.assertEqual(summary["native_review_persisted"], 1)
+        self.assertEqual(summary["review_recheck_safe_matches"], 2)
+        self.assertEqual(summary["review_recheck_safe_matches_persisted"], 2)
+        self.assertEqual(summary["review_recheck_rows_updated"], 2)
 
 
 if __name__ == "__main__":

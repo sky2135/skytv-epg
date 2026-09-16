@@ -23,15 +23,12 @@ import stat
 import sys
 import unicodedata
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import requests
-from lxml import etree
-
-
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPOSITORY_ROOT = SCRIPT_DIR.parent
 SRC_DIR = REPOSITORY_ROOT / "src"
@@ -42,6 +39,7 @@ for import_path in (SCRIPT_DIR, SRC_DIR):
 import auto_match_inventory as automatch  # noqa: E402
 import build_epg_streaming as streaming  # noqa: E402
 import epg_catalog_stream as catalog_stream  # noqa: E402
+import native_epg_review as native_review  # noqa: E402
 import sync_channel_inventory as sync  # noqa: E402
 from skytv_epg_auto_match_v1 import MatcherIdentity  # noqa: E402
 from skytv_epg_contextual_v8 import (  # noqa: E402
@@ -60,17 +58,10 @@ MAX_PUBLIC_SUMMARY_BYTES = 64 * 1024
 MAX_PUBLIC_SERVER_COUNT = 250_000
 MAX_PUBLIC_TOTAL_COUNT = MAX_PUBLIC_SERVER_COUNT * len(SUPPORTED_SERVERS)
 MAX_PUBLIC_CATALOG_COUNT = 250_000
-MAX_NATIVE_REQUEST_IDS = 250_000
-MIN_NATIVE_CATALOG_IDS = 100
-MAX_NATIVE_GATE_SIGNATURES = catalog_stream.MAX_GATE_SIGNATURES_PER_ID
-NATIVE_GATE_HORIZON_SECONDS = catalog_stream.DEFAULT_GATE_HORIZON_SECONDS
-NATIVE_GATE_MINIMUM_PROGRAMMES = catalog_stream.DEFAULT_GATE_MINIMUM_PROGRAMMES
-NATIVE_GATE_MINIMUM_FUTURE_SECONDS = (
-    catalog_stream.DEFAULT_GATE_MINIMUM_FUTURE_SECONDS
-)
-NATIVE_GATE_MAXIMUM_INITIAL_GAP_SECONDS = (
-    catalog_stream.DEFAULT_GATE_MAXIMUM_INITIAL_GAP_SECONDS
-)
+# Retain these public aliases for the analyzer's compatibility tests and any
+# external read-only tooling while keeping the implementation in one module.
+MIN_NATIVE_CATALOG_IDS = native_review.MIN_NATIVE_CATALOG_IDS
+NativeValidation = native_review.NativeValidation
 SERVER_PUBLIC_FIELDS = frozenset(
     {
         "provider_available",
@@ -129,19 +120,6 @@ class ReviewItem:
     @property
     def key(self) -> tuple[str, str]:
         return self.server_id, self.stream_id
-
-
-@dataclass
-class _NativeGateAccumulator:
-    signatures: set[tuple[int, int]] = field(default_factory=set)
-    first_start: int | None = None
-    latest_stop: int | None = None
-
-
-@dataclass(frozen=True)
-class NativeValidation:
-    verified_ids: frozenset[str]
-    requested_ids: int
 
 
 def _canonical_key(server_id: object, stream_id: object) -> tuple[str, str]:
@@ -266,19 +244,6 @@ def build_cluster_keys(
     return result
 
 
-def _freeze_safe_native_ids(
-    requested_ids: frozenset[str], source_ids: set[str]
-) -> frozenset[str]:
-    variants: dict[str, set[str]] = defaultdict(set)
-    for source_id in source_ids:
-        variants[source_id.casefold()].add(source_id)
-    return frozenset(
-        requested
-        for requested in requested_ids
-        if requested in source_ids and variants.get(requested.casefold()) == {requested}
-    )
-
-
 def validate_native_xmltv(
     path: Path,
     *,
@@ -286,185 +251,17 @@ def validate_native_xmltv(
     requested_ids: Iterable[str],
     now_epoch: int,
 ) -> NativeValidation:
-    """Validate exact native IDs with the same strong six-hour guide policy."""
-    normalized_server = streaming.normalize_server_id(server_id)
-    if normalized_server == "server_1":
-        raise BacklogAnalysisError("Server 1 native EPG validation is forbidden.")
-    if normalized_server not in {"server_2", "server_3"}:
-        raise BacklogAnalysisError("Native EPG validation received an unsupported server.")
-    requested = frozenset(
-        streaming.clean_identifier(value, 300) for value in requested_ids if value
-    )
-    if "" in requested or len(requested) > MAX_NATIVE_REQUEST_IDS:
-        raise BacklogAnalysisError("The native EPG candidate set is invalid or too large.")
-    if not requested:
-        return NativeValidation(frozenset(), 0)
-
-    source = Path(path)
+    """Run the shared exact native-ID validator under analyzer-safe errors."""
     try:
-        mode = source.lstat().st_mode
-    except OSError as exc:
-        raise BacklogAnalysisError("A native XMLTV source is unavailable.") from exc
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        raise BacklogAnalysisError("A native XMLTV source is not a regular file.")
-    try:
-        streaming.reject_unsafe_xml_prefix(
-            source,
-            allow_inert_xmltv_doctype=True,
-            source_label=f"panel:{normalized_server}",
+        return native_review.validate_native_xmltv(
+            path,
+            server_id=server_id,
+            requested_ids=requested_ids,
+            now_epoch=now_epoch,
         )
-    except streaming.BuildError as exc:
-        raise BacklogAnalysisError("A native XMLTV source failed its security preflight.") from exc
-
-    source_ids: set[str] = set()
-    safe_ids: frozenset[str] | None = None
-    accumulators = {value: _NativeGateAccumulator() for value in requested}
-    root_element: etree._Element | None = None
-    active_top_level: etree._Element | None = None
-    active_child_elements = 0
-    total_elements = 0
-    programme_phase_started = False
-    gate_end = int(now_epoch) + NATIVE_GATE_HORIZON_SECONDS
-    maximum_gate_stop = gate_end + catalog_stream.MAX_GATE_PROGRAMME_DURATION_SECONDS
-
-    try:
-        with streaming.open_limited_xml(
-            source, streaming.MAX_SOURCE_EXPANDED_BYTES
-        ) as handle:
-            context = etree.iterparse(
-                handle,
-                events=("start", "end"),
-                recover=False,
-                huge_tree=False,
-                load_dtd=False,
-                no_network=True,
-                resolve_entities=False,
-                remove_comments=True,
-                remove_pis=True,
-            )
-            for event, element in context:
-                if event == "start":
-                    if root_element is None:
-                        root_element = element
-                        streaming.reject_parsed_doctype(
-                            element,
-                            allow_inert_xmltv_doctype=True,
-                            source_label=f"panel:{normalized_server}",
-                        )
-                        if streaming.local_name(element.tag) != "tv":
-                            raise BacklogAnalysisError(
-                                "A native EPG source is not an XMLTV document."
-                            )
-                    elif element.getparent() is root_element:
-                        child_name = streaming.local_name(element.tag)
-                        if child_name not in {"channel", "programme"}:
-                            raise BacklogAnalysisError(
-                                "A native XMLTV source has an unsupported top-level record."
-                            )
-                        active_top_level = element
-                        active_child_elements = 0
-                    elif active_top_level is not None:
-                        active_child_elements += 1
-                        if active_child_elements > streaming.MAX_RECORD_CHILD_ELEMENTS:
-                            raise BacklogAnalysisError(
-                                "A native XMLTV record exceeds its configured limit."
-                            )
-                    continue
-                if root_element is None or element.getparent() is not root_element:
-                    continue
-
-                record_name = streaming.local_name(element.tag)
-                total_elements += 1
-                if total_elements > streaming.MAX_SOURCE_ELEMENTS:
-                    raise BacklogAnalysisError(
-                        "A native XMLTV source exceeds its configured record limit."
-                    )
-                if record_name == "channel":
-                    if programme_phase_started:
-                        raise BacklogAnalysisError(
-                            "A native XMLTV source declares channels after programmes."
-                        )
-                    source_id = streaming.clean_identifier(
-                        element.get("id") or "", 300
-                    )
-                    if source_id:
-                        source_ids.add(source_id)
-                        if len(source_ids) > sync.MAX_CHANNELS_PER_SERVER:
-                            raise BacklogAnalysisError(
-                                "A native XMLTV source has too many channel identities."
-                            )
-                else:
-                    if not programme_phase_started:
-                        programme_phase_started = True
-                        safe_ids = _freeze_safe_native_ids(requested, source_ids)
-                    source_id = streaming.clean_identifier(
-                        element.get("channel") or "", 300
-                    )
-                    if safe_ids is not None and source_id in safe_ids:
-                        start_epoch = streaming.parse_xmltv_time(element.get("start"))
-                        stop_epoch = streaming.parse_xmltv_time(element.get("stop"))
-                        title = streaming.preferred_child_text(element, "title")
-                        if (
-                            start_epoch is not None
-                            and stop_epoch is not None
-                            and stop_epoch > now_epoch
-                            and start_epoch < gate_end
-                            and catalog_stream.informative_programme_title(title)
-                        ):
-                            duration = int(stop_epoch) - int(start_epoch)
-                            if (
-                                0 < duration
-                                <= catalog_stream.MAX_GATE_PROGRAMME_DURATION_SECONDS
-                                and stop_epoch <= maximum_gate_stop
-                            ):
-                                accumulator = accumulators[source_id]
-                                signature = (int(start_epoch), int(stop_epoch))
-                                if (
-                                    signature in accumulator.signatures
-                                    or len(accumulator.signatures)
-                                    < MAX_NATIVE_GATE_SIGNATURES
-                                ):
-                                    accumulator.signatures.add(signature)
-                                accumulator.first_start = (
-                                    int(start_epoch)
-                                    if accumulator.first_start is None
-                                    else min(accumulator.first_start, int(start_epoch))
-                                )
-                                accumulator.latest_stop = (
-                                    int(stop_epoch)
-                                    if accumulator.latest_stop is None
-                                    else max(accumulator.latest_stop, int(stop_epoch))
-                                )
-                streaming.release_top_level(element)
-                active_top_level = None
-                active_child_elements = 0
-            del context
-    except BacklogAnalysisError:
-        raise
-    except (streaming.BuildError, etree.XMLSyntaxError, OSError, EOFError) as exc:
-        raise BacklogAnalysisError("A native XMLTV source is malformed or unavailable.") from exc
-
-    if root_element is None:
-        raise BacklogAnalysisError("A native XMLTV source is empty.")
-    if len(source_ids) < MIN_NATIVE_CATALOG_IDS:
-        raise BacklogAnalysisError(
-            "A native XMLTV source is below its conservative completeness floor."
-        )
-    if safe_ids is None:
-        safe_ids = _freeze_safe_native_ids(requested, source_ids)
-    required_stop = int(now_epoch) + NATIVE_GATE_MINIMUM_FUTURE_SECONDS
-    latest_near_start = int(now_epoch) + NATIVE_GATE_MAXIMUM_INITIAL_GAP_SECONDS
-    verified = frozenset(
-        source_id
-        for source_id in safe_ids
-        for accumulator in (accumulators[source_id],)
-        if accumulator.first_start is not None
-        and accumulator.first_start <= latest_near_start
-        and len(accumulator.signatures) >= NATIVE_GATE_MINIMUM_PROGRAMMES
-        and accumulator.latest_stop is not None
-        and accumulator.latest_stop >= required_stop
-    )
-    return NativeValidation(verified, len(requested))
+    except native_review.NativeReviewError as exc:
+        # Shared validator messages are fixed and contain no provider data.
+        raise BacklogAnalysisError(str(exc)) from exc
 
 
 def _mapping_rows_by_key(
@@ -549,7 +346,13 @@ def select_native_advisory_candidates(
     inventory_channels: Mapping[tuple[str, str], Mapping[str, Any]],
     changed_keys: Iterable[tuple[str, str]],
 ) -> dict[str, frozenset[tuple[str, str]]]:
-    """Select exact auto-discovered panel IDs for read-only validation only."""
+    """Select fresh exact panel IDs for read-only validation only.
+
+    A newly discovered row can legitimately have no stored native ID when the
+    provider's API omitted it and the current authenticated M3U supplied it
+    later.  Accept that original blank state, or an unchanged stored native
+    ID, but never replace a conflicting/manual candidate.
+    """
     changed = frozenset(changed_keys)
     result: dict[str, set[tuple[str, str]]] = {
         "server_1": set(),
@@ -574,14 +377,11 @@ def select_native_advisory_candidates(
                 default=False,
                 field_name="mapping enabled",
             )
-            source = streaming.normalize_requested_source(
-                row.get("source", ""), row.get("epg_feed", ""), row_number=0
-            )
         except streaming.BuildError as exc:
             raise BacklogAnalysisError(
                 "A native-advisory mapping has invalid EPG controls."
             ) from exc
-        if enabled or source != "panel":
+        if enabled:
             continue
         notes = streaming.clean_text(row.get("notes", ""), 2000)
         if not re.fullmatch(
@@ -591,15 +391,100 @@ def select_native_advisory_candidates(
             notes,
         ):
             continue
-        stored_id = streaming.clean_identifier(row.get("epg_id", ""), 300)
-        current_id = streaming.clean_identifier(
-            inventory_channels[item.key].get("epg_channel_id", ""), 300
-        )
-        if stored_id and stored_id == current_id:
+        channel = inventory_channels[item.key]
+        if (
+            channel.get(
+                "_native_epg_id_raw_present",
+                bool(channel.get("epg_channel_id", "")),
+            )
+            and channel.get("_native_epg_id_exact", True) is not True
+        ):
+            continue
+        raw_stored_id = str(row.get("epg_id", "") or "")
+        stored_id = streaming.clean_identifier(raw_stored_id, 300)
+        raw_current_id = str(channel.get("epg_channel_id", "") or "")
+        current_id = streaming.clean_identifier(raw_current_id, 300)
+        if stored_id != raw_stored_id or current_id != raw_current_id:
+            continue
+        if not current_id or (stored_id and stored_id != current_id):
+            continue
+
+        # These are the only two untouched discovery states produced by
+        # new_mapping_row().  Requiring the matching source/feed pair prevents
+        # a partially edited/manual REVIEW row from entering the native lane.
+        source = streaming.clean_text(row.get("source", ""), 40).casefold()
+        feed = streaming.clean_text(row.get("epg_feed", ""), 80).casefold()
+        if stored_id:
+            untouched_controls = (
+                source == "panel" and feed in {"panel", "server xmltv.php"}
+            )
+        else:
+            # Mirror the writer exactly: new_mapping_row() creates this one
+            # untouched blank-ID state. A blank legacy/manual panel row is not
+            # silently repurposed even when the current provider supplies an ID.
+            untouched_controls = (
+                source == "epgshare01" and feed == "all_sources1"
+            )
+        if untouched_controls:
             result[item.server_id].add(item.key)
     return {
         server_id: frozenset(values) for server_id, values in result.items()
     }
+
+
+def _identity_verified_native_keys(
+    *,
+    candidate_keys: Iterable[tuple[str, str]],
+    inventory_channels: Mapping[tuple[str, str], Mapping[str, Any]],
+    validation: NativeValidation,
+) -> frozenset[tuple[str, str]]:
+    """Bind verified native schedules to one unambiguous station identity."""
+
+    candidates = frozenset(candidate_keys)
+    requested_ids = frozenset(
+        streaming.clean_identifier(
+            inventory_channels[key].get("epg_channel_id", ""), 300
+        )
+        for key in candidates
+    )
+    if (
+        "" in requested_ids
+        or int(validation.requested_ids) != len(requested_ids)
+        or not validation.verified_ids.issubset(requested_ids)
+    ):
+        raise BacklogAnalysisError("Native EPG validation did not reconcile.")
+
+    names_by_id = validation.display_names_by_id
+    if not isinstance(names_by_id, Mapping):
+        return frozenset()
+
+    ids_by_normalized_name: dict[str, set[str]] = {}
+    for epg_id in requested_ids:
+        display_names = names_by_id.get(epg_id, ())
+        if isinstance(display_names, (str, bytes)):
+            continue
+        for display_name in display_names:
+            name_key = native_review.native_display_name_key(display_name)
+            if name_key:
+                ids_by_normalized_name.setdefault(name_key, set()).add(epg_id)
+
+    verified: set[tuple[str, str]] = set()
+    for key in candidates:
+        channel = inventory_channels[key]
+        epg_id = streaming.clean_identifier(channel.get("epg_channel_id", ""), 300)
+        if epg_id not in validation.verified_ids:
+            continue
+        provider_name = streaming.clean_identifier(channel.get("name", ""), 300)
+        provider_key = native_review.native_display_name_key(provider_name)
+        display_names = names_by_id.get(epg_id, ())
+        if (
+            provider_key
+            and not isinstance(display_names, (str, bytes))
+            and native_review.native_names_compatible(provider_name, display_names)
+            and ids_by_normalized_name.get(provider_key) == {epg_id}
+        ):
+            verified.add(key)
+    return frozenset(verified)
 
 
 def run_epgshare_analysis(
@@ -744,10 +629,10 @@ def build_public_summary(
         key = item.key
         if item.safety_blocked:
             lane = "safety_blocked"
-        elif key in native_verified.get(item.server_id, frozenset()):
-            lane = "native_verified"
         elif key in strict_epgshare:
             lane = "strict_epgshare"
+        elif key in native_verified.get(item.server_id, frozenset()):
+            lane = "native_verified"
         elif key in verified_placeholders:
             lane = "verified_placeholder"
         elif key not in analysis_eligible:
@@ -1144,6 +1029,13 @@ def _load_live_inputs(
                 sync.provider_reflection_needles(config, [config.base_url]),
             )
             inventories.append(inventory)
+        inventories, _native_hint_summary = sync.enrich_review_inventories_from_m3u(
+            session,
+            inventories,
+            configs,
+            selected_servers=("server_2", "server_3"),
+            allow_insecure_http=bool(args.allow_insecure_http),
+        )
     except sync.SyncError as exc:
         raise BacklogAnalysisError(
             "A provider inventory was unavailable or failed validation."
@@ -1246,6 +1138,12 @@ def run_analysis(args: argparse.Namespace) -> dict[str, Any]:
         inventory_channels=inventory_channels,
         changed_keys=changed_keys,
     )
+    # Match Workflow 1's precedence exactly: a verified EPGShare result wins
+    # and is never also counted, validated, or written through KEEP_PANEL.
+    native_candidate_keys = {
+        server_id: frozenset(keys).difference(strict_matches)
+        for server_id, keys in native_candidate_keys.items()
+    }
     native_verified_keys: dict[str, frozenset[tuple[str, str]]] = {
         "server_1": frozenset()
     }
@@ -1274,13 +1172,10 @@ def run_analysis(args: argparse.Namespace) -> dict[str, Any]:
                 now_epoch=now_epoch,
             )
             native_status[server_id] = "available"
-            native_verified_keys[server_id] = frozenset(
-                key
-                for key in candidates
-                if streaming.clean_identifier(
-                    inventory_channels[key].get("epg_channel_id", ""), 300
-                )
-                in validation.verified_ids
+            native_verified_keys[server_id] = _identity_verified_native_keys(
+                candidate_keys=candidates,
+                inventory_channels=inventory_channels,
+                validation=validation,
             )
         except (BacklogAnalysisError, streaming.BuildError):
             # Native EPG is an optional lane.  A fixed status records its
@@ -1304,6 +1199,9 @@ def run_analysis(args: argparse.Namespace) -> dict[str, Any]:
         and analysis_eligible.issubset(review_keys)
         and strict_matches.issubset(matcher_eligible)
         and placeholders.issubset(matcher_eligible)
+        and not strict_matches.intersection(
+            *(native_candidate_keys[server_id] for server_id in SUPPORTED_SERVERS)
+        )
         and all(values.issubset(review_keys) for values in native_candidate_keys.values())
         and all(
             native_verified_keys[server_id].issubset(native_candidate_keys[server_id])

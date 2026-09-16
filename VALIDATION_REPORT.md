@@ -3,9 +3,46 @@
 **Local release status: PASS**  
 Validated through: 2026-09-16 UTC
 
-The catalog-rollover, Workflow 2 snapshot-guard, and native-panel XMLTV repairs
-have passed focused adversarial validation. The integrity manifest has been
-resealed for the repaired files, and the complete repository suite now passes.
+The catalog-rollover, Workflow 2 snapshot-guard, native-panel XMLTV, and
+Server 2/3 REVIEW-backlog repairs have passed focused adversarial validation.
+The integrity manifest has been resealed for the repaired files, and the
+complete repository suite now passes.
+
+## Server 2/3 native REVIEW recovery
+
+The read-only backlog report found 26,288 current REVIEW rows, but its original
+native selector required a native ID to have already been saved in the Sheet.
+That made a fresh provider/M3U ID invisible and produced zero native candidates.
+The corrected Workflow 1 path re-derives native evidence from the current run
+instead of trusting the aggregate report or a stale Sheet value.
+
+Automatic `KEEP_PANEL` approval now requires all of the following:
+
+- Server 2 or Server 3; Server 1 is rejected before native file access;
+- the exact current stream is present, unchanged, disabled, in `REVIEW`, and
+  absent from the complete `OPEN` alert quarantine;
+- an untouched automatic-discovery row with a blank ID, or the same already
+  stored native ID and native source controls;
+- a fresh API ID, or an M3U `tvg-id` recovered by exact numeric stream-ID and
+  exact normalized-name join;
+- no API/M3U disagreement;
+- an exact case-unique ID in a complete current native XMLTV catalog;
+- one unambiguous compatible XMLTV display name; and
+- the two-programme/six-hour current schedule gate.
+
+The Sheet writer requires the exact verified native update in a separate
+in-memory allowlist. Forged `KEEP_PANEL` rows, Server 1 native rows, unrelated
+cell changes, concurrent Sheet edits, or alert changes fail before or after the
+single atomic request. EPGShare and native approvals share the existing maximum
+of 1,000 deterministic updates per apply run. Dry-run performs every validation
+but changes no Sheet row.
+
+Adversarial coverage includes conflicting API/M3U IDs, trimmed IDs, duplicate
+M3U attributes, conflicting ID aliases, M3U name and stream-ID mismatches,
+manual or partial Sheet edits, ambiguous display names, case-only
+XMLTV ID collisions, placeholder schedules, unsafe DTD/entity declarations,
+symlink and file-swap attacks, native source outage, writer-allowlist forgery,
+alert races, and the non-negotiable Server 1 boundary.
 
 The owner must still run the private Google Sheet/provider checks in
 [`docs/REPAIR_CURRENT_SETUP_VERSION_1.md`](docs/REPAIR_CURRENT_SETUP_VERSION_1.md).
@@ -130,8 +167,10 @@ verifiable non-atomic source rollout to complete without silently approving the
 
 ## Automated code and workflow checks
 
-- Full repository suite: **283 tests passed, 0 failed**.
-- Snapshot/builder/synchronizer suite: **132 tests passed, 0 failed**.
+- Full repository suite: **404 tests passed, 0 failed**.
+- Stage 2 native/analyzer/synchronizer suite: **168 tests passed, 0 failed**,
+  including **125** synchronizer tests and **14** dedicated native XMLTV
+  adversarial tests.
 - Full 25,170-row Version 1 seed snapshot-bundle exercise: **passed**, including
   the exact Server 3 census of 9,943 authoritative, 1,180 quarantined, and 8,763
   effective runnable rows.
@@ -140,10 +179,10 @@ verifiable non-atomic source rollout to complete without silently approving the
   or EPG edits, stale hashes, duplicate and orphan alerts, pre-disabled rows,
   reserved-marker spoofing, per-server accounting, and last-good publication
   preservation.
-- Exact manual-workflow suite: **186 tests passed, 0 failed**.
 - Frozen matcher regression: **222 matching and safety cases passed**.
-- Independent adversarial catalog/auto-match/sync audit: **136 focused tests
-  passed with no remaining approval-safety blocker**.
+- Independent adversarial review found no remaining approval-safety blocker
+  after whole-catalog name-collision, raw-source parity, immediate provider
+  revalidation, and user-facing summary corrections.
 - Production-sized live XML/TXT one-pass validation after the final
   Unicode/case/route hardening: **passed**.
 - Python compilation, installed-dependency consistency, integrity-manifest
@@ -261,21 +300,25 @@ the owner's private Sheet remains part of the documented OFF-then-ON test.
 | File | SHA-256 |
 |---|---|
 | `scripts/build_epg_streaming.py` | `3b88fbd4e41284607fdde2783d618864b3fb15b54ff2747ec4b5c3e557e56d97` |
-| `src/skytv_epg_auto_match_v1.py` | `e2f175e3fd5be2cbe814305ef8eb5ae05dddce054e3ca0e46b1aab44988a049c` |
-| `scripts/auto_match_inventory.py` | `647f7bab7d11e9021639f67038a9d2faba54356c85da1b5513ec2cbcd882a66b` |
+| `src/skytv_epg_auto_match_v1.py` | `8f346761daa5da73fcd5abe79d582c22557cdd1b8496ec90ef3e47174f61deaa` |
+| `scripts/auto_match_inventory.py` | `cbf40f15c0acd7f58d13449674774804fa566b1fba76c2abb73cc2e29b6d1922` |
 | `scripts/epg_catalog_stream.py` | `fb04f5f9097bffe96ba4f3a421b4d53f1ce6110dc80e390ee45a91f2d99a9821` |
 | `scripts/epg_selection_spool.py` | `c0ad4e485972b206515f2205e37cf056593cb1105035a6031ef95b5371cd1336` |
-| `scripts/sync_channel_inventory.py` | `df1a544c3f86aeaacfd88e2105769ed2b4fbb476b14c26fb0b844dbe0fb20bff` |
+| `scripts/analyze_review_backlog.py` | `d5af5112922e4d1a7ce85dd34ceffa3cb732d5680e60fb7e5e6eb2f4550d3ab2` |
+| `scripts/native_epg_review.py` | `89e6145f2b855b6cbab43b32582985b68af3365b7cbc9e5c0232ce23bb274fee` |
+| `scripts/sync_channel_inventory.py` | `aa814787ac5186b31671248de41cb002822897c02a3e073e3d3fd963cc6663e1` |
 | `.github/workflows/main.yml` | `23770174a7690423b9c835c789ebb6ca43c701bdf448b65a1970132e5c0e4a11` |
-| `.github/workflows/channel_inventory_sync.yml` | `0f4a477b18012436691bf08ffb884eaa818fc14bbaa3ac871b55bc37f97a4eb4` |
+| `.github/workflows/channel_inventory_sync.yml` | `8dfde002cb5dda72b26376ea4b4fc19b71063e2140d379f4d3c104648be2a885` |
 | `requirements-sync.txt` | `cb80ac4377fa3656ea135c65273fdc1b6ba7f5ce198f1f14ccb13de0e3ed593f` |
-| `MATCHER_INTEGRITY.json` | `f8f456a19eb2114e74e11df2898264a40b5176c78f1cf8d200eb04a1fd0a9fbf` |
+| `MATCHER_INTEGRITY.json` | `c8bc69922b47816e9950326c1e6c53d0d5e0133f732cf3bf9dc3c9bd9177bbca` |
 
 ## External validation still required
 
 This local repair did not use the owner's provider credentials, Google service
 account, private Sheet, or GitHub Pages environment. Keep the current Sheet,
 repository, `main` branch, and Pages setup. Install the affected replacement
-files and rerun Workflow 2. The 43 alerts were already durably stored, so there
-is no need to rerun Workflow 1 solely for this error and no reason to bulk-mark
-the approximately 1,570 alerts `RESOLVED`.
+files, then run Workflow 1 first in `dry-run` mode with server scope `all` and
+Gemini off. If the summary is healthy, rerun in `apply` mode. Each apply may
+enable up to 1,000 exact verified EPGShare/native mappings; rerun only while the
+summary reports verified matches deferred by the write limit. Do not bulk-mark
+open alerts `RESOLVED` and do not enable unresolved rows manually.

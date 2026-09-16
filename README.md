@@ -70,7 +70,11 @@ repeat that exact-key comparison automatically.
 Workflow 1 can also recheck those existing `REVIEW` rows. Smart Rules always
 run first. A match is enabled only after the same exact-ID, region, catalog,
 and programme checks used for a new channel all pass. One apply run changes at
-most 100 such verified rows; rerun the workflow to continue a larger backlog.
+most 1,000 such verified rows; rerun the workflow to continue a larger backlog.
+For Server 2 and Server 3, the same run may also recover an exact native ID
+from current API/M3U evidence, but only after whole-catalog name uniqueness,
+current programme, and immediate pre-write provider checks pass. Server 1
+remains EPGShare-only.
 Optional Gemini review is limited to 50 unresolved rows per run. Gemini can
 never approve or enable a row. A `HIGH` suggestion stores only an exact,
 locally verified EPGShare candidate. An abstention or lower-confidence answer

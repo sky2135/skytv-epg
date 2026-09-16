@@ -509,11 +509,12 @@ Then apply verified Smart Rules matches:
    **Gemini HIGH suggestions saved for manual approval** is the smaller number
    durably stored in the Sheet. Saved suggestions are still disabled.
 7. If **Safe matches deferred by the write limit** is above zero, run the same
-   apply operation again. One run activates at most 100 verified Smart Rules
-   matches, so a large backlog is intentionally completed over several runs.
+   apply operation again. One run activates at most 1,000 verified EPG matches,
+   so a large backlog is intentionally completed over several runs.
 
-Smart Rules always run before Gemini. A verified Smart Rules match becomes
-`AUTO_EPGSHARE` and is enabled. Gemini receives at most 50 unresolved channels
+Smart Rules and the exact Server 2/3 native validation lane run before Gemini.
+A verified EPGShare match becomes `AUTO_EPGSHARE`; a verified Server 2/3 native
+match becomes `KEEP_PANEL`. Both are enabled. Gemini receives at most 50 unresolved channels
 per run and cannot approve a row. A `HIGH` suggestion saves its exact,
 locally verified EPGShare ID and candidate name, but the row remains
 `enabled=FALSE` and `action=REVIEW`. An abstention or lower-confidence answer
@@ -760,8 +761,7 @@ in the official text catalog also stops the full unattended-matching preflight.
 Your regular task is:
 
 1. Run Workflow 1 in `dry-run` recheck mode when you want updated backlog
-   counts, then use `apply` to activate up to 100 newly verified Smart Rules
-   matches.
+   counts, then use `apply` to activate up to 1,000 newly verified EPG matches.
 2. Open the Google Sheet and filter `action` to `REVIEW`.
 3. Manually decide only the remaining uncertain rows, including any Gemini
    suggestions. Leave anything you cannot verify disabled and in review.
