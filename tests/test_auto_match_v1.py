@@ -231,6 +231,7 @@ def proposals_for(
     server_id: str = "server_1",
     channels=None,
     existing_keys=(),
+    target_keys=None,
     exact_catalog=None,
     matcher_identity=None,
     preflight=None,
@@ -249,6 +250,7 @@ def proposals_for(
         channels=channels,
         category_names={"sports": "US | Sports"},
         existing_keys=existing_keys,
+        target_keys=target_keys,
         catalog=exact_catalog or catalog("Good.Channel.us2"),
         matcher_identity=matcher_identity or identity(),
         preflight=preflight or MatcherPreflight(True, "ok"),
@@ -319,6 +321,35 @@ class StrictAutoMatchV1Tests(unittest.TestCase):
         self.assertEqual(len(resolver.calls), 1)
         self.assertEqual(resolver.calls[0]["row"]["channel_name"], "New")
         self.assertEqual(len(resolver.engine.profile_inputs[0][0]), 2)
+
+    def test_explicit_target_can_recheck_one_existing_identity_only(self) -> None:
+        channels = [
+            {"stream_id": "1", "name": "Existing", "category_id": "sports"},
+            {"stream_id": "2", "name": "Unseen", "category_id": "sports"},
+        ]
+        resolver = FakeResolver({"Existing": real_match()})
+
+        proposals = proposals_for(
+            resolver,
+            channels=channels,
+            existing_keys={("server_1", "1")},
+            target_keys={("server_1", "1")},
+        )
+
+        self.assertEqual(set(proposals), {("server_1", "1")})
+        self.assertEqual(len(resolver.calls), 1)
+        self.assertEqual(resolver.calls[0]["row"]["channel_name"], "Existing")
+        self.assertEqual(len(resolver.engine.profile_inputs[0][0]), 2)
+
+    def test_explicit_target_rejects_an_identity_absent_from_inventory(self) -> None:
+        resolver = FakeResolver({"New Channel": real_match()})
+
+        with self.assertRaisesRegex(ValueError, "absent from inventory"):
+            proposals_for(
+                resolver,
+                existing_keys={("server_1", "missing")},
+                target_keys={("server_1", "missing")},
+            )
 
     def test_review_only_catalog_scans_are_suppressed_and_restored(self) -> None:
         resolver = ScanProbeResolver()

@@ -19,14 +19,16 @@ branch. It does not need a second repository or a `gh-pages` branch.
    EPGShare can publish those two files hours apart during a non-atomic
    rollover, so Version 1 uses
    only their exact, case-sensitive intersection and accepts only the small,
-   bounded rollover described below. The pinned matcher may propose an EPG for
-   previously unseen identities only; a proposal is activated only after
-   exact-ID, route, and current/future programme-gate verification from that
-   same open source file.
+   bounded rollover described below. The pinned matcher proposes an EPG for
+   previously unseen identities. A manual Workflow 1 option may also retry an
+   explicit set of eligible existing disabled `REVIEW` identities. A proposal
+   is activated only after exact-ID, route, and current/future programme-gate
+   verification from that same open source file.
    The compressed SHA-256, safety scan, catalog, and programmes are bound to
    one verified file descriptor rather than separate pathname reads.
-   Uncertain rows remain disabled in `REVIEW`. Existing mapping rows are not
-   edited or deleted.
+   Uncertain rows remain disabled in `REVIEW`. Ordinary refreshes do not edit
+   existing rows. The opt-in recheck can update only the bounded fields and
+   rows defined below; rows are never deleted.
 5. Possible stream-ID reuse is recorded in the private `Sync Alerts` tab and
    quarantined in the temporary build snapshot.
 6. The synchronizer seals selected EPGShare channels/programmes in a temporary
@@ -108,8 +110,10 @@ Google Sheet is the changing production authority.
 
 Do not rename `Mappings` or `Sync Alerts`, rearrange their columns, add title
 rows above their headers, merge cells in their data ranges, or delete their
-header rows. Sorting and filters are safe. The synchronizer copies formatting
-and data validation from `Mappings` row 2 to newly appended rows.
+header rows. Sorting and filters are safe while no workflow is writing. Do not
+edit, sort, insert, or delete rows while a write-enabled sync or recheck is
+queued or running. The synchronizer copies formatting and data validation from
+`Mappings` row 2 to newly appended rows.
 
 The unique mapping key is:
 
@@ -181,11 +185,13 @@ public metadata. A disabled or review-state row is absent from both and cannot
 enter personalization. An `OPEN` identity alert makes the temporary snapshot
 disabled and review-state even when the stored mapping had been active.
 
-### Newly discovered rows
+### Newly discovered rows and explicit REVIEW rechecks
 
-Only previously unseen exact `(server_id, stream_id)` keys enter automatic
-matching. Existing rows—including prior `REVIEW` rows and manual edits—are not
-rematched or rewritten.
+An ordinary refresh sends only previously unseen exact
+`(server_id, stream_id)` keys to automatic matching. Existing rows and manual
+edits are not rematched or rewritten by that path. Workflow 1 has a separate,
+manual `off` / `dry-run` / `apply` control that can submit an explicit allowlist
+of existing disabled `REVIEW` rows. It is off by default.
 
 A new row is activated as `AUTO_EPGSHARE` only when all of these independent
 checks succeed:
@@ -215,6 +221,54 @@ account credentials.
 Automatic EPG approval changes only schedule-control fields. New rows retain
 `metadata_status=review`; personalization language, region, genre, sport, and
 religion are not promoted to human-approved status.
+
+For the existing-row recheck, a candidate must be in the selected server
+scope, be present in the current provider inventory, have exactly
+`enabled=FALSE` and `action=REVIEW`, have no open or newly detected stream-ID
+reuse alert, and have no current provider/mapping identity mismatch. A row with
+an untracked manual EPG candidate is also excluded. `APPROVED`, `MANUAL`,
+`IGNORE`, active, missing, drifted, and quarantined rows are never candidates.
+
+Smart Rules run first against the same corroborated EPGShare catalog and
+same-snapshot programme gate used for new rows. `dry-run` does not write any
+existing `REVIEW` row. The separate new-channel append control remains
+independent, so operators should leave it off for a completely read-only
+preview. `apply` updates at most 100 verified Smart Rules matches per run;
+additional verified rows are reported as deferred for a later run. An
+accepted row becomes `enabled=TRUE`, `action=AUTO_EPGSHARE`,
+`source=epgshare01`, and `epg_feed=ALL_SOURCES1` with its exact verified ID.
+Server 1 has no panel exception.
+
+Optional Gemini review occurs only after Smart Rules and is capped at 50
+unresolved rows per run. No fuzzy shortlist work runs when Gemini is off. When
+it is on, shortlist staging rotates fairly across selected servers and has hard
+per-run ceilings of 250 attempted rows and 1,000,000 local comparisons. The
+request contains sanitized channel/category text and a bounded shortlist of
+exact real EPGShare candidates; it never contains
+provider credentials, provider URLs, playlists, or the full guide. The model
+must return schema-valid structured data and can select only a supplied
+candidate. Only a `HIGH` result stores that exact, locally verified candidate
+ID/name. It remains advisory: the row stays `enabled=FALSE` and
+`action=REVIEW` until a person verifies and approves it. An `ABSTAIN` or a
+below-`HIGH` result leaves the existing source/ID unchanged and writes only an
+`ai-review-v1` reason/note. This marks the row for manual review so later rows
+can advance in subsequent bounded runs. Quota exhaustion, malformed output,
+or an API outage makes no row change and remains retryable; it does not fail
+the deterministic recheck or activate a row. The free Gemini API tier may use
+submitted data to improve Google products.
+
+Before proposals are evaluated, the integration may register run-local
+cross-server aliases from the authoritative mapping snapshot. Evidence is
+limited to enabled human `MANUAL` or `APPROVED` EPGShare rows. One normalized
+alias must resolve to the same exact, currently corroborated, real, non-`ALL`
+EPG ID on at least two distinct server IDs. Any open identity alert, competing
+ID, conflict with the static approved-alias registry, dummy identity, or
+case/Unicode-normalization ambiguity excludes unsafe evidence or rejects the
+group. `AUTO_EPGSHARE` rows and disabled AI `REVIEW` suggestions are never
+evidence. Registration is only a deterministic identity hint: the proposed row
+must still pass its normal market, catalog, and same-snapshot programme gates.
+The aliases are rebuilt for each run and are not written to a knowledge file;
+neither Gemini nor its output writes matcher rules.
 
 ### EPGShare XML/text catalog rollover contract
 
@@ -284,14 +338,39 @@ If a channel should remain excluded, set `enabled=FALSE` and `action=IGNORE`
 instead of deleting it. Deleting it makes the next inventory refresh see it as
 new and append it again.
 
-## Append-only synchronization
+## Bounded Google Sheet synchronization
 
 The Google Sheets writer uses row-inserting value appends in retry-safe chunks
 and rereads every appended cell afterward. This path also supports Google
 native tables created when the supplied XLSX is imported; their table range is
 expanded after the values exist. Before appending, it compares exact mapping
 keys again so a rerun does not intentionally duplicate already accepted rows.
-It never sends an update or delete request for an existing `Mappings` row.
+This new-channel path never sends an update or delete request for an existing
+`Mappings` row.
+
+The existing-`REVIEW` apply path is deliberately separate. It records the
+exact set of `OPEN` alert identities used by Smart Rules, then rereads
+`Sync Alerts` immediately before every mapping mutation. Any added or removed
+`OPEN` identity invalidates the complete decision, including learned-alias
+evidence, and blocks the write. Immediately before updating existing rows, it
+also rereads the authoritative mapping table and requires it to match the
+decision snapshot. It then uses one bounded Google Sheets batch update to touch
+only these columns on the explicitly selected rows:
+
+```text
+enabled, action, source, epg_feed, epg_id, reason, notes
+```
+
+It rereads the Sheet after the request and verifies both the intended cells and
+all non-target rows. Every apply run performs one final authoritative mapping
+reread—even when it had zero updates—and only that terminal table can become
+the build snapshot. Immediately before sealing that snapshot, it rereads
+`Sync Alerts` once more and blocks publication if the exact matcher-time
+quarantine set changed. A missing, duplicate, moved, newly ineligible, or otherwise
+changed target stops the write. No code path deletes a mapping row or rewrites
+identity, provider, or personalization fields. Operators must not edit or sort
+the Sheet during an apply run because Google Sheets does not provide a general
+compare-and-swap transaction across human edits and API updates.
 
 The following conditions block a mass append:
 
@@ -434,6 +513,18 @@ Use `--servers` to select a subset in refresh mode, `--alerts-tab` only when a
 deliberately renamed alerts tab is also configured everywhere, and
 `--allow-insecure-http` only when a provider offers no HTTPS service.
 
+Workflow 1 additionally maps its controls to these optional arguments:
+
+```text
+--review-recheck-mode off|dry-run|apply
+--review-recheck-servers server_1 [server_2 server_3]
+--use-gemini-ai
+--ai-review-limit 10|25|50
+```
+
+`--use-gemini-ai` requires `GEMINI_API_KEY` in the environment and a recheck
+mode other than `off`. It does not grant the model approval authority.
+
 The local diagnostic directory contains:
 
 ```text
@@ -462,6 +553,38 @@ The GitHub run summary shows:
 | EPG IDs confirmed in both catalogs | `epgshare_shared_catalog_channels` | Size of the exact, case-sensitive intersection. |
 | XML-only EPG IDs quarantined | `epgshare_xml_only_catalog_channels` | IDs found only in the XML file and excluded from automatic approval. |
 | Text-only EPG IDs quarantined | `epgshare_text_only_catalog_channels` | IDs found only in the text file and excluded from automatic approval. |
+
+The recheck portion of the same summary uses exact counters rather than a
+provider-total subtraction:
+
+| Run-summary label | `summary.json` field | Meaning |
+|---|---|---|
+| Existing REVIEW recheck mode | `review_recheck_mode` | `off`, `dry-run`, or `apply`. |
+| Existing REVIEW channels eligible | `review_recheck_eligible_rows` | Rows that passed the current provider, state, drift, and alert filters. |
+| Existing REVIEW channels checked | `review_recheck_considered_rows` | Eligible rows submitted to Smart Rules. |
+| Existing REVIEW channels safely matched | `review_recheck_safe_matches` | Rows that passed the deterministic matcher and programme gate. |
+| Existing channels still requiring review | `review_recheck_still_review_rows` | Checked rows that Smart Rules did not verify. |
+| Existing REVIEW channels skipped by safety checks | `review_recheck_skipped_rows` | Disabled REVIEW rows in the selected scope excluded because they were missing, drifted, alerted, or held an untracked manual candidate. |
+| Safe matches deferred by the write limit | `review_recheck_deferred_rows` | Verified rows held for a later run by the 100-row apply cap. |
+| Existing REVIEW rows updated in Google Sheet | `review_recheck_rows_updated` | Exact existing-row updates confirmed by the post-write reread. |
+| Channels considered by Gemini | `ai_review_considered_rows` | Unresolved rows included in bounded Gemini review. |
+| Gemini HIGH suggestions found | `ai_review_high_suggestions_found` | Schema-valid `HIGH` suggestions backed by a supplied, locally verified candidate; in dry-run these are findings only. |
+| Gemini HIGH suggestions saved for manual approval | `ai_review_high_suggestions_persisted` | `HIGH` suggestions confirmed in the Sheet after an apply write while still disabled in `REVIEW`. |
+| Gemini reviews left unresolved | `ai_review_abstained_rows` | `ABSTAIN` or below-`HIGH` results marked `ai-review-v1` for manual review without changing source/ID. |
+| Gemini reviews unavailable or rejected | `ai_review_error_rows` | API failures or invalid responses that made no row change and remain retryable. |
+
+`summary.json` also keeps the individual `review_recheck_excluded_*` counts,
+which distinguish non-review, active, provider-missing, open-alert,
+identity-drift, and pre-existing manual-candidate exclusions.
+
+Run-local cross-server learning records these audit counters:
+
+| `summary.json` field | Meaning |
+|---|---|
+| `cross_server_alias_evidence_rows` | Eligible enabled human mapping rows examined as evidence. |
+| `cross_server_alias_groups_considered` | Normalized alias/market groups evaluated. |
+| `cross_server_aliases_registered` | Non-conflicting aliases supported by at least two distinct servers and added for this run. |
+| `cross_server_alias_groups_rejected` | Evidence groups rejected for fewer than two supporting servers, competing IDs, or a conflicting static rule. |
 
 `summary.json` also records `epgshare_catalog_channels`,
 `epgshare_text_catalog_channels`, `epgshare_catalog_drift_channels`, and
@@ -578,8 +701,12 @@ out read-only and generated files are not committed.
 ## Workflows and scheduling
 
 - `.github/workflows/channel_inventory_sync.yml` is a manual bootstrap or
-  on-demand inventory check. Its checkbox defaults to report-only and controls
-  whether new rows and alerts are appended.
+  on-demand inventory check. `update_google_sheet` controls new-row appends.
+  `recheck_existing_review` is independently `off` (default), `dry-run`, or
+  `apply`; `recheck_server` scopes it to one server or all three. Optional
+  `use_gemini_ai` enables advisory suggestions and `ai_review_limit` caps them
+  at 10, 25, or 50 rows. Gemini requires the `GEMINI_API_KEY` repository
+  secret and cannot be enabled when recheck mode is `off`.
 - `.github/workflows/main.yml` runs daily at 04:37 in `America/Toronto` and may
   also be started manually. It performs a refresh with Sheet writes, builds,
   validates, and deploys.
@@ -708,6 +835,13 @@ hashes are checked before deployment.
   region-consistent EPGShare identities with a strong same-snapshot programme
   guide are activated automatically. All fuzzy, ambiguous, adult, dummy,
   generic-numbered, or weak-guide matches require human review.
+- Existing `REVIEW` rows are retried only through the manual Workflow 1
+  recheck. One apply run activates at most 100 verified Smart Rules matches;
+  reruns continue a larger backlog. Gemini inspects at most 50 unresolved rows
+  and never activates them.
+- Provider channel totals, published-output totals, and EPG-covered totals do
+  not define the review backlog. Use the workflow's exact eligible, checked,
+  matched, unresolved, skipped, and deferred counters for the selected scope.
 - A row-level ambiguous result goes to `REVIEW`; a text catalog that is itself
   contradictory about real/dummy status or country market fails the full
   preflight before rows are written.

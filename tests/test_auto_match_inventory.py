@@ -301,6 +301,126 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertRegex(summary["epgshare_catalog_drift_sha256"], r"^[0-9a-f]{64}$")
             self.assertTrue(spool.is_file())
 
+    def test_new_and_existing_review_rows_are_counted_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(source, xml_bytes(strong=True))
+            text_catalog.write_bytes(text_catalog_bytes("Good.Channel.us2"))
+
+            existing_review = mapping_row(
+                server_id="server_1",
+                stream_id="review-1",
+                channel_name="US: Good Channel Existing",
+            )
+            new = mapping_row(
+                server_id="server_1",
+                stream_id="new-1",
+                channel_name="US: Good Channel New",
+            )
+            current_inventory = inventory(
+                server_id="server_1",
+                stream_id="review-1",
+                name="US: Good Channel Existing",
+            )
+            current_inventory.channels.append(
+                {
+                    **current_inventory.channels[0],
+                    "stream_id": "new-1",
+                    "name": "US: Good Channel New",
+                }
+            )
+
+            outcome = auto_match_and_spool(
+                mapping_rows=[existing_review],
+                inventories=[current_inventory],
+                new_rows=[new],
+                review_rows=[existing_review],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                minimum_unique_channels=1,
+                runtime_factory=RuntimeFactory(),
+            )
+
+            self.assertEqual(outcome.considered_rows, 2)
+            self.assertEqual(outcome.approved_rows, 2)
+            self.assertEqual(outcome.new_considered_rows, 1)
+            self.assertEqual(outcome.new_provisional_rows, 1)
+            self.assertEqual(outcome.new_approved_rows, 1)
+            self.assertEqual(outcome.new_review_rows, 0)
+            self.assertEqual(outcome.recheck_considered_rows, 1)
+            self.assertEqual(outcome.recheck_provisional_rows, 1)
+            self.assertEqual(outcome.recheck_approved_rows, 1)
+            self.assertEqual(outcome.recheck_review_rows, 0)
+            summary = outcome.summary_fields()
+            self.assertEqual(summary["auto_match_considered_rows"], 1)
+            self.assertEqual(summary["auto_match_provisional_rows"], 1)
+            self.assertEqual(summary["auto_matched_rows"], 1)
+            self.assertEqual(summary["review_recheck_considered_rows"], 1)
+            self.assertEqual(summary["review_recheck_provisional_rows"], 1)
+            self.assertEqual(summary["review_recheck_safe_matches"], 1)
+            self.assertTrue(spool.is_file())
+
+    def test_mixed_gate_summary_keeps_new_and_recheck_failures_separate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(source, xml_bytes(strong=False))
+            text_catalog.write_bytes(text_catalog_bytes("Good.Channel.us2"))
+            existing_review = mapping_row(
+                server_id="server_1",
+                stream_id="review-1",
+                channel_name="US: Good Channel Existing",
+            )
+            new = mapping_row(
+                server_id="server_1",
+                stream_id="new-1",
+                channel_name="US: Good Channel New",
+            )
+            current_inventory = inventory(
+                server_id="server_1",
+                stream_id="review-1",
+                name="US: Good Channel Existing",
+            )
+            current_inventory.channels.append(
+                {
+                    **current_inventory.channels[0],
+                    "stream_id": "new-1",
+                    "name": "US: Good Channel New",
+                }
+            )
+
+            outcome = auto_match_and_spool(
+                mapping_rows=[existing_review],
+                inventories=[current_inventory],
+                new_rows=[new],
+                review_rows=[existing_review],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                minimum_unique_channels=1,
+                runtime_factory=RuntimeFactory(),
+            )
+
+            self.assertEqual(outcome.provisional_rows, 2)
+            self.assertEqual(outcome.rejected_programme_gates, 2)
+            self.assertEqual(outcome.new_rejected_programme_gates, 1)
+            self.assertEqual(outcome.recheck_rejected_programme_gates, 1)
+            summary = outcome.summary_fields()
+            self.assertEqual(summary["auto_match_provisional_rows"], 1)
+            self.assertEqual(summary["auto_match_rejected_programme_gates"], 1)
+            self.assertEqual(summary["review_recheck_provisional_rows"], 1)
+            self.assertEqual(
+                summary["review_recheck_rejected_programme_gates"], 1
+            )
+
     def test_weak_schedule_stays_disabled_review(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             outcome, _factory, spool, _original = self.run_fixture(

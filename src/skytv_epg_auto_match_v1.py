@@ -1,9 +1,10 @@
-"""Fail-closed adapter for automatic mapping of newly discovered channels.
+"""Fail-closed adapter for explicitly authorized automatic channel matching.
 
 The frozen Smart Rules v8.4 matcher remains the source of candidate proposals.
 This module deliberately adds a narrower production boundary around it:
 
-* only previously unseen ``(server_id, stream_id)`` identities are considered;
+* the default boundary considers only previously unseen identities;
+* callers may explicitly allowlist existing disabled ``REVIEW`` identities;
 * Server 1's native EPG ID is never supplied to the matcher;
 * only an explicit set of deterministic matcher methods may become automatic;
 * fuzzy and broader inference methods remain disabled REVIEW suggestions;
@@ -942,16 +943,20 @@ def propose_new_channel_matches(
     channels: Sequence[Mapping[str, Any]],
     category_names: Mapping[str, str],
     existing_keys: Iterable[tuple[str, str]],
+    target_keys: Iterable[tuple[str, str]] | None = None,
     catalog: CatalogSnapshot,
     matcher_identity: MatcherIdentity,
     preflight: MatcherPreflight,
 ) -> dict[tuple[str, str], MatchProposal]:
-    """Return provisional decisions for previously unseen stream identities.
+    """Return provisional decisions for an explicit safe identity boundary.
 
     Inventory profiles are built from the complete current server lineup so a
     newly discovered member of a numbered bank retains the frozen matcher's
-    lineup-level safety signal.  ``resolver.resolve`` is called only for unseen
-    rows, never for an existing Sheet mapping.
+    lineup-level safety signal.  By default ``resolver.resolve`` is called only
+    for previously unseen rows.  A caller may instead supply ``target_keys`` to
+    re-evaluate an explicitly authorized set of existing disabled ``REVIEW``
+    rows.  The explicit set is an allowlist, never a request to scan every
+    existing mapping.
     """
 
     normalized_server = str(server_id or "")
@@ -963,6 +968,15 @@ def propose_new_channel_matches(
         for item in existing_keys
         if len(item) == 2
     }
+    targets = None
+    if target_keys is not None:
+        targets = {
+            (_text(item[0]).casefold(), _text(item[1]))
+            for item in target_keys
+            if len(item) == 2
+        }
+        if any(key[0] != normalized_server.casefold() for key in targets):
+            raise ValueError("target_keys contains an identity for another server")
     inventory = [dict(channel) for channel in channels]
 
     seen_inventory_keys: set[tuple[str, str]] = set()
@@ -977,11 +991,26 @@ def propose_new_channel_matches(
         seen_inventory_keys.add(key)
         normalized_rows.append((stream_id, channel))
 
-    new_rows = [
-        item for item in normalized_rows
-        if (normalized_server, item[0]) not in existing
-    ]
-    if not new_rows:
+    inventory_keys = {
+        (normalized_server.casefold(), stream_id)
+        for stream_id, _channel in normalized_rows
+    }
+    if targets is None:
+        selected_rows = [
+            item
+            for item in normalized_rows
+            if (normalized_server.casefold(), item[0]) not in existing
+        ]
+    else:
+        missing_targets = targets.difference(inventory_keys)
+        if missing_targets:
+            raise ValueError("target_keys contains an identity absent from inventory")
+        selected_rows = [
+            item
+            for item in normalized_rows
+            if (normalized_server.casefold(), item[0]) in targets
+        ]
+    if not selected_rows:
         return {}
 
     boundary_failure = ""
@@ -1011,7 +1040,7 @@ def propose_new_channel_matches(
                 reason=boundary_failure,
             )
             for stream_id, channel in sorted(
-                new_rows, key=lambda item: _stream_sort_key(item[0])
+                selected_rows, key=lambda item: _stream_sort_key(item[0])
             )
         }
 
@@ -1020,7 +1049,9 @@ def propose_new_channel_matches(
         raise RuntimeError("Smart Rules inventory profile builder is unavailable")
     profiles, signals = build_profiles(inventory, category_map)
     proposals: dict[tuple[str, str], MatchProposal] = {}
-    for stream_id, channel in sorted(new_rows, key=lambda item: _stream_sort_key(item[0])):
+    for stream_id, channel in sorted(
+        selected_rows, key=lambda item: _stream_sort_key(item[0])
+    ):
         category_id = _text(channel.get("category_id"))
         category_name = category_map.get(
             category_id, _text(channel.get("category_name"))

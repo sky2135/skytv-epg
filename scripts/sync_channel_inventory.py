@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Discover every live provider channel and safely add new rows to Google Sheets.
+"""Discover live provider channels and safely maintain private Google Sheets.
 
 This inventory phase runs before the EPG build. It reads the complete live-
 channel inventory for each configured Xtream server, compares exact
 ``(server_id, stream_id)`` identities with the private Google Sheet, and applies
-the fail-closed Version 1 matcher only to previously unseen channels. Exact
-matches with a strong guide are enabled; every uncertain result stays disabled
-as ``REVIEW``. Existing Sheet rows are never edited or deleted.
+the fail-closed Version 1 matcher to previously unseen channels and, only when
+explicitly requested, an allowlist of existing disabled ``REVIEW`` rows. Exact
+matches with a strong guide may be enabled; every uncertain result stays
+disabled as ``REVIEW``. Existing non-REVIEW rows are never edited or deleted.
 
 Severe stream-ID reuse warnings are appended to the private ``Sync Alerts``
 tab. An ``OPEN`` alert keeps that stream quarantined from effective builds until
 the mapping is corrected and the user marks the alert ``RESOLVED``.
 
-The production workflow enables Sheet writes. Omitting ``--write-to-sheet``
-keeps a useful diagnostic/dry-run mode for manual checks and tests.
+The production workflow controls new-row appends and existing REVIEW updates
+separately. Both default to non-destructive behavior.
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import quote, quote_plus, unquote, unquote_plus, urljoin, urlparse, urlunparse
 
 import requests
@@ -45,9 +46,10 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import build_epg_streaming as streaming  # noqa: E402
 import auto_match_inventory as automatch  # noqa: E402
+import ai_review_gemini as gemini_review  # noqa: E402
 
 
-SYNC_VERSION = "1.0"
+SYNC_VERSION = "1.1"
 DEFAULT_SERVERS = ("server_1", "server_2", "server_3")
 MAX_PANEL_JSON_BYTES = 64 * 1024 * 1024
 MAX_M3U_BYTES = 128 * 1024 * 1024
@@ -56,6 +58,20 @@ MAX_SHEET_BYTES = 80 * 1024 * 1024
 MAX_GOOGLE_MAPPING_ROWS = 150_000
 MAX_SYNC_ALERT_ROWS = 10_000
 MAX_SYNC_ALERT_BYTES = 8 * 1024 * 1024
+MAX_RECHECK_CANDIDATES = 20_000
+MAX_RECHECK_APPLIES_PER_RUN = 100
+MAX_AI_REVIEW_ROWS = 50
+MAX_RECHECK_TOTAL_UPDATES = MAX_RECHECK_APPLIES_PER_RUN + MAX_AI_REVIEW_ROWS
+MAX_RECHECK_UPDATE_REQUEST_BYTES = 2 * 1024 * 1024
+RECHECK_PATCH_COLUMNS = (
+    "enabled",
+    "action",
+    "source",
+    "epg_feed",
+    "epg_id",
+    "reason",
+    "notes",
+)
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 GOOGLE_CANONICAL_ERROR_STATUSES = frozenset(
@@ -144,6 +160,13 @@ class MappingTable:
     raw_headers: list[str]
     headers: list[str]
     rows: list[dict[str, str]]
+    row_numbers: list[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.row_numbers:
+            self.row_numbers = list(range(2, len(self.rows) + 2))
+        if len(self.row_numbers) != len(self.rows):
+            raise ValueError("Mapping rows and physical row numbers must align.")
 
     @property
     def keys(self) -> set[tuple[str, str]]:
@@ -1232,6 +1255,7 @@ def parse_table_values(
             "Import the supplied Version 1 workbook without rearranging columns."
         )
     rows: list[dict[str, str]] = []
+    row_numbers: list[int] = []
     keys: set[tuple[str, str]] = set()
     for row_number, row_values in enumerate(values[1:], start=2):
         values_list = ["" if value is None else str(value) for value in row_values]
@@ -1264,11 +1288,17 @@ def parse_table_values(
         row["stream_id"] = stream_id
         row["channel_name"] = channel_name
         rows.append(row)
+        row_numbers.append(row_number)
         if len(rows) > int(maximum_rows):
             raise SyncError(
                 f"The mapping table exceeds its configured {int(maximum_rows):,}-row limit."
             )
-    return MappingTable(raw_headers=raw_headers, headers=headers, rows=rows)
+    return MappingTable(
+        raw_headers=raw_headers,
+        headers=headers,
+        rows=rows,
+        row_numbers=row_numbers,
+    )
 
 
 def parse_mapping_csv(content: bytes, *, require_v1_order: bool = True) -> MappingTable:
@@ -1564,6 +1594,121 @@ def compare_inventory(
     return new_rows, changed_rows, missing_rows
 
 
+def select_review_recheck_rows(
+    table: MappingTable,
+    inventories: Sequence[PanelInventory],
+    *,
+    selected_servers: Iterable[str],
+    quarantined_keys: Iterable[tuple[str, str]] = (),
+    changed_rows: Sequence[Mapping[str, str]] = (),
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Select the exact existing rows eligible for a safe Smart-Rules recheck."""
+
+    servers = frozenset(
+        streaming.normalize_server_id(value) for value in selected_servers
+    )
+    if not servers or not servers.issubset(DEFAULT_SERVERS):
+        raise SyncError("The REVIEW recheck server selection is invalid.")
+    present_keys = {
+        (
+            streaming.normalize_server_id(inventory.server_id),
+            streaming.clean_identifier(channel.get("stream_id", ""), 120),
+        )
+        for inventory in inventories
+        for channel in inventory.channels
+    }
+    blocked_alerts = frozenset(quarantined_keys)
+    changed_keys = {
+        (
+            streaming.normalize_server_id(row.get("server_id", "")),
+            streaming.clean_identifier(row.get("stream_id", ""), 120),
+        )
+        for row in changed_rows
+    }
+    stats = {
+        "review_recheck_selected_server_rows": 0,
+        "review_recheck_eligible_rows": 0,
+        "review_recheck_excluded_not_review": 0,
+        "review_recheck_excluded_enabled": 0,
+        "review_recheck_excluded_missing_provider": 0,
+        "review_recheck_excluded_open_alert": 0,
+        "review_recheck_excluded_changed_identity": 0,
+        "review_recheck_excluded_manual_candidate": 0,
+    }
+    selected: list[dict[str, str]] = []
+    for row in table.rows:
+        server_id = streaming.normalize_server_id(row.get("server_id", ""))
+        if server_id not in servers:
+            continue
+        stats["review_recheck_selected_server_rows"] += 1
+        stream_id = streaming.clean_identifier(row.get("stream_id", ""), 120)
+        key = (server_id, stream_id)
+        action = streaming.clean_text(row.get("action", ""), 40).upper()
+        if action != "REVIEW":
+            stats["review_recheck_excluded_not_review"] += 1
+            continue
+        try:
+            enabled = streaming.parse_bool(
+                row.get("enabled", ""),
+                default=False,
+                field_name="mapping enabled",
+            )
+        except streaming.BuildError as exc:
+            raise SyncError("A REVIEW row has an invalid enabled value.") from exc
+        if enabled:
+            stats["review_recheck_excluded_enabled"] += 1
+            continue
+        if key not in present_keys:
+            stats["review_recheck_excluded_missing_provider"] += 1
+            continue
+        if key in blocked_alerts:
+            stats["review_recheck_excluded_open_alert"] += 1
+            continue
+        if key in changed_keys:
+            stats["review_recheck_excluded_changed_identity"] += 1
+            continue
+
+        # Do not overwrite an operator's untracked provisional EPG choice.
+        # Auto-map and AI provenance are safe to reconsider, while legacy
+        # Server 1 panel candidates are explicitly allowed only so Smart Rules
+        # can replace them with EPGShare.
+        epg_id = streaming.clean_identifier(row.get("epg_id", ""), 300)
+        notes = streaming.clean_text(row.get("notes", ""), 2000).casefold()
+        source = streaming.clean_text(row.get("source", ""), 40).casefold()
+        provenance_known = "auto-map-v1" in notes or "ai-review-v1" in notes
+        legacy_server1_panel = server_id == "server_1" and source == "panel"
+        if epg_id and not provenance_known and not legacy_server1_panel:
+            stats["review_recheck_excluded_manual_candidate"] += 1
+            continue
+        selected.append(dict(row))
+
+    selected.sort(
+        key=lambda row: (
+            row["server_id"], streaming.stream_sort_key(row["stream_id"])
+        )
+    )
+    if len(selected) > MAX_RECHECK_CANDIDATES:
+        raise SyncError(
+            "The REVIEW recheck candidate set exceeds its conservative "
+            f"{MAX_RECHECK_CANDIDATES:,}-row limit. Select one server at a time."
+        )
+    stats["review_recheck_eligible_rows"] = len(selected)
+    # ``excluded_not_review`` describes ordinary mapped rows in the selected
+    # server scope, not REVIEW-backlog rows. The user-facing skipped count is
+    # therefore the sum of REVIEW rows held back by a safety/eligibility gate.
+    stats["review_recheck_skipped_rows"] = sum(
+        stats[field]
+        for field in (
+            "review_recheck_excluded_enabled",
+            "review_recheck_excluded_missing_provider",
+            "review_recheck_excluded_open_alert",
+            "review_recheck_excluded_changed_identity",
+            "review_recheck_excluded_manual_candidate",
+        )
+    )
+    return selected, stats
+
+
 def parse_sync_alert_values(values: Sequence[Sequence[Any]]) -> list[dict[str, str]]:
     if not values:
         raise SyncError(
@@ -1757,6 +1902,35 @@ def verify_appended_mapping_rows(
             )
 
 
+def verify_mapping_append_transition(
+    before_table: MappingTable,
+    expected_rows: Sequence[Mapping[str, str]],
+    after_table: MappingTable,
+) -> None:
+    """Require append-only growth with every pre-existing row unchanged."""
+
+    before_by_key = _mapping_rows_by_key(before_table)
+    after_by_key = _mapping_rows_by_key(after_table)
+    expected_keys = {_row_identity(row) for row in expected_rows}
+    if len(expected_keys) != len(expected_rows) or expected_keys.intersection(
+        before_by_key
+    ):
+        raise SyncError("The proposed mapping append contains a duplicate identity.")
+    if set(after_by_key) != set(before_by_key).union(expected_keys):
+        raise SyncError(
+            "The Mappings identities changed during the new-channel append; "
+            "the build snapshot was blocked."
+        )
+    for key, (before_row_number, before) in before_by_key.items():
+        after_row_number, after = after_by_key[key]
+        if before_row_number != after_row_number or before != after:
+            raise SyncError(
+                "An unrelated Mapping row changed during the new-channel append; "
+                "the build snapshot was blocked."
+            )
+    verify_appended_mapping_rows(expected_rows, after_table)
+
+
 def inventory_overlap_issues(
     table: MappingTable, inventories: Sequence[PanelInventory]
 ) -> list[str]:
@@ -1887,6 +2061,9 @@ def write_reports(
     changed_rows: Sequence[Mapping[str, str]],
     missing_rows: Sequence[Mapping[str, str]],
     summary: Mapping[str, Any],
+    review_recheck_rows: Sequence[Mapping[str, str]] = (),
+    review_recheck_results: Sequence[Mapping[str, str]] = (),
+    ai_review_results: Sequence[Mapping[str, str]] = (),
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     all_inventory = inventory_rows(inventories)
@@ -1928,6 +2105,22 @@ def write_reports(
         changed_headers,
     )
     write_csv_report(output_dir / "missing_channels.csv", missing_rows, missing_headers)
+    write_csv_report(
+        output_dir / "review_recheck_candidates.csv",
+        review_recheck_rows,
+        streaming.SHEET_COLUMNS,
+    )
+    write_csv_report(
+        output_dir / "review_recheck_results.csv",
+        review_recheck_results,
+        streaming.SHEET_COLUMNS,
+    )
+    # Keep proposals inspectable in dry-run without implying they were saved.
+    write_csv_report(
+        output_dir / "ai_review_results.csv",
+        ai_review_results,
+        streaming.SHEET_COLUMNS,
+    )
     atomic_write_bytes(
         output_dir / "summary.json",
         (json.dumps(summary, indent=2, ensure_ascii=False, sort_keys=True) + "\n").encode(
@@ -3165,6 +3358,295 @@ def append_google_sheet_rows(
     )
 
 
+def mapping_table_fingerprint(table: MappingTable) -> str:
+    """Fingerprint exact row order, physical locations and Version 1 values."""
+
+    digest = hashlib.sha256()
+    digest.update(b"skytv-mapping-table-v1\0")
+    for header in table.headers:
+        encoded = header.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    for row_number, row in zip(table.row_numbers, table.rows):
+        digest.update(int(row_number).to_bytes(8, "big"))
+        for header in table.headers:
+            encoded = str(row.get(header, "")).encode("utf-8")
+            digest.update(len(encoded).to_bytes(4, "big"))
+            digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _mapping_rows_by_key(
+    table: MappingTable,
+) -> dict[tuple[str, str], tuple[int, dict[str, str]]]:
+    return {
+        (
+            streaming.normalize_server_id(row.get("server_id", "")),
+            streaming.clean_identifier(row.get("stream_id", ""), 120),
+        ): (row_number, row)
+        for row_number, row in zip(table.row_numbers, table.rows)
+    }
+
+
+def _validate_review_update(
+    before: Mapping[str, str], after: Mapping[str, str]
+) -> None:
+    changed = {
+        header
+        for header in streaming.SHEET_COLUMNS
+        if str(before.get(header, "")) != str(after.get(header, ""))
+    }
+    if not changed or not changed.issubset(RECHECK_PATCH_COLUMNS):
+        raise SyncError("A REVIEW update attempted to change unsupported columns.")
+    before_action = streaming.clean_text(before.get("action", ""), 40).upper()
+    if before_action != "REVIEW":
+        raise SyncError("A REVIEW update no longer targets a REVIEW row.")
+    try:
+        before_enabled = streaming.parse_bool(
+            before.get("enabled", ""), default=False, field_name="mapping enabled"
+        )
+        after_enabled = streaming.parse_bool(
+            after.get("enabled", ""), default=False, field_name="mapping enabled"
+        )
+    except streaming.BuildError as exc:
+        raise SyncError("A REVIEW update contains an invalid enabled value.") from exc
+    if before_enabled:
+        raise SyncError("An enabled mapping cannot enter REVIEW recheck updates.")
+    server_id = streaming.normalize_server_id(before.get("server_id", ""))
+    after_action = streaming.clean_text(after.get("action", ""), 40).upper()
+    source = streaming.clean_text(after.get("source", ""), 40).casefold()
+    feed = streaming.clean_text(after.get("epg_feed", ""), 80).upper()
+    epg_id = streaming.clean_identifier(after.get("epg_id", ""), 300)
+    if after_action == "AUTO_EPGSHARE":
+        if not after_enabled:
+            raise SyncError("A verified Smart-Rules approval must be enabled.")
+    elif after_action == "REVIEW":
+        if after_enabled:
+            raise SyncError("An AI suggestion must remain disabled in REVIEW.")
+    else:
+        raise SyncError("A REVIEW recheck may only approve or retain REVIEW.")
+    has_exact_ai_target = (
+        source == "epgshare01" and feed == "ALL_SOURCES1" and bool(epg_id)
+    )
+    is_ai_abstention_marker = (
+        after_action == "REVIEW"
+        and "ai-review-v1" in streaming.clean_text(
+            after.get("notes", ""), 2000
+        ).casefold()
+        and all(
+            str(after.get(column, "")) == str(before.get(column, ""))
+            for column in ("source", "epg_feed", "epg_id")
+        )
+    )
+    if not has_exact_ai_target and not is_ai_abstention_marker:
+        raise SyncError(
+            "A REVIEW update requires an exact EPGShare target or a bounded "
+            "Gemini abstention marker."
+        )
+    if (
+        server_id == "server_1"
+        and source == "panel"
+        and not is_ai_abstention_marker
+    ):
+        raise SyncError("Server 1 native panel EPG is forbidden.")
+
+
+def _review_update_requests(
+    *,
+    numeric_sheet_id: int,
+    row_number: int,
+    row: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    column_indexes = {header: index for index, header in enumerate(streaming.SHEET_COLUMNS)}
+    groups = (
+        ("enabled",),
+        ("action", "source", "epg_feed", "epg_id"),
+        ("reason", "notes"),
+    )
+    requests_body: list[dict[str, Any]] = []
+    for columns in groups:
+        start_column = column_indexes[columns[0]]
+        values = [
+            {"userEnteredValue": {"stringValue": str(row.get(column, ""))}}
+            for column in columns
+        ]
+        requests_body.append(
+            {
+                "updateCells": {
+                    "range": {
+                        "sheetId": int(numeric_sheet_id),
+                        "startRowIndex": int(row_number) - 1,
+                        "endRowIndex": int(row_number),
+                        "startColumnIndex": start_column,
+                        "endColumnIndex": start_column + len(columns),
+                    },
+                    "rows": [{"values": values}],
+                    "fields": "userEnteredValue",
+                }
+            }
+        )
+    return requests_body
+
+
+def _verify_review_update_result(
+    before_table: MappingTable,
+    after_table: MappingTable,
+    updates: Mapping[tuple[str, str], Mapping[str, str]],
+) -> None:
+    before_by_key = _mapping_rows_by_key(before_table)
+    after_by_key = _mapping_rows_by_key(after_table)
+    if set(before_by_key) != set(after_by_key):
+        raise SyncError("The Mappings identities changed while REVIEW rows were updated.")
+    for key, (before_row_number, before) in before_by_key.items():
+        after_row_number, after = after_by_key[key]
+        if before_row_number != after_row_number:
+            raise SyncError("The Mappings row order changed during REVIEW updates.")
+        expected = updates.get(key)
+        if expected is None:
+            if before != after:
+                raise SyncError("An unrelated Mapping row changed during REVIEW updates.")
+            continue
+        for header in streaming.SHEET_COLUMNS:
+            wanted = (
+                str(expected.get(header, ""))
+                if header in RECHECK_PATCH_COLUMNS
+                else str(before.get(header, ""))
+            )
+            if str(after.get(header, "")) != wanted:
+                raise SyncError("Google Sheets did not durably store a complete REVIEW update.")
+
+
+def update_google_sheet_review_rows(
+    session: Any,
+    sheet_id: str,
+    tab_name: str,
+    base_table: MappingTable,
+    rows: Sequence[Mapping[str, str]],
+    *,
+    pre_write_check: Callable[[], None] | None = None,
+) -> tuple[int, MappingTable]:
+    """Atomically patch a bounded set of existing disabled REVIEW rows."""
+
+    if not rows:
+        return 0, base_table
+    if len(rows) > MAX_RECHECK_TOTAL_UPDATES:
+        raise SyncError("The REVIEW update batch exceeds its conservative limit.")
+    desired: dict[tuple[str, str], dict[str, str]] = {}
+    base_by_key = _mapping_rows_by_key(base_table)
+    for raw in rows:
+        key = (
+            streaming.normalize_server_id(raw.get("server_id", "")),
+            streaming.clean_identifier(raw.get("stream_id", ""), 120),
+        )
+        if key in desired or key not in base_by_key:
+            raise SyncError("A REVIEW update contains an unknown or duplicate identity.")
+        _row_number, before = base_by_key[key]
+        after = {header: str(raw.get(header, "")) for header in streaming.SHEET_COLUMNS}
+        _validate_review_update(before, after)
+        desired[key] = after
+
+    # This authoritative pre-read detects edits, inserts and sorting which
+    # occurred after proposal generation. Users are instructed not to edit the
+    # tab during an apply run; Google Sheets does not expose a value-level CAS.
+    fresh = parse_table_values(
+        google_sheet_values(session, validate_sheet_id(sheet_id), tab_name),
+        maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
+    )
+    if mapping_table_fingerprint(fresh) != mapping_table_fingerprint(base_table):
+        raise SyncError(
+            "The Mappings tab changed before REVIEW updates; no updates were sent."
+        )
+    layout = google_sheet_layout(
+        session,
+        sheet_id,
+        tab_name,
+        column_count=len(streaming.SHEET_COLUMNS),
+        expected_used_rows=len(fresh.rows) + 1,
+    )
+    fresh_by_key = _mapping_rows_by_key(fresh)
+    requests_body: list[dict[str, Any]] = []
+    for key in sorted(
+        desired, key=lambda item: (item[0], streaming.stream_sort_key(item[1]))
+    ):
+        row_number, before = fresh_by_key[key]
+        _validate_review_update(before, desired[key])
+        requests_body.extend(
+            _review_update_requests(
+                numeric_sheet_id=layout.numeric_sheet_id,
+                row_number=row_number,
+                row=desired[key],
+            )
+        )
+    body = {"requests": requests_body}
+    encoded_body = json.dumps(
+        body, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    if len(encoded_body) > MAX_RECHECK_UPDATE_REQUEST_BYTES:
+        raise SyncError("The REVIEW update request exceeds its conservative size limit.")
+    if pre_write_check is not None:
+        # Keep the Sync Alerts authority check adjacent to the only mutating
+        # request. This narrows (but cannot eliminate) Google's lack of a
+        # cross-tab compare-and-swap primitive.
+        pre_write_check()
+
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}:batchUpdate"
+    response = None
+    response_content = b""
+    uncertain = False
+    rejection_message = ""
+    try:
+        response = session.post(url, json=body, timeout=(20, 180))
+        status = int(getattr(response, "status_code", 0) or 0)
+        response_content = response_body_limited(response, 2 * 1024 * 1024)
+        if status not in {200, 201}:
+            # A timeout, intermediary, or damaged response can hide a committed
+            # Sheets mutation. Reconcile against an authoritative read before
+            # deciding whether this request failed.
+            uncertain = True
+            rejection_message = google_write_rejection_message(
+                "Mappings REVIEW",
+                status=status,
+                response_content=response_content,
+                operation="atomic update",
+            )
+        else:
+            try:
+                payload = json.loads((response_content or b"{}").decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                payload = None
+            if not (
+                isinstance(payload, dict)
+                and str(payload.get("spreadsheetId", "")) == sheet_id
+                and isinstance(payload.get("replies"), list)
+                and len(payload["replies"]) == len(requests_body)
+                and all(isinstance(reply, dict) for reply in payload["replies"])
+            ):
+                uncertain = True
+    except Exception:
+        uncertain = True
+    finally:
+        if response is not None:
+            close_response(response)
+
+    try:
+        final_table = parse_table_values(
+            google_sheet_values(session, validate_sheet_id(sheet_id), tab_name),
+            maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
+        )
+        _verify_review_update_result(fresh, final_table, desired)
+    except SyncError:
+        if uncertain:
+            raise SheetWriteError(
+                rejection_message
+                or (
+                    "Google Sheets returned an uncertain REVIEW update result and "
+                    "the authoritative re-read did not confirm every target."
+                )
+            ) from None
+        raise
+    return len(desired), final_table
+
+
 def append_sync_alert_rows(
     session: Any,
     sheet_id: str,
@@ -3279,6 +3761,709 @@ def generated_timestamp(value: str = "") -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _row_identity(row: Mapping[str, Any]) -> tuple[str, str]:
+    return (
+        streaming.normalize_server_id(row.get("server_id", "")),
+        streaming.clean_identifier(row.get("stream_id", ""), 120),
+    )
+
+
+def _gemini_review_updates(
+    *,
+    outcome: automatch.AutoMatchOutcome,
+    authoritative_table: MappingTable,
+    api_key: str,
+    limit: int,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Convert HIGH Gemini suggestions into disabled, manual-review patches."""
+
+    available = tuple(getattr(outcome, "ai_review_shortlists", ()) or ())
+    selected = available[: min(int(limit), MAX_AI_REVIEW_ROWS)]
+    summary: dict[str, Any] = {
+        "ai_review_enabled": True,
+        "ai_review_considered_rows": len(selected),
+        "ai_review_suggestion_rows": 0,
+        "ai_review_high_suggestions_found": 0,
+        "ai_review_high_suggestion_updates": 0,
+        "ai_review_high_suggestions_persisted": 0,
+        "ai_review_abstained_rows": 0,
+        "ai_review_error_rows": 0,
+        "ai_review_repeat_suggestions": 0,
+        "ai_review_abstain_marked_rows": 0,
+        "ai_review_batches_attempted": 0,
+        "ai_review_batches_succeeded": 0,
+        "ai_review_prompt_tokens": 0,
+        "ai_review_candidate_tokens": 0,
+        "ai_review_total_tokens": 0,
+    }
+    if not selected:
+        return [], summary
+
+    requests_to_review: list[gemini_review.ReviewRequest] = []
+    shortlist_by_review_id: dict[str, Any] = {}
+    for index, shortlist in enumerate(selected, start=1):
+        review_id = f"review-{index:04d}"
+        shortlist_by_review_id[review_id] = shortlist
+        requests_to_review.append(
+            gemini_review.ReviewRequest(
+                review_id=review_id,
+                channel_name=str(shortlist.channel_name),
+                category=str(shortlist.category_name),
+                market=str(shortlist.market),
+                candidates=tuple(
+                    gemini_review.ReviewCandidate(
+                        candidate_key=str(candidate.candidate_key),
+                        epg_id=str(candidate.epg_id),
+                        display_name=str(candidate.display_name),
+                        region=str(candidate.region),
+                        feed=str(candidate.feed),
+                    )
+                    for candidate in shortlist.candidates
+                ),
+            )
+        )
+    try:
+        reviewed = gemini_review.review_flagged_channels(
+            tuple(requests_to_review), api_key=api_key
+        )
+    except Exception:
+        # AI is advisory. Its outage or an invalid response must never prevent
+        # deterministic Smart-Rules approvals or the ordinary EPG build.
+        summary["ai_review_error_rows"] = len(requests_to_review)
+        summary["ai_review_status"] = "failed_closed"
+        return [], summary
+
+    summary.update(
+        {
+            "ai_review_batches_attempted": reviewed.batches_attempted,
+            "ai_review_batches_succeeded": reviewed.batches_succeeded,
+            "ai_review_prompt_tokens": reviewed.prompt_tokens,
+            "ai_review_candidate_tokens": reviewed.candidate_tokens,
+            "ai_review_total_tokens": reviewed.total_tokens,
+        }
+    )
+    authoritative_by_key = _mapping_rows_by_key(authoritative_table)
+    updates: list[dict[str, str]] = []
+    for result in reviewed.results:
+        shortlist = shortlist_by_review_id.get(result.review_id)
+        if shortlist is None:
+            summary["ai_review_error_rows"] += 1
+            continue
+        if result.decision is gemini_review.ReviewDecision.ERROR:
+            summary["ai_review_error_rows"] += 1
+            continue
+        is_high_suggestion = (
+            result.decision is gemini_review.ReviewDecision.SUGGEST
+            and result.confidence is gemini_review.ReviewConfidence.HIGH
+            and bool(result.candidate_key)
+        )
+        candidates = {
+            str(candidate.candidate_key): candidate
+            for candidate in shortlist.candidates
+        }
+        candidate = candidates.get(result.candidate_key or "")
+        key = (str(shortlist.server_id), str(shortlist.stream_id))
+        base_entry = authoritative_by_key.get(key)
+        if base_entry is None or (is_high_suggestion and candidate is None):
+            summary["ai_review_error_rows"] += 1
+            continue
+        _row_number, before = base_entry
+        row = dict(before)
+        if not is_high_suggestion:
+            summary["ai_review_abstained_rows"] += 1
+            marker = (
+                "ai-review-v1; Gemini abstained or returned less than HIGH "
+                "confidence; manual review required"
+            )
+            prior_notes = streaming.clean_text(row.get("notes", ""), 2000)
+            row.update(
+                {
+                    "enabled": "FALSE",
+                    "action": "REVIEW",
+                    "reason": "Gemini did not find one HIGH-confidence candidate.",
+                    "notes": (
+                        prior_notes
+                        if marker.casefold() in prior_notes.casefold()
+                        else streaming.clean_text(
+                            "; ".join(
+                                value for value in (prior_notes, marker) if value
+                            ),
+                            2000,
+                        )
+                    ),
+                }
+            )
+            if row != before:
+                _validate_review_update(before, row)
+                updates.append(row)
+                summary["ai_review_abstain_marked_rows"] += 1
+            continue
+        assert candidate is not None
+        candidate_display = streaming.clean_text(candidate.display_name, 180)
+        marker = (
+            "ai-review-v1; Gemini HIGH suggestion only; "
+            f"EPGShare name={candidate_display}; exact catalog and programme "
+            "gate verified locally; manual approval required"
+        )
+        prior_notes = streaming.clean_text(row.get("notes", ""), 2000)
+        row.update(
+            {
+                "enabled": "FALSE",
+                "action": "REVIEW",
+                "source": "epgshare01",
+                "epg_feed": "ALL_SOURCES1",
+                "epg_id": str(candidate.epg_id),
+                "reason": (
+                    "Gemini suggested this locally verified EPGShare candidate; "
+                    "manual approval is required."
+                ),
+                "notes": (
+                    prior_notes
+                    if marker.casefold() in prior_notes.casefold()
+                    else streaming.clean_text(
+                        "; ".join(value for value in (prior_notes, marker) if value),
+                        2000,
+                    )
+                ),
+            }
+        )
+        summary["ai_review_suggestion_rows"] += 1
+        summary["ai_review_high_suggestions_found"] += 1
+        if row == before:
+            summary["ai_review_repeat_suggestions"] += 1
+            continue
+        _validate_review_update(before, row)
+        updates.append(row)
+        summary["ai_review_high_suggestion_updates"] += 1
+    summary["ai_review_status"] = (
+        "completed" if not summary["ai_review_error_rows"] else "partial_failed_closed"
+    )
+    return updates, summary
+
+
+def _run_sync_review_mode(
+    *,
+    table: MappingTable,
+    inventories: Sequence[PanelInventory],
+    output_dir: Path,
+    generated_at: str,
+    snapshot_out: Path,
+    authoritative_snapshot_out: Path | None,
+    snapshot_manifest_out: Path | None,
+    write_to_sheet: bool,
+    google_session: Any,
+    sheet_id: str,
+    sheet_tab: str,
+    alerts_tab: str,
+    provider_failures: Mapping[str, str] | None,
+    server_configs: Sequence[ServerConfig],
+    all_source_file: Path | None,
+    all_source_catalog_file: Path | None,
+    epgshare_spool_out: Path | None,
+    review_recheck_mode: str,
+    review_recheck_servers: Sequence[str],
+    use_gemini_ai: bool,
+    gemini_api_key: str,
+    ai_review_limit: int,
+) -> dict[str, Any]:
+    """Run the opt-in REVIEW backlog path without changing the legacy default."""
+
+    mode = streaming.clean_text(review_recheck_mode, 20).casefold()
+    if mode not in {"dry-run", "apply"}:
+        raise SyncError("The REVIEW recheck mode must be off, dry-run, or apply.")
+    selected_servers = tuple(
+        dict.fromkeys(
+            streaming.normalize_server_id(value)
+            for value in (review_recheck_servers or ("server_1",))
+        )
+    )
+    if not selected_servers or not set(selected_servers).issubset(DEFAULT_SERVERS):
+        raise SyncError("The REVIEW recheck server selection is invalid.")
+    if not 1 <= int(ai_review_limit) <= MAX_AI_REVIEW_ROWS:
+        raise SyncError(
+            f"The Gemini review limit must be between 1 and {MAX_AI_REVIEW_ROWS}."
+        )
+    mapping_write_requested = bool(write_to_sheet or mode == "apply")
+    if mapping_write_requested and google_session is None:
+        raise SyncError("A Google authorized session is required for Sheet writes.")
+    if use_gemini_ai and not str(gemini_api_key or "").strip():
+        raise SyncError(
+            "Gemini review was selected, but the GEMINI_API_KEY secret is missing."
+        )
+
+    effective_snapshot_path = Path(snapshot_out)
+    authoritative_snapshot_path = (
+        Path(authoritative_snapshot_out)
+        if authoritative_snapshot_out is not None
+        else effective_snapshot_path.with_name("authoritative_mapping.csv")
+    )
+    snapshot_manifest_path = (
+        Path(snapshot_manifest_out)
+        if snapshot_manifest_out is not None
+        else effective_snapshot_path.with_name("mapping_snapshot_manifest.json")
+    )
+
+    configs_by_server = {config.server_id: config for config in server_configs}
+    for provider_inventory in inventories:
+        config = configs_by_server.get(provider_inventory.server_id)
+        if config is not None:
+            validate_provider_inventory_secret_safe(
+                provider_inventory.categories,
+                provider_inventory.channels,
+                provider_reflection_needles(config, [config.base_url]),
+            )
+
+    authoritative_table = table
+    existing_alerts: list[dict[str, str]] = []
+    if google_session is not None:
+        if mapping_write_requested:
+            authoritative_table = parse_table_values(
+                google_sheet_values(
+                    google_session, validate_sheet_id(sheet_id), sheet_tab
+                ),
+                maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
+            )
+        existing_alerts = parse_sync_alert_values(
+            google_sync_alert_values(
+                google_session, validate_sheet_id(sheet_id), alerts_tab
+            )
+        )
+
+    discovered_rows, changed_rows, missing_rows = compare_inventory(
+        authoritative_table, inventories, discovered_at=generated_at
+    )
+    overlap_issues = inventory_overlap_issues(authoritative_table, inventories)
+    pending_alerts = pending_sync_alert_rows(
+        changed_rows, existing_alerts, detected_at=generated_at
+    )
+    persistent_quarantine_keys = open_alert_quarantine_keys(existing_alerts)
+    pending_quarantine_keys = {_row_identity(row) for row in pending_alerts}
+    # This exact set is part of the matcher input. Any added or removed OPEN
+    # quarantine before a write invalidates not only target rows but also the
+    # human evidence from which cross-server aliases may have been learned.
+    match_time_quarantine_keys = persistent_quarantine_keys.union(
+        pending_quarantine_keys
+    )
+    review_recheck_rows, recheck_selection_summary = select_review_recheck_rows(
+        authoritative_table,
+        inventories,
+        selected_servers=selected_servers,
+        quarantined_keys=match_time_quarantine_keys,
+        changed_rows=changed_rows,
+    )
+
+    auto_match_inputs = (
+        bool(all_source_file),
+        bool(all_source_catalog_file),
+        bool(epgshare_spool_out),
+    )
+    if not all(auto_match_inputs):
+        raise SyncError(
+            "REVIEW rechecking requires the ALL_SOURCES1 XML file, official "
+            "text catalog, and spool output together."
+        )
+
+    new_rows = list(discovered_rows)
+    review_results: list[dict[str, str]] = []
+    auto_match_summary: dict[str, Any] = {
+        "auto_match_considered_rows": 0,
+        "auto_match_provisional_rows": 0,
+        "auto_matched_rows": 0,
+        "auto_match_review_rows": len(new_rows),
+        "review_recheck_considered_rows": 0,
+        "review_recheck_safe_matches": 0,
+        "review_recheck_still_review_rows": len(review_recheck_rows),
+        "auto_match_rejected_programme_gates": 0,
+    }
+    outcome: automatch.AutoMatchOutcome | None = None
+    if not overlap_issues:
+        try:
+            outcome = automatch.auto_match_and_spool(
+                mapping_rows=authoritative_table.rows,
+                inventories=inventories,
+                new_rows=discovered_rows,
+                review_rows=review_recheck_rows,
+                quarantined_keys=match_time_quarantine_keys,
+                all_source_file=Path(all_source_file),
+                all_source_catalog_file=Path(all_source_catalog_file),
+                spool_out=Path(epgshare_spool_out),
+                generated_at=generated_at,
+                enable_ai_review=bool(use_gemini_ai),
+            )
+        except automatch.AutoMatchError as exc:
+            raise SyncError(str(exc)) from exc
+        output_by_key = {_row_identity(row): dict(row) for row in outcome.rows}
+        new_keys = {_row_identity(row) for row in discovered_rows}
+        review_keys = {_row_identity(row) for row in review_recheck_rows}
+        if set(output_by_key) != new_keys.union(review_keys):
+            raise SyncError("Smart Rules did not return the exact requested identities.")
+        new_rows = [output_by_key[_row_identity(row)] for row in discovered_rows]
+        review_results = [
+            output_by_key[_row_identity(row)] for row in review_recheck_rows
+        ]
+        auto_match_summary = outcome.summary_fields()
+
+    safe_review_matches = [
+        row
+        for row in review_results
+        if streaming.clean_text(row.get("action", ""), 40).upper()
+        == "AUTO_EPGSHARE"
+        and streaming.parse_bool(
+            row.get("enabled", ""),
+            default=False,
+            field_name="mapping enabled",
+        )
+    ]
+    safe_review_matches.sort(
+        key=lambda row: (
+            row["server_id"],
+            streaming.stream_sort_key(row["stream_id"]),
+        )
+    )
+    deterministic_updates = safe_review_matches[:MAX_RECHECK_APPLIES_PER_RUN]
+    deferred_safe_matches = max(
+        0, len(safe_review_matches) - len(deterministic_updates)
+    )
+
+    ai_updates: list[dict[str, str]] = []
+    ai_summary: dict[str, Any] = {
+        "ai_review_enabled": bool(use_gemini_ai),
+        "ai_review_considered_rows": 0,
+        "ai_review_suggestion_rows": 0,
+        "ai_review_high_suggestions_found": 0,
+        "ai_review_high_suggestion_updates": 0,
+        "ai_review_high_suggestions_persisted": 0,
+        "ai_review_abstained_rows": 0,
+        "ai_review_error_rows": 0,
+        "ai_review_batches_attempted": 0,
+        "ai_review_batches_succeeded": 0,
+    }
+    if use_gemini_ai and outcome is not None:
+        ai_updates, ai_summary = _gemini_review_updates(
+            outcome=outcome,
+            authoritative_table=authoritative_table,
+            api_key=gemini_api_key,
+            limit=int(ai_review_limit),
+        )
+
+    review_updates = [*deterministic_updates, *ai_updates]
+    projected_sheet_bytes = validate_projected_sheet_size(
+        authoritative_table, new_rows
+    )
+    possible_reuse_count = sum(
+        1
+        for row in changed_rows
+        if str(row.get("risk", "")).startswith("POSSIBLE_")
+    )
+    projected_alert_bytes = validate_projected_alert_size(
+        existing_alerts, pending_alerts
+    )
+    existing_open_alert_count = sum(
+        1
+        for row in existing_alerts
+        if streaming.clean_text(row.get("status", ""), 20).upper() == "OPEN"
+    )
+    summary: dict[str, Any] = {
+        "version": SYNC_VERSION,
+        "generated_at": generated_at,
+        "sheet_mode": "write" if mapping_write_requested else "dry-run",
+        "review_recheck_mode": mode,
+        "review_recheck_servers": list(selected_servers),
+        "inventory_rows": sum(len(item.channels) for item in inventories),
+        "new_rows": len(new_rows),
+        "appended_rows": 0,
+        "changed_rows": len(changed_rows),
+        "missing_rows": len(missing_rows),
+        "possible_id_reuse_rows": possible_reuse_count,
+        "new_sync_alerts": len(pending_alerts),
+        "sync_alerts_appended": 0,
+        "open_sync_alerts": existing_open_alert_count,
+        "projected_sync_alert_rows": len(existing_alerts) + len(pending_alerts),
+        "projected_sync_alert_bytes": projected_alert_bytes,
+        "projected_sheet_rows": len(authoritative_table.rows) + len(new_rows),
+        "projected_snapshot_bytes": projected_sheet_bytes,
+        "safe_to_append": not overlap_issues,
+        "overlap_issues": overlap_issues,
+        "provider_failures": dict(provider_failures or {}),
+        "review_recheck_deferred_rows": deferred_safe_matches,
+        "review_recheck_rows_updated": 0,
+        "servers": {
+            item.server_id: {
+                "source": item.source,
+                "channel_rows": len(item.channels),
+                "category_rows": len(item.categories),
+            }
+            for item in inventories
+        },
+        **recheck_selection_summary,
+        **auto_match_summary,
+        **ai_summary,
+    }
+
+    def persist_reports() -> None:
+        write_reports(
+            output_dir,
+            inventories=inventories,
+            new_rows=new_rows,
+            changed_rows=changed_rows,
+            missing_rows=missing_rows,
+            review_recheck_rows=review_recheck_rows,
+            review_recheck_results=review_results,
+            ai_review_results=ai_updates,
+            summary=summary,
+        )
+
+    persist_reports()
+    write_mapping_snapshot(
+        output_dir / "mapping_before_append.csv", authoritative_table
+    )
+    if overlap_issues:
+        raise SyncError(" ".join(overlap_issues))
+
+    if not mapping_write_requested:
+        snapshot_validation = write_private_mapping_snapshot_bundle(
+            effective_path=effective_snapshot_path,
+            authoritative_path=authoritative_snapshot_path,
+            manifest_path=snapshot_manifest_path,
+            table=authoritative_table,
+            changed_rows=changed_rows,
+            persistent_quarantine_keys=persistent_quarantine_keys,
+        )
+        add_snapshot_validation_to_summary(summary, snapshot_validation)
+        persist_reports()
+        return summary
+
+    alert_write_error: SheetWriteError | None = None
+    try:
+        summary["sync_alerts_appended"] = append_sync_alert_rows(
+            google_session,
+            validate_sheet_id(sheet_id),
+            alerts_tab,
+            existing_alerts,
+            pending_alerts,
+        )
+    except SheetWriteError as exc:
+        summary["sync_alerts_appended"] = exc.appended_count
+        summary["sync_alert_write_error"] = str(exc)
+        alert_write_error = exc
+    # Always reload Sync Alerts after the append attempt, even if this run
+    # found no new alert. Another editor/run may have opened an alert while the
+    # REVIEW proposals were being prepared.
+    try:
+        verified_alerts = parse_sync_alert_values(
+            google_sync_alert_values(
+                google_session, validate_sheet_id(sheet_id), alerts_tab
+            )
+        )
+        if pending_alerts:
+            verify_pending_alerts_are_open(pending_alerts, verified_alerts)
+    except SyncError:
+        summary["sync_alert_verification_error"] = (
+            "New alerts were not confirmed by an authoritative re-read; "
+            "Mappings and the build snapshot were not changed."
+        )
+        persist_reports()
+        raise
+    persistent_quarantine_keys = open_alert_quarantine_keys(verified_alerts)
+    if persistent_quarantine_keys != match_time_quarantine_keys:
+        summary["sync_alert_verification_error"] = (
+            "The OPEN Sync Alerts quarantine set changed after matching; "
+            "Mappings and the build snapshot were not changed."
+        )
+        persist_reports()
+        raise SyncError(summary["sync_alert_verification_error"])
+    existing_alerts = verified_alerts
+    summary["open_sync_alerts"] = sum(
+        1
+        for row in verified_alerts
+        if streaming.clean_text(row.get("status", ""), 20).upper() == "OPEN"
+    )
+    if alert_write_error is not None and pending_alerts:
+        summary["sync_alert_write_recovered_by_reread"] = True
+    elif alert_write_error is not None:
+        persist_reports()
+        raise alert_write_error
+
+    proposed_review_keys = {_row_identity(row) for row in review_updates}
+
+    def refresh_alert_safety_before_mapping_write() -> None:
+        """Re-read alerts at the last safe point before a Mappings mutation."""
+
+        nonlocal existing_alerts, persistent_quarantine_keys
+        try:
+            latest_alerts = parse_sync_alert_values(
+                google_sync_alert_values(
+                    google_session, validate_sheet_id(sheet_id), alerts_tab
+                )
+            )
+            # Alerts created by this exact run are a write precondition, not a
+            # best-effort report. Missing/RESOLVED rows fail closed.
+            if pending_alerts:
+                verify_pending_alerts_are_open(pending_alerts, latest_alerts)
+        except SyncError:
+            summary["sync_alert_verification_error"] = (
+                "Sync Alerts changed or could not be verified immediately "
+                "before a Mappings write; no further Mappings write was sent."
+            )
+            persist_reports()
+            raise
+        latest_quarantine = open_alert_quarantine_keys(latest_alerts)
+        if latest_quarantine != match_time_quarantine_keys:
+            newly_blocked = latest_quarantine.difference(match_time_quarantine_keys)
+            removed_blocks = match_time_quarantine_keys.difference(latest_quarantine)
+            summary["review_recheck_quarantined_before_write"] = len(
+                proposed_review_keys.intersection(latest_quarantine)
+            )
+            summary["sync_alert_quarantine_keys_added"] = len(newly_blocked)
+            summary["sync_alert_quarantine_keys_removed"] = len(removed_blocks)
+            persist_reports()
+            raise SyncError(
+                "The OPEN Sync Alerts quarantine set changed after matching; "
+                "no Mappings write was sent."
+            )
+        existing_alerts = latest_alerts
+        persistent_quarantine_keys = latest_quarantine
+        summary["open_sync_alerts"] = sum(
+            1
+            for row in latest_alerts
+            if streaming.clean_text(row.get("status", ""), 20).upper() == "OPEN"
+        )
+
+    proposal_base_table = authoritative_table
+    final_table = authoritative_table
+    intentional_mapping_write = False
+    if write_to_sheet:
+        if mode == "apply":
+            refresh_alert_safety_before_mapping_write()
+        try:
+            summary["appended_rows"] = append_google_sheet_rows(
+                google_session,
+                validate_sheet_id(sheet_id),
+                sheet_tab,
+                authoritative_table,
+                new_rows,
+            )
+        except SheetWriteError as exc:
+            summary["appended_rows"] = exc.appended_count
+            summary["write_error"] = str(exc)
+            persist_reports()
+            raise
+        intentional_mapping_write = bool(summary["appended_rows"])
+        final_table = parse_table_values(
+            google_sheet_values(
+                google_session, validate_sheet_id(sheet_id), sheet_tab
+            ),
+            maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
+        )
+        if new_rows:
+            if int(summary["appended_rows"]) != len(new_rows):
+                raise SyncError(
+                    "Google Sheets did not report the complete new-channel append; "
+                    "the build snapshot was blocked."
+                )
+            verify_mapping_append_transition(
+                authoritative_table, new_rows, final_table
+            )
+
+    if mode == "apply" and review_updates:
+        refresh_alert_safety_before_mapping_write()
+        try:
+            updated_count, final_table = update_google_sheet_review_rows(
+                google_session,
+                validate_sheet_id(sheet_id),
+                sheet_tab,
+                final_table,
+                review_updates,
+                pre_write_check=refresh_alert_safety_before_mapping_write,
+            )
+        except SheetWriteError as exc:
+            summary["review_recheck_write_error"] = str(exc)
+            persist_reports()
+            raise
+        summary["review_recheck_rows_updated"] = updated_count
+        intentional_mapping_write = intentional_mapping_write or bool(updated_count)
+        summary["ai_review_high_suggestions_persisted"] = int(
+            ai_summary.get("ai_review_high_suggestion_updates", 0)
+        )
+
+    # Every apply run ends with a fresh Mappings read, even when there were no
+    # proposals. The terminal authoritative table—not a proposal-time copy—is
+    # the only table allowed into the snapshot bundle.
+    if mode == "apply":
+        terminal_table = parse_table_values(
+            google_sheet_values(
+                google_session, validate_sheet_id(sheet_id), sheet_tab
+            ),
+            maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
+        )
+        expected_terminal_table = (
+            final_table if intentional_mapping_write else proposal_base_table
+        )
+        if mapping_table_fingerprint(terminal_table) != mapping_table_fingerprint(
+            expected_terminal_table
+        ):
+            summary["terminal_mapping_verification_error"] = (
+                "Terminal Mappings verification found a change after the last "
+                "confirmed operation; the build snapshot was blocked."
+            )
+            persist_reports()
+            raise SyncError(summary["terminal_mapping_verification_error"])
+        final_table = terminal_table
+
+    # Alerts are an equal authority to Mappings for snapshot eligibility. A
+    # final read after the terminal Mappings read prevents a zero-update run,
+    # or a race after the last write, from publishing a snapshot based on a
+    # stale quarantine set.
+    try:
+        terminal_alerts = parse_sync_alert_values(
+            google_sync_alert_values(
+                google_session, validate_sheet_id(sheet_id), alerts_tab
+            )
+        )
+        if pending_alerts:
+            verify_pending_alerts_are_open(pending_alerts, terminal_alerts)
+    except SyncError:
+        summary["sync_alert_verification_error"] = (
+            "Sync Alerts could not be verified immediately before the build "
+            "snapshot; the snapshot was blocked."
+        )
+        persist_reports()
+        raise
+    terminal_quarantine_keys = open_alert_quarantine_keys(terminal_alerts)
+    if terminal_quarantine_keys != match_time_quarantine_keys:
+        summary["sync_alert_quarantine_keys_added"] = len(
+            terminal_quarantine_keys.difference(match_time_quarantine_keys)
+        )
+        summary["sync_alert_quarantine_keys_removed"] = len(
+            match_time_quarantine_keys.difference(terminal_quarantine_keys)
+        )
+        summary["sync_alert_verification_error"] = (
+            "The OPEN Sync Alerts quarantine set changed immediately before "
+            "the build snapshot; the snapshot was blocked."
+        )
+        persist_reports()
+        raise SyncError(summary["sync_alert_verification_error"])
+    existing_alerts = terminal_alerts
+    persistent_quarantine_keys = terminal_quarantine_keys
+    summary["open_sync_alerts"] = sum(
+        1
+        for row in terminal_alerts
+        if streaming.clean_text(row.get("status", ""), 20).upper() == "OPEN"
+    )
+
+    snapshot_validation = write_private_mapping_snapshot_bundle(
+        effective_path=effective_snapshot_path,
+        authoritative_path=authoritative_snapshot_path,
+        manifest_path=snapshot_manifest_path,
+        table=final_table,
+        changed_rows=changed_rows,
+        persistent_quarantine_keys=persistent_quarantine_keys,
+    )
+    add_snapshot_validation_to_summary(summary, snapshot_validation)
+    persist_reports()
+    return summary
+
+
 def run_sync(
     *,
     table: MappingTable,
@@ -3298,7 +4483,44 @@ def run_sync(
     all_source_file: Path | None = None,
     all_source_catalog_file: Path | None = None,
     epgshare_spool_out: Path | None = None,
+    review_recheck_mode: str = "off",
+    review_recheck_servers: Sequence[str] = (),
+    use_gemini_ai: bool = False,
+    gemini_api_key: str = "",
+    ai_review_limit: int = 25,
 ) -> dict[str, Any]:
+    normalized_recheck_mode = streaming.clean_text(
+        review_recheck_mode, 20
+    ).casefold() or "off"
+    if normalized_recheck_mode not in {"off", "dry-run", "apply"}:
+        raise SyncError("The REVIEW recheck mode must be off, dry-run, or apply.")
+    if normalized_recheck_mode != "off" or use_gemini_ai:
+        if normalized_recheck_mode == "off":
+            raise SyncError("Gemini review requires REVIEW recheck mode.")
+        return _run_sync_review_mode(
+            table=table,
+            inventories=inventories,
+            output_dir=output_dir,
+            generated_at=generated_at,
+            snapshot_out=snapshot_out,
+            authoritative_snapshot_out=authoritative_snapshot_out,
+            snapshot_manifest_out=snapshot_manifest_out,
+            write_to_sheet=write_to_sheet,
+            google_session=google_session,
+            sheet_id=sheet_id,
+            sheet_tab=sheet_tab,
+            alerts_tab=alerts_tab,
+            provider_failures=provider_failures,
+            server_configs=server_configs,
+            all_source_file=all_source_file,
+            all_source_catalog_file=all_source_catalog_file,
+            epgshare_spool_out=epgshare_spool_out,
+            review_recheck_mode=normalized_recheck_mode,
+            review_recheck_servers=review_recheck_servers,
+            use_gemini_ai=use_gemini_ai,
+            gemini_api_key=gemini_api_key,
+            ai_review_limit=ai_review_limit,
+        )
     effective_snapshot_path = Path(snapshot_out)
     authoritative_snapshot_path = (
         Path(authoritative_snapshot_out)
@@ -3345,11 +4567,20 @@ def run_sync(
         authoritative_table, inventories, discovered_at=generated_at
     )
     overlap_issues = inventory_overlap_issues(authoritative_table, inventories)
+    pre_match_pending_alerts = pending_sync_alert_rows(
+        changed_rows, existing_alerts, detected_at=generated_at
+    )
+    pre_match_quarantine_keys = open_alert_quarantine_keys(existing_alerts).union(
+        {_row_identity(row) for row in pre_match_pending_alerts}
+    )
     auto_match_summary: dict[str, Any] = {
         "auto_match_considered_rows": 0,
         "auto_match_provisional_rows": 0,
         "auto_matched_rows": 0,
         "auto_match_review_rows": len(new_rows),
+        "review_recheck_considered_rows": 0,
+        "review_recheck_safe_matches": 0,
+        "review_recheck_still_review_rows": 0,
         "auto_match_rejected_programme_gates": 0,
     }
     auto_match_inputs = (
@@ -3377,6 +4608,7 @@ def run_sync(
                     mapping_rows=authoritative_table.rows,
                     inventories=inventories,
                     new_rows=new_rows,
+                    quarantined_keys=pre_match_quarantine_keys,
                     all_source_file=Path(all_source_file),
                     all_source_catalog_file=Path(all_source_catalog_file),
                     spool_out=Path(epgshare_spool_out),
@@ -3410,6 +4642,15 @@ def run_sync(
         "version": SYNC_VERSION,
         "generated_at": generated_at,
         "sheet_mode": "write" if write_to_sheet else "dry-run",
+        "review_recheck_mode": "off",
+        "review_recheck_eligible_rows": 0,
+        "review_recheck_deferred_rows": 0,
+        "review_recheck_rows_updated": 0,
+        "ai_review_enabled": False,
+        "ai_review_considered_rows": 0,
+        "ai_review_suggestion_rows": 0,
+        "ai_review_abstained_rows": 0,
+        "ai_review_error_rows": 0,
         "inventory_rows": sum(len(inventory.channels) for inventory in inventories),
         "new_rows": len(new_rows),
         "appended_rows": 0,
@@ -3661,6 +4902,30 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--write-to-sheet", action="store_true")
     parser.add_argument(
+        "--review-recheck-mode",
+        choices=("off", "dry-run", "apply"),
+        default="off",
+        help="Opt-in Smart-Rules pass over existing disabled REVIEW rows.",
+    )
+    parser.add_argument(
+        "--review-recheck-servers",
+        nargs="+",
+        default=["server_1"],
+        help="Server allowlist for the existing REVIEW recheck.",
+    )
+    parser.add_argument(
+        "--use-gemini-ai",
+        action="store_true",
+        help="Ask Gemini to suggest only among locally verified candidates.",
+    )
+    parser.add_argument(
+        "--ai-review-limit",
+        type=int,
+        choices=range(1, MAX_AI_REVIEW_ROWS + 1),
+        default=25,
+        metavar="COUNT",
+    )
+    parser.add_argument(
         "--all-source-file",
         type=Path,
         help="Downloaded EPGShare ALL_SOURCES1 XML or XML.GZ used for exact matching.",
@@ -3722,10 +4987,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Use --all-source-file, --all-source-catalog-file, and "
             "--epgshare-spool-out together."
         )
-    if args.write_to_sheet and not args.all_source_file:
+    if args.use_gemini_ai and args.review_recheck_mode == "off":
+        raise SyncError("--use-gemini-ai requires REVIEW recheck mode.")
+    if (
+        args.write_to_sheet or args.review_recheck_mode != "off"
+    ) and not args.all_source_file:
         raise SyncError(
-            "Sheet writes require the downloaded ALL_SOURCES1 file so new channels "
-            "can be checked safely before they are appended."
+            "Sheet writes and REVIEW rechecking require the downloaded "
+            "ALL_SOURCES1 files for safe verification."
         )
     all_source_file = (
         Path(args.all_source_file).resolve() if args.all_source_file else None
@@ -3762,8 +5031,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     google_session = None
     if args.mapping_file is not None:
-        if args.write_to_sheet:
-            raise SyncError("--mapping-file cannot be combined with --write-to-sheet.")
+        if args.write_to_sheet or args.review_recheck_mode == "apply":
+            raise SyncError(
+                "--mapping-file cannot be combined with Google Sheet writes."
+            )
         path = Path(args.mapping_file).resolve()
         if not path.is_file() or path.stat().st_size > streaming.MAX_MAPPING_BYTES:
             raise SyncError("The offline mapping file is missing or too large.")
@@ -3829,6 +5100,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             + "; ".join(floors_failed)
         )
     try:
+        effective_recheck_mode = (
+            "dry-run"
+            if bootstrap_error and args.review_recheck_mode != "off"
+            else args.review_recheck_mode
+        )
         summary = run_sync(
             table=table,
             inventories=inventories,
@@ -3847,6 +5123,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             all_source_file=all_source_file,
             all_source_catalog_file=all_source_catalog_file,
             epgshare_spool_out=epgshare_spool_out,
+            review_recheck_mode=effective_recheck_mode,
+            review_recheck_servers=args.review_recheck_servers,
+            use_gemini_ai=args.use_gemini_ai and not bootstrap_error,
+            gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
+            ai_review_limit=args.ai_review_limit,
         )
         if bootstrap_error:
             raise SyncError(bootstrap_error)
