@@ -9,10 +9,43 @@ on:
         required: true
         default: false
         type: boolean
+      recheck_existing_review:
+        description: "Recheck channels already marked REVIEW"
+        required: true
+        default: "off"
+        type: choice
+        options:
+          - "off"
+          - dry-run
+          - apply
+      recheck_server:
+        description: "Server backlog to recheck"
+        required: true
+        default: server_1
+        type: choice
+        options:
+          - server_1
+          - all
+          - server_2
+          - server_3
+      use_gemini_ai:
+        description: "Ask Gemini about unresolved recheck candidates"
+        required: true
+        default: false
+        type: boolean
+      ai_review_limit:
+        description: "Maximum unresolved channels sent to Gemini"
+        required: true
+        default: "25"
+        type: choice
+        options:
+          - "10"
+          - "25"
+          - "50"
 
 # This workflow never commits or pushes. Its only optional writes are
-# append-only additions to the Mappings and Sync Alerts tabs in the configured
-# private Google Sheet.
+# verified additions or bounded REVIEW-row updates in the Mappings tab, plus
+# append-only additions to the Sync Alerts tab in the configured private Sheet.
 concurrency:
   group: ${{ github.repository }}-skytv-epg-v1
   cancel-in-progress: false
@@ -30,7 +63,13 @@ env:
   GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID }}
   GOOGLE_SHEET_TAB: ${{ vars.GOOGLE_SHEET_TAB || 'Mappings' }}
   ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
+  # New-row appends and existing-REVIEW updates are independent controls.
   REQUEST_SHEET_WRITE: ${{ inputs.update_google_sheet }}
+  REQUEST_REVIEW_UPDATE: ${{ inputs.recheck_existing_review == 'apply' }}
+  REVIEW_RECHECK_MODE: ${{ inputs.recheck_existing_review }}
+  REVIEW_RECHECK_SERVER: ${{ inputs.recheck_server }}
+  USE_GEMINI_AI: ${{ inputs.use_gemini_ai }}
+  AI_REVIEW_LIMIT: ${{ inputs.ai_review_limit }}
   EPG_ALL_SOURCE_URL: >-
     https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz
   EPG_ALL_CATALOG_URL: >-
@@ -72,6 +111,7 @@ jobs:
           SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
           SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
           SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python - <<'PY'
           import json
@@ -106,6 +146,51 @@ jobs:
           write_requested = required("REQUEST_SHEET_WRITE").casefold()
           if write_requested not in {"true", "false"}:
               raise SystemExit("update_google_sheet must be true or false.")
+
+          recheck_mode = required("REVIEW_RECHECK_MODE")
+          if recheck_mode not in {"off", "dry-run", "apply"}:
+              raise SystemExit(
+                  "recheck_existing_review must be off, dry-run, or apply."
+              )
+          review_update_requested = required(
+              "REQUEST_REVIEW_UPDATE"
+          ).casefold()
+          if review_update_requested not in {"true", "false"}:
+              raise SystemExit("REVIEW update request is not valid.")
+          if (recheck_mode == "apply") != (
+              review_update_requested == "true"
+          ):
+              raise SystemExit("REVIEW update controls are inconsistent.")
+
+          recheck_server = required("REVIEW_RECHECK_SERVER")
+          if recheck_server not in {
+              "server_1", "server_2", "server_3", "all"
+          }:
+              raise SystemExit("recheck_server is not valid.")
+
+          use_gemini = required("USE_GEMINI_AI").casefold()
+          if use_gemini not in {"true", "false"}:
+              raise SystemExit("use_gemini_ai must be true or false.")
+          if use_gemini == "true" and recheck_mode == "off":
+              raise SystemExit(
+                  "Gemini can be used only when REVIEW recheck is enabled."
+              )
+
+          ai_limit = required("AI_REVIEW_LIMIT")
+          if ai_limit not in {"10", "25", "50"}:
+              raise SystemExit("ai_review_limit must be 10, 25, or 50.")
+          if use_gemini == "true":
+              gemini_key = os.environ.get("GEMINI_API_KEY", "")
+              if (
+                  not gemini_key
+                  or len(gemini_key) > 512
+                  or any(character.isspace() for character in gemini_key)
+                  or any(ord(character) < 33 for character in gemini_key)
+              ):
+                  raise SystemExit(
+                      "GEMINI_API_KEY is missing or invalid. Add it as a "
+                      "GitHub Actions secret; do not paste it into workflow inputs."
+                  )
 
           source = urlsplit(required("EPG_ALL_SOURCE_URL"))
           if (
@@ -189,9 +274,12 @@ jobs:
           python -m unittest \
             tests.test_sync_channel_inventory \
             tests.test_auto_match_inventory \
+            tests.test_auto_match_shortlists \
+            tests.test_learned_alias_memory \
             tests.test_auto_match_v1 \
             tests.test_epg_catalog_stream \
             tests.test_epg_spool_reuse \
+            tests.test_ai_review_gemini \
             tests.test_matcher_regression \
             -v
 
@@ -247,6 +335,7 @@ jobs:
           SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
           SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
           SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euo pipefail
           mkdir -p .build/channel-sync
@@ -264,11 +353,25 @@ jobs:
                 "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt"
               --epgshare-spool-out
                 "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3"
+              --review-recheck-mode "$REVIEW_RECHECK_MODE"
+              --ai-review-limit "$AI_REVIEW_LIMIT"
               --minimum-server-channels
                 server_1=4000
                 server_2=10500
                 server_3=9400
           )
+
+          if [[ "$REVIEW_RECHECK_SERVER" == "all" ]]; then
+            command+=(
+              --review-recheck-servers server_1 server_2 server_3
+            )
+          else
+            command+=(--review-recheck-servers "$REVIEW_RECHECK_SERVER")
+          fi
+
+          if [[ "${USE_GEMINI_AI,,}" == "true" ]]; then
+            command+=(--use-gemini-ai)
+          fi
 
           if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
             command+=(--allow-insecure-http)
@@ -278,6 +381,9 @@ jobs:
           if [[ "${REQUEST_SHEET_WRITE,,}" == "true" ]]; then
             command+=(--write-to-sheet)
           fi
+
+          # Existing REVIEW updates are controlled solely by the explicit
+          # apply mode above; they do not require new-channel appends.
 
           "${command[@]}"
 
@@ -296,6 +402,7 @@ jobs:
           SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
           SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
           SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python - <<'PY'
           import base64
@@ -434,6 +541,10 @@ jobs:
                   google_values.append(value)
           for value in google_values:
               raw_tokens.update(encoded_variants(value))
+
+          gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
+          if gemini_api_key:
+              raw_tokens.update(encoded_variants(gemini_api_key))
 
           maximum_structured_value = 0
           for number in (1, 2, 3):
@@ -644,6 +755,21 @@ jobs:
                   ("new_rows", "New channels found"),
                   ("auto_matched_rows", "New channels safely matched automatically"),
                   ("auto_match_review_rows", "New channels left for review"),
+                  ("review_recheck_mode", "Existing REVIEW recheck mode"),
+                  ("review_recheck_eligible_rows", "Existing REVIEW channels eligible"),
+                  ("review_recheck_considered_rows", "Existing REVIEW channels checked"),
+                  ("review_recheck_safe_matches", "Existing REVIEW channels safely matched"),
+                  ("review_recheck_still_review_rows", "Existing channels still requiring review"),
+                  ("review_recheck_skipped_rows", "Existing REVIEW channels skipped by safety checks"),
+                  ("review_recheck_deferred_rows", "Safe matches deferred by the write limit"),
+                  ("review_recheck_rows_updated", "Existing REVIEW rows updated in Google Sheet"),
+                  ("ai_review_considered_rows", "Channels considered by Gemini"),
+                  ("ai_review_high_suggestions_found", "Gemini HIGH suggestions found"),
+                  ("ai_review_high_suggestions_persisted", "Gemini HIGH suggestions saved for manual approval"),
+                  ("ai_review_abstained_rows", "Gemini reviews left unresolved"),
+                  ("ai_review_error_rows", "Gemini reviews unavailable or rejected"),
+                  ("cross_server_aliases_registered", "Safe cross-server rules learned this run"),
+                  ("cross_server_alias_groups_rejected", "Unsafe learned-rule groups rejected"),
                   ("epgshare_catalog_corroboration_mode", "EPG catalog alignment mode"),
                   ("epgshare_shared_catalog_channels", "EPG IDs confirmed in both catalogs"),
                   ("epgshare_xml_only_catalog_channels", "XML-only EPG IDs quarantined"),
