@@ -27,6 +27,7 @@ import sqlite3
 import sys
 import time
 import unicodedata
+import xml.parsers.expat as expat
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -84,6 +85,7 @@ MAX_SOURCE_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
 MAX_SOURCE_ELEMENTS = 20_000_000
 MAX_RECORD_CHILD_ELEMENTS = 10_000
 MAX_CATEGORY_VALUES = 64
+MAX_XML_PROLOG_BYTES = 2 * 1024 * 1024
 SQLITE_BATCH_SIZE = 2_000
 PROGRESS_EVERY_ELEMENTS = 250_000
 
@@ -227,6 +229,10 @@ INVALID_XML_RE = re.compile(
 
 class BuildError(RuntimeError):
     """A safe production error that never includes credentials."""
+
+
+class _XmlRootReached(RuntimeError):
+    """Private control-flow signal used to stop the bounded prolog parser."""
 
 
 @dataclass
@@ -1791,34 +1797,165 @@ def release_top_level(element: etree._Element) -> None:
             del parent[0]
 
 
-def reject_unsafe_xml_prefix(path: Path) -> None:
+def _xml_source_label(source_label: str) -> str:
+    return clean_text(source_label, 100) or "XMLTV input"
+
+
+def _safe_xmltv_system_identifier(system_id: str | None) -> bool:
+    """Allow only the inert local identifier used by standard XMLTV feeds.
+
+    Neither the Expat preflight nor lxml loads this identifier.  Keeping the
+    allowlist exact also prevents a future parser-option change from turning a
+    network URL or local-file path into an external fetch.
+    """
+    return system_id in {None, "xmltv.dtd"}
+
+
+def _preflight_xml_prolog(
+    source: BinaryIO,
+    *,
+    allow_inert_xmltv_doctype: bool,
+    source_label: str,
+) -> None:
+    """Structurally inspect a bounded XML prolog without loading any DTD.
+
+    A raw byte search both misses alternate encodings and mistakes declaration
+    text inside comments for a real DTD.  Expat reports the declaration before
+    processing an internal subset, so an unsafe subset can be rejected before
+    lxml sees it.  Parsing stops at the first root element.
+    """
+    label = _xml_source_label(source_label)
+    parser = expat.ParserCreate()
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    declared_root = ""
+
+    def start_doctype(
+        name: str,
+        system_id: str | None,
+        public_id: str | None,
+        has_internal_subset: int,
+    ) -> None:
+        nonlocal declared_root
+        if not allow_inert_xmltv_doctype:
+            raise BuildError(f"{label} contains a forbidden DTD declaration.")
+        if name != "tv":
+            raise BuildError(
+                f"{label} contains a forbidden non-XMLTV DTD declaration."
+            )
+        if has_internal_subset:
+            raise BuildError(f"{label} contains a forbidden DTD internal subset.")
+        if public_id is not None or not _safe_xmltv_system_identifier(system_id):
+            raise BuildError(
+                f"{label} contains a forbidden external DTD identifier."
+            )
+        declared_root = name
+
+    def entity_declaration(*_arguments: object) -> None:
+        raise BuildError(f"{label} contains a forbidden entity declaration.")
+
+    def external_entity(*_arguments: object) -> int:
+        raise BuildError(f"{label} attempted to load a forbidden external entity.")
+
+    def root_element(name: str, _attributes: Mapping[str, str]) -> None:
+        if declared_root and name != declared_root:
+            raise BuildError(f"{label} has a DTD/root-name mismatch.")
+        raise _XmlRootReached()
+
+    parser.StartDoctypeDeclHandler = start_doctype
+    parser.EntityDeclHandler = entity_declaration
+    parser.ExternalEntityRefHandler = external_entity
+    parser.StartElementHandler = root_element
+
+    total = 0
     try:
-        with open_limited_xml(path, 2 * 1024 * 1024) as source:
-            prefix = source.read(64 * 1024).lower()
+        while total < MAX_XML_PROLOG_BYTES:
+            chunk = source.read(min(64 * 1024, MAX_XML_PROLOG_BYTES - total))
+            if not chunk:
+                parser.Parse(b"", True)
+                break
+            total += len(chunk)
+            parser.Parse(chunk, False)
+    except _XmlRootReached:
+        return
+    except BuildError:
+        raise
+    except expat.ExpatError as exc:
+        raise BuildError(f"{label} is malformed or truncated XMLTV.") from exc
+    if total >= MAX_XML_PROLOG_BYTES:
+        raise BuildError(
+            f"{label} XML prolog exceeds the {MAX_XML_PROLOG_BYTES:,}-byte limit."
+        )
+    raise BuildError(f"{label} is malformed or truncated XMLTV.")
+
+
+def reject_unsafe_xml_prefix(
+    path: Path,
+    *,
+    allow_inert_xmltv_doctype: bool = False,
+    source_label: str = "XMLTV input",
+) -> None:
+    """Preflight an XML or gzip source before the full streaming parse."""
+    try:
+        with open_limited_xml(path, MAX_XML_PROLOG_BYTES) as source:
+            _preflight_xml_prolog(
+                source,
+                allow_inert_xmltv_doctype=allow_inert_xmltv_doctype,
+                source_label=source_label,
+            )
     except (gzip.BadGzipFile, EOFError, OSError) as exc:
-        raise BuildError("XMLTV input is malformed or truncated.") from exc
-    if b"<!doctype" in prefix or b"<!entity" in prefix:
-        raise BuildError("XML source contains a forbidden DTD or entity declaration.")
+        raise BuildError(
+            f"{_xml_source_label(source_label)} is malformed or truncated XMLTV."
+        ) from exc
 
 
-def reject_unsafe_xml_prefix_handle(raw: BinaryIO) -> None:
-    """Apply the prefix safety check to one already-open source descriptor."""
+def reject_unsafe_xml_prefix_handle(
+    raw: BinaryIO,
+    *,
+    allow_inert_xmltv_doctype: bool = False,
+    source_label: str = "XMLTV input",
+) -> None:
+    """Apply the structural prolog preflight to an open source descriptor."""
     position = raw.tell()
     try:
-        with open_limited_xml_handle(raw, 2 * 1024 * 1024) as source:
-            prefix = source.read(64 * 1024).lower()
+        with open_limited_xml_handle(raw, MAX_XML_PROLOG_BYTES) as source:
+            _preflight_xml_prolog(
+                source,
+                allow_inert_xmltv_doctype=allow_inert_xmltv_doctype,
+                source_label=source_label,
+            )
     except (gzip.BadGzipFile, EOFError, OSError) as exc:
-        raise BuildError("XMLTV input is malformed or truncated.") from exc
+        raise BuildError(
+            f"{_xml_source_label(source_label)} is malformed or truncated XMLTV."
+        ) from exc
     finally:
         raw.seek(position)
-    if b"<!doctype" in prefix or b"<!entity" in prefix:
-        raise BuildError("XML source contains a forbidden DTD or entity declaration.")
 
 
-def reject_parsed_doctype(element: etree._Element) -> None:
-    """Enforce the no-DTD contract independent of prolog length or encoding."""
-    if clean_text(element.getroottree().docinfo.doctype, 2_000):
-        raise BuildError("XML source contains a forbidden DTD declaration.")
+def reject_parsed_doctype(
+    element: etree._Element,
+    *,
+    allow_inert_xmltv_doctype: bool = False,
+    source_label: str = "XMLTV input",
+) -> None:
+    """Cross-check a declaration after lxml has parsed the document root."""
+    document = element.getroottree().docinfo
+    if not clean_text(document.doctype, 2_000):
+        return
+    label = _xml_source_label(source_label)
+    if not allow_inert_xmltv_doctype:
+        raise BuildError(f"{label} contains a forbidden DTD declaration.")
+    if (
+        document.root_name != "tv"
+        or local_name(element.tag) != "tv"
+        or document.public_id is not None
+        or not _safe_xmltv_system_identifier(document.system_url)
+    ):
+        raise BuildError(f"{label} contains a forbidden DTD declaration.")
+    internal_dtd = document.internalDTD
+    if internal_dtd is not None and (
+        any(internal_dtd.iterentities()) or any(internal_dtd.iterelements())
+    ):
+        raise BuildError(f"{label} contains forbidden internal DTD declarations.")
 
 
 def wanted_target(
@@ -1867,10 +2004,23 @@ def ingest_xmltv_source(
     window_start: int,
     source_base_url: str = "",
     allow_source_icons: bool = True,
+    allow_inert_xmltv_doctype: bool = False,
     maximum_expanded_bytes: int = MAX_SOURCE_EXPANDED_BYTES,
 ) -> SourceStats:
     """Strictly parse one XMLTV source and spool only mapped schedules."""
-    reject_unsafe_xml_prefix(path)
+    if allow_inert_xmltv_doctype and source_key not in {
+        "panel:server_2",
+        "panel:server_3",
+    }:
+        raise BuildError(
+            "The inert XMLTV DOCTYPE allowance is restricted to Server 2/3 "
+            "native panel inputs."
+        )
+    reject_unsafe_xml_prefix(
+        path,
+        allow_inert_xmltv_doctype=allow_inert_xmltv_doctype,
+        source_label=source_key,
+    )
     stats = SourceStats(source_key=source_key, compressed_bytes=path.stat().st_size)
     wanted_by_fold: dict[str, set[str]] = defaultdict(set)
     for channel_id in wanted_ids:
@@ -1940,7 +2090,11 @@ def ingest_xmltv_source(
                     if root_element is None:
                         root_element = element
                         root_name = local_name(element.tag)
-                        reject_parsed_doctype(element)
+                        reject_parsed_doctype(
+                            element,
+                            allow_inert_xmltv_doctype=allow_inert_xmltv_doctype,
+                            source_label=source_key,
+                        )
                         if root_name != "tv":
                             raise BuildError(
                                 f"{source_key} is not an XMLTV <tv> document."
@@ -2161,6 +2315,16 @@ def panel_credentials(server_id: str) -> tuple[str, str, str]:
     return base_url, username, password
 
 
+def panel_payload_is_non_xmltv(prefix: bytes) -> bool:
+    """Recognize common status-200 HTML/JSON panel error responses."""
+    lowered = prefix.lstrip(b"\xef\xbb\xbf\x00\t\r\n ").lower()
+    if lowered.startswith(b"<?xml"):
+        declaration_end = lowered.find(b"?>")
+        if declaration_end >= 0:
+            lowered = lowered[declaration_end + 2 :].lstrip()
+    return lowered.startswith((b"<html", b"<!doctype html", b"{", b"["))
+
+
 def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[str, Any]]:
     base_url, username, password = panel_credentials(server_id)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2197,8 +2361,7 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                     output.flush()
                     os.fsync(output.fileno())
                 response.close()
-                lowered = prefix.lstrip().lower()
-                if lowered.startswith(b"<html") or lowered.startswith(b"{"):
+                if panel_payload_is_non_xmltv(prefix):
                     raise BuildError(f"{server_id} panel returned a non-XML response.")
                 os.replace(temporary, destination)
                 return destination, {
@@ -2206,6 +2369,7 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                     "bytes": total,
                 }
             except BuildError:
+                temporary.unlink(missing_ok=True)
                 raise
             except (OSError, requests.RequestException):
                 temporary.unlink(missing_ok=True)
@@ -4001,6 +4165,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     work_dir / "downloads" / f"{server_id}_panel.xmltv",
                 )
             panel_key = f"panel:{server_id}"
+            print(f"Parsing native panel XMLTV for {server_id}.", flush=True)
             panel_stats = ingest_xmltv_source(
                 connection=connection,
                 path=panel_path,
@@ -4013,6 +4178,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # a public manifest or output URL.
                 source_base_url="",
                 allow_source_icons=False,
+                allow_inert_xmltv_doctype=True,
                 maximum_expanded_bytes=args.max_expanded_bytes,
             )
             source_stats[panel_key] = panel_stats

@@ -1237,6 +1237,252 @@ class MappingContractTests(unittest.TestCase):
             finally:
                 connection.close()
 
+    def test_native_panel_accepts_only_an_inert_standard_xmltv_doctype(self) -> None:
+        start = _xmltv_time(FIXED_NOW)
+        stop = _xmltv_time(FIXED_NOW + 3600)
+        xmltv = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            + "<!--"
+            + ("safe-prolog-padding" * 5_000)
+            + "-->"
+            + '<!DOCTYPE tv SYSTEM "xmltv.dtd">'
+            + '<tv><channel id="Fixture.test"><display-name>Fixture</display-name>'
+            + '</channel><programme channel="Fixture.test" '
+            + f'start="{start}" stop="{stop}"><title>Fixture Programme</title>'
+            + "</programme></tv>"
+        )
+
+        for compressed in (False, True):
+            with self.subTest(compressed=compressed):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    source = root / ("panel.xml.gz" if compressed else "panel.xml")
+                    if compressed:
+                        _write_deterministic_gzip(source, xmltv)
+                    else:
+                        source.write_text(xmltv, encoding="utf-8")
+                    connection = runner.create_database(root / "spool.sqlite3")
+                    try:
+                        stats = runner.ingest_xmltv_source(
+                            connection=connection,
+                            path=source,
+                            source_key="panel:server_2",
+                            wanted_ids={"Fixture.test"},
+                            window_start=FIXED_NOW - 1,
+                            allow_inert_xmltv_doctype=True,
+                        )
+                        self.assertEqual(stats.selected_channels, 1)
+                        self.assertEqual(stats.selected_programmes, 1)
+                    finally:
+                        connection.close()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "epgshare.xml"
+            source.write_text(xmltv, encoding="utf-8")
+            connection = runner.create_database(root / "spool.sqlite3")
+            try:
+                with self.assertRaisesRegex(
+                    runner.BuildError, "epgshare01 contains a forbidden DTD"
+                ):
+                    runner.ingest_xmltv_source(
+                        connection=connection,
+                        path=source,
+                        source_key="epgshare01",
+                        wanted_ids={"Fixture.test"},
+                        window_start=FIXED_NOW - 1,
+                    )
+            finally:
+                connection.close()
+
+    def test_native_panel_rejects_every_active_or_external_dtd_feature(self) -> None:
+        unsafe_documents = {
+            "internal-general-entity": (
+                '<!DOCTYPE tv [<!ENTITY marker "EXPANDED">]>'
+                '<tv><channel id="&marker;"/></tv>'
+            ),
+            "external-general-entity": (
+                '<!DOCTYPE tv [<!ENTITY marker SYSTEM "file:///etc/passwd">]>'
+                '<tv><channel id="&marker;"/></tv>'
+            ),
+            "external-parameter-entity": (
+                '<!DOCTYPE tv [<!ENTITY % marker SYSTEM "file:///etc/passwd">'
+                '%marker;]><tv/>'
+            ),
+            "internal-element-declaration": (
+                '<!DOCTYPE tv [<!ELEMENT tv ANY>]><tv/>'
+            ),
+            "public-dtd": (
+                '<!DOCTYPE tv PUBLIC "-//XMLTV//DTD XMLTV 1.0//EN" "xmltv.dtd">'
+                '<tv/>'
+            ),
+            "network-dtd": (
+                '<!DOCTYPE tv SYSTEM "https://example.invalid/xmltv.dtd"><tv/>'
+            ),
+            "empty-system-identifier": '<!DOCTYPE tv SYSTEM ""><tv/>',
+            "empty-public-identifier": (
+                '<!DOCTYPE tv PUBLIC "" "xmltv.dtd"><tv/>'
+            ),
+            "wrong-doctype-root": "<!DOCTYPE html><html/>",
+            "utf16-internal-entity": (
+                '<?xml version="1.0" encoding="UTF-16"?>'
+                '<!DOCTYPE tv [<!ENTITY marker "EXPANDED">]>'
+                '<tv><channel id="&marker;"/></tv>'
+            ).encode("utf-16"),
+        }
+        for label, xmltv in unsafe_documents.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    source = root / "unsafe.xml"
+                    source.write_bytes(
+                        xmltv if isinstance(xmltv, bytes) else xmltv.encode("utf-8")
+                    )
+                    connection = runner.create_database(root / "spool.sqlite3")
+                    try:
+                        with self.assertRaisesRegex(
+                            runner.BuildError, "panel:server_2.*forbidden"
+                        ):
+                            runner.ingest_xmltv_source(
+                                connection=connection,
+                                path=source,
+                                source_key="panel:server_2",
+                                wanted_ids={"Fixture.test"},
+                                window_start=FIXED_NOW,
+                                allow_inert_xmltv_doctype=True,
+                            )
+                        self.assertEqual(
+                            connection.execute("SELECT COUNT(*) FROM channels").fetchone()[0],
+                            0,
+                        )
+                        self.assertEqual(
+                            connection.execute("SELECT COUNT(*) FROM programmes").fetchone()[0],
+                            0,
+                        )
+                    finally:
+                        connection.close()
+
+    def test_inert_doctype_allowance_is_native_panel_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.xml"
+            source.write_text(
+                '<!DOCTYPE tv SYSTEM "xmltv.dtd"><tv/>', encoding="utf-8"
+            )
+            for source_key in ("epgshare01", "panel:server_1", "panel:server_4"):
+                with self.subTest(source_key=source_key):
+                    connection = runner.create_database(
+                        root / f"{source_key.replace(':', '-')}.sqlite3"
+                    )
+                    try:
+                        with self.assertRaisesRegex(
+                            runner.BuildError,
+                            "restricted to Server 2/3 native panel inputs",
+                        ):
+                            runner.ingest_xmltv_source(
+                                connection=connection,
+                                path=source,
+                                source_key=source_key,
+                                wanted_ids=set(),
+                                window_start=FIXED_NOW,
+                                allow_inert_xmltv_doctype=True,
+                            )
+                    finally:
+                        connection.close()
+
+    def test_allowed_xmltv_system_identifier_is_never_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "xmltv.dtd").write_text(
+                '<!ENTITY marker "EXPANDED_FROM_LOCAL_FILE">', encoding="utf-8"
+            )
+            source = root / "panel.xml"
+            source.write_text(
+                '<!DOCTYPE tv SYSTEM "xmltv.dtd">'
+                '<tv><channel id="&marker;"/></tv>',
+                encoding="utf-8",
+            )
+            connection = runner.create_database(root / "spool.sqlite3")
+            try:
+                stats = runner.ingest_xmltv_source(
+                    connection=connection,
+                    path=source,
+                    source_key="panel:server_2",
+                    wanted_ids={"EXPANDED_FROM_LOCAL_FILE"},
+                    window_start=FIXED_NOW,
+                    allow_inert_xmltv_doctype=True,
+                )
+                self.assertEqual(stats.selected_channels, 0)
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM channels").fetchone()[0],
+                    0,
+                )
+            finally:
+                connection.close()
+
+    def test_doctype_like_comment_and_cdata_text_are_not_declarations(self) -> None:
+        start = _xmltv_time(FIXED_NOW)
+        stop = _xmltv_time(FIXED_NOW + 3600)
+        xmltv = (
+            '<!-- documentation mentions <!DOCTYPE tv SYSTEM "xmltv.dtd"> -->'
+            '<tv><channel id="Fixture.test"><display-name><![CDATA['
+            'literal <!ENTITY example> text]]></display-name></channel>'
+            f'<programme channel="Fixture.test" start="{start}" stop="{stop}">'
+            '<title>Fixture Programme</title></programme></tv>'
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.xml"
+            source.write_text(xmltv, encoding="utf-8")
+            connection = runner.create_database(root / "spool.sqlite3")
+            try:
+                stats = runner.ingest_xmltv_source(
+                    connection=connection,
+                    path=source,
+                    source_key="epgshare01",
+                    wanted_ids={"Fixture.test"},
+                    window_start=FIXED_NOW - 1,
+                )
+                self.assertEqual(stats.selected_programmes, 1)
+            finally:
+                connection.close()
+
+    def test_panel_download_rejects_doctype_html_as_non_xml_response(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "https://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+        }
+        payloads = (
+            b"<!DOCTYPE html><html><body>Login failed</body></html>",
+            (
+                b'<?xml version="1.0"?>\n<!DOCTYPE html>'
+                b"<html><body>Access denied</body></html>"
+            ),
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload[:30]):
+                with tempfile.TemporaryDirectory() as temporary:
+                    destination = Path(temporary) / "panel.xmltv"
+                    response = mock.MagicMock()
+                    response.status_code = 200
+                    response.iter_content.return_value = [payload]
+                    session = mock.MagicMock()
+                    session.get.return_value = response
+                    with mock.patch.dict(runner.os.environ, credentials, clear=True):
+                        with mock.patch.object(
+                            runner.requests, "Session", return_value=session
+                        ):
+                            with self.assertRaisesRegex(
+                                runner.BuildError,
+                                "server_2 panel returned a non-XML response",
+                            ):
+                                runner.download_panel_xmltv("server_2", destination)
+                    self.assertFalse(destination.exists())
+                    self.assertFalse(
+                        destination.with_suffix(destination.suffix + ".part").exists()
+                    )
+
     def test_duplicate_programme_keeps_richer_details_independent_of_order(self) -> None:
         start = _xmltv_time(FIXED_NOW)
         stop = _xmltv_time(FIXED_NOW + 3600)
@@ -1510,6 +1756,7 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
 </tv>
 '''
         panel_source = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE tv SYSTEM "xmltv.dtd">
 <tv>
   <channel id="Gurbani.Punjabi.test">
     <display-name>Native Server One Decoy</display-name>

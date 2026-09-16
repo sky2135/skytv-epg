@@ -3,9 +3,9 @@
 **Local release status: PASS**  
 Validated through: 2026-09-16 UTC
 
-The catalog-rollover and Workflow 2 snapshot-guard repairs have passed focused
-adversarial validation. The integrity manifest has been resealed for the
-repaired files, and the complete repository suite now passes.
+The catalog-rollover, Workflow 2 snapshot-guard, and native-panel XMLTV repairs
+have passed focused adversarial validation. The integrity manifest has been
+resealed for the repaired files, and the complete repository suite now passes.
 
 The owner must still run the private Google Sheet/provider checks in
 [`docs/REPAIR_CURRENT_SETUP_VERSION_1.md`](docs/REPAIR_CURRENT_SETUP_VERSION_1.md).
@@ -54,6 +54,47 @@ The attached resource report recorded about 380 MiB peak RSS, zero swap, and a
 14.62-second controlled exit, confirming that RAM, disk, and timeout limits did
 not cause this event.
 
+## Native-panel XMLTV declaration repair
+
+The next Workflow 2 run passed every snapshot-integrity floor and then stopped
+with:
+
+```text
+WARNING: server_2 native panel transport is unencrypted because
+ALLOW_INSECURE_PANEL_HTTP is TRUE.
+ERROR: XML source contains a forbidden DTD or entity declaration.
+```
+
+The log order proves that this input was Server 2's downloaded native
+`xmltv.php` document. EPGShare had already been parsed into, and successfully
+reused from, the sealed one-pass spool. The old byte-prefix guard reported the
+same generic error for both a standard XMLTV header such as
+`<!DOCTYPE tv SYSTEM "xmltv.dtd">` and a status-200 HTML error page beginning
+`<!DOCTYPE html>`, so the retained run log cannot distinguish which of those
+two payloads Server 2 returned.
+
+The corrected parser handles both cases safely:
+
+- only native `panel:server_2` and `panel:server_3` inputs may contain an inert
+  `<!DOCTYPE tv>` or exact `<!DOCTYPE tv SYSTEM "xmltv.dtd">` declaration;
+- EPGShare and generated XMLTV remain DTD-free;
+- a bounded, encoding-aware structural prolog check replaces the raw substring
+  search, so comments and CDATA are not mistaken for declarations;
+- internal subsets, general or parameter entities, PUBLIC declarations,
+  network/local-file identifiers, empty identifiers, and non-`tv` declarations
+  are rejected before programme ingestion;
+- both XML parsers are configured never to load a DTD, external entity, local
+  file, or network resource;
+- HTML and JSON panel responses are classified as non-XML rather than as a
+  misleading DTD error, and partial downloads are removed; and
+- future parser failures name the safe source key, such as `panel:server_2`.
+
+The end-to-end fixture now builds Server 2 from a panel XMLTV document carrying
+the standard inert declaration. Separate adversarial tests cover plain and gzip
+input, long prologs, UTF-16 entity attacks, internal/external/parameter
+entities, HTML/JSON responses, DTD-like comment/CDATA text, exact panel-only
+scope, and proof that a local `xmltv.dtd` file is never loaded.
+
 ## Catalog-rollover repair
 
 EPGShare's current XML and official text catalog were published at different
@@ -89,8 +130,8 @@ verifiable non-atomic source rollout to complete without silently approving the
 
 ## Automated code and workflow checks
 
-- Full repository suite: **277 tests passed, 0 failed**.
-- Snapshot/builder/synchronizer suite: **126 tests passed, 0 failed**.
+- Full repository suite: **283 tests passed, 0 failed**.
+- Snapshot/builder/synchronizer suite: **132 tests passed, 0 failed**.
 - Full 25,170-row Version 1 seed snapshot-bundle exercise: **passed**, including
   the exact Server 3 census of 9,943 authoritative, 1,180 quarantined, and 8,763
   effective runnable rows.
@@ -116,8 +157,9 @@ XML-only/TXT-only quarantine, Unicode-whitespace and case-confusable IDs,
 union-wide case collisions, XML-only collision shadows, text-catalog country
 section conflicts, real/dummy ambiguity, cross-market and cross-feed confusable
 families, unscoped `ALL`-route competitors, one-character strict identities,
-row-accurate approval counts, malformed/truncated gzip and XML, DTD/entity
-rejection, bounded streaming, exact opaque channel IDs,
+row-accurate approval counts, malformed/truncated gzip and XML, panel-only
+inert XMLTV declarations, DTD/entity attack rejection, bounded streaming,
+exact opaque channel IDs,
 descriptor-bound source hashing, atomic path replacement, near-term guide
 coverage, adult-label disguises, Google native-table appends, partial or
 uncertain Google responses, exact 33-cell rereads, formula-safe text, stream-ID
@@ -218,7 +260,7 @@ the owner's private Sheet remains part of the documented OFF-then-ON test.
 
 | File | SHA-256 |
 |---|---|
-| `scripts/build_epg_streaming.py` | `7b7b8becd084bd2bbff0e534ca3c116acbf5d59143373c569c4aa517732f230b` |
+| `scripts/build_epg_streaming.py` | `3b88fbd4e41284607fdde2783d618864b3fb15b54ff2747ec4b5c3e557e56d97` |
 | `src/skytv_epg_auto_match_v1.py` | `e2f175e3fd5be2cbe814305ef8eb5ae05dddce054e3ca0e46b1aab44988a049c` |
 | `scripts/auto_match_inventory.py` | `647f7bab7d11e9021639f67038a9d2faba54356c85da1b5513ec2cbcd882a66b` |
 | `scripts/epg_catalog_stream.py` | `fb04f5f9097bffe96ba4f3a421b4d53f1ce6110dc80e390ee45a91f2d99a9821` |
@@ -227,7 +269,7 @@ the owner's private Sheet remains part of the documented OFF-then-ON test.
 | `.github/workflows/main.yml` | `23770174a7690423b9c835c789ebb6ca43c701bdf448b65a1970132e5c0e4a11` |
 | `.github/workflows/channel_inventory_sync.yml` | `0f4a477b18012436691bf08ffb884eaa818fc14bbaa3ac871b55bc37f97a4eb4` |
 | `requirements-sync.txt` | `cb80ac4377fa3656ea135c65273fdc1b6ba7f5ce198f1f14ccb13de0e3ed593f` |
-| `MATCHER_INTEGRITY.json` | `f84705e958abdd224d4fa08239d5598aedb8fc65bf247281b9ca551256adbc0b` |
+| `MATCHER_INTEGRITY.json` | `f8f456a19eb2114e74e11df2898264a40b5176c78f1cf8d200eb04a1fd0a9fbf` |
 
 ## External validation still required
 

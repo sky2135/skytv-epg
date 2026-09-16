@@ -676,7 +676,11 @@ the custom app's preference screens or client-side filtering implementation.
   mappings. If it shares a strong exact/station identity with a routed proposed
   target, that new proposal remains disabled in `REVIEW`.
 - XMLTV parse: at most 20 million elements and 10,000 child elements in one
-  record; DTD/entity declarations are rejected.
+  record. EPGShare and generated outputs remain DTD-free. A native Server 2/3
+  panel may declare only an inert `<!DOCTYPE tv>` or
+  `<!DOCTYPE tv SYSTEM "xmltv.dtd">`; internal subsets, entities, PUBLIC or
+  network/local-file identifiers, and non-XMLTV declarations are rejected.
+  Neither parser loads an external DTD or entity.
 - SQLite ingestion batch: 2,000 programme rows.
 - Build process virtual-memory ceiling: 6 GiB in GitHub Actions.
 - Inner build timeout: 95 minutes; build job timeout: 120 minutes.
