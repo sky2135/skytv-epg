@@ -775,6 +775,112 @@ class MappingAndComparisonTests(unittest.TestCase):
         self.assertEqual(row["epg_feed"], "panel")
         self.assertEqual(row["epg_id"], "Panel.Channel")
 
+    def test_compact_status_counts_only_current_real_epg_and_review_queue(self) -> None:
+        epgshare = mapping_row("server_1", "s1-epg", "EPGShare")
+        blocked_server_one_panel = mapping_row(
+            "server_1",
+            "s1-panel",
+            "Legacy Panel",
+            action="KEEP_PANEL",
+            source="panel",
+            epg_feed="panel",
+            epg_id="native.s1",
+        )
+        review = mapping_row(
+            "server_1", "s1-review", "Review", action="REVIEW", epg_id=""
+        )
+        review["enabled"] = "FALSE"
+        ignored = mapping_row(
+            "server_1", "s1-ignore", "Ignored", action="IGNORE", epg_id=""
+        )
+        ignored["enabled"] = "FALSE"
+        stale = mapping_row("server_1", "s1-stale", "No Longer at Provider")
+        native = mapping_row(
+            "server_2",
+            "s2-native",
+            "Native",
+            action="KEEP_PANEL",
+            source="panel",
+            epg_feed="panel",
+            epg_id="native.s2",
+        )
+        quarantined = mapping_row("server_2", "s2-alert", "Alerted")
+        dummy = mapping_row(
+            "server_2",
+            "s2-dummy",
+            "Placeholder",
+            action="AUTO_DUMMY",
+            source="dummy",
+            epg_feed="DUMMY_CHANNELS",
+            epg_id="dummy.s2",
+        )
+        inventories = [
+            inventory(
+                "server_1",
+                [
+                    {"stream_id": stream_id, "name": stream_id}
+                    for stream_id in (
+                        "s1-epg",
+                        "s1-panel",
+                        "s1-review",
+                        "s1-ignore",
+                        "s1-unmapped",
+                    )
+                ],
+            ),
+            inventory(
+                "server_2",
+                [
+                    {"stream_id": stream_id, "name": stream_id}
+                    for stream_id in ("s2-native", "s2-alert", "s2-dummy")
+                ],
+            ),
+        ]
+
+        status = sync.current_channel_status_by_server(
+            table(
+                [
+                    epgshare,
+                    blocked_server_one_panel,
+                    review,
+                    ignored,
+                    stale,
+                    native,
+                    quarantined,
+                    dummy,
+                ]
+            ),
+            inventories,
+            quarantined_keys={("server_2", "s2-alert")},
+        )
+
+        self.assertEqual(
+            status["server_1"],
+            {
+                "provider_available": True,
+                "provider_channels": 5,
+                "epgshare_enabled": 1,
+                "native_enabled": 0,
+                "needs_review": 2,
+                "excluded_or_placeholder": 2,
+                "safety_excluded": 0,
+            },
+        )
+        self.assertEqual(
+            status["server_2"],
+            {
+                "provider_available": True,
+                "provider_channels": 3,
+                "epgshare_enabled": 0,
+                "native_enabled": 1,
+                "needs_review": 1,
+                "excluded_or_placeholder": 1,
+                "safety_excluded": 1,
+            },
+        )
+        self.assertFalse(status["server_3"]["provider_available"])
+        self.assertEqual(status["server_3"]["provider_channels"], 0)
+
     def test_quality_suffix_and_case_do_not_create_false_name_drift(self) -> None:
         current = table([mapping_row("server_1", "1", "News HD")])
         inv = inventory(
@@ -3382,6 +3488,35 @@ class ReportsAndSheetsTests(unittest.TestCase):
         self.assertNotIn("path: .build/channel-sync/\n", upload_section)
         self.assertIn("retention-days: 7", upload_section)
 
+    def test_workflow_channel_summary_is_compact(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "channel_inventory_sync.yml"
+        ).read_text(encoding="utf-8")
+        summary_section = workflow.split(
+            "- name: Add channel-sync summary", 1
+        )[1].split("- name: Retain aggregate channel-sync summary", 1)[0]
+        for expected in (
+            "Total channels",
+            "EPGShare enabled",
+            "Server EPG enabled",
+            "To review",
+            "Other / placeholder",
+            "Smart Rules EPG matches enabled",
+            "Safe matches waiting for the next apply run",
+            "saved for approval",
+            "Gemini unavailable or rejected",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, summary_section)
+        for removed in (
+            "EPG catalog alignment mode",
+            "Changed channel details",
+            "Existing REVIEW rows updated in Google Sheet",
+            "Unsafe learned-rule groups rejected",
+        ):
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, summary_section)
+
     def test_workflow_two_requires_the_hash_bound_snapshot_bundle(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "main.yml"
@@ -4424,6 +4559,19 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
 
         self.assertEqual(summary["appended_rows"], 1)
         self.assertEqual(summary["review_recheck_rows_updated"], 1)
+        self.assertEqual(summary["review_recheck_safe_matches_persisted"], 1)
+        self.assertEqual(
+            summary["channel_status_by_server"]["server_1"],
+            {
+                "provider_available": True,
+                "provider_channels": 2,
+                "epgshare_enabled": 1,
+                "native_enabled": 0,
+                "needs_review": 1,
+                "excluded_or_placeholder": 0,
+                "safety_excluded": 0,
+            },
+        )
         self.assertEqual(mapping_reads.call_count, 3)
         self.assertEqual(alert_reads.call_count, 6)
         append_call.assert_called_once()

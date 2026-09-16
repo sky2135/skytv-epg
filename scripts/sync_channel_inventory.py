@@ -63,6 +63,7 @@ MAX_RECHECK_APPLIES_PER_RUN = 100
 MAX_AI_REVIEW_ROWS = 50
 MAX_RECHECK_TOTAL_UPDATES = MAX_RECHECK_APPLIES_PER_RUN + MAX_AI_REVIEW_ROWS
 MAX_RECHECK_UPDATE_REQUEST_BYTES = 2 * 1024 * 1024
+REVIEW_QUEUE_ACTIONS = frozenset({"REVIEW", "UNMATCHED", "NO_EPG", "UNRESOLVED"})
 RECHECK_PATCH_COLUMNS = (
     "enabled",
     "action",
@@ -1707,6 +1708,142 @@ def select_review_recheck_rows(
         )
     )
     return selected, stats
+
+
+def current_channel_status_by_server(
+    table: MappingTable,
+    inventories: Sequence[PanelInventory],
+    *,
+    quarantined_keys: Iterable[tuple[str, str]] = (),
+) -> dict[str, dict[str, int | bool]]:
+    """Return a compact, identity-safe view of current provider coverage.
+
+    Counts are limited to identities present in the provider inventories from
+    this run.  Old Sheet rows for channels no longer returned by a provider do
+    not inflate coverage.  A channel counts as EPG-enabled only when the same
+    mapping would be runtime-eligible for a real EPGShare or native-panel
+    source and is not quarantined by a current safety alert.
+    """
+
+    mapping_by_key = {
+        (
+            streaming.normalize_server_id(row.get("server_id", "")),
+            streaming.clean_identifier(row.get("stream_id", ""), 120),
+        ): row
+        for row in table.rows
+    }
+    blocked = {
+        (
+            streaming.normalize_server_id(server_id),
+            streaming.clean_identifier(stream_id, 120),
+        )
+        for server_id, stream_id in quarantined_keys
+    }
+    status: dict[str, dict[str, int | bool]] = {
+        server_id: {
+            "provider_available": False,
+            "provider_channels": 0,
+            "epgshare_enabled": 0,
+            "native_enabled": 0,
+            "needs_review": 0,
+            "excluded_or_placeholder": 0,
+            "safety_excluded": 0,
+        }
+        for server_id in DEFAULT_SERVERS
+    }
+    seen_provider_keys: set[tuple[str, str]] = set()
+
+    for inventory in inventories:
+        server_id = streaming.normalize_server_id(inventory.server_id)
+        if server_id not in status:
+            raise SyncError("A provider inventory has an unsupported server ID.")
+        stats = status[server_id]
+        stats["provider_available"] = True
+        for channel in inventory.channels:
+            stream_id = streaming.clean_identifier(channel.get("stream_id", ""), 120)
+            if not stream_id:
+                raise SyncError("A provider inventory channel is missing its stream ID.")
+            key = (server_id, stream_id)
+            if key in seen_provider_keys:
+                raise SyncError("A provider inventory contains a duplicate channel identity.")
+            seen_provider_keys.add(key)
+            stats["provider_channels"] = int(stats["provider_channels"]) + 1
+
+            row = mapping_by_key.get(key)
+            if row is None:
+                stats["needs_review"] = int(stats["needs_review"]) + 1
+                continue
+
+            action = (
+                streaming.clean_text(row.get("action", "APPROVED"), 40).upper()
+                or "APPROVED"
+            )
+            if action not in streaming.ALLOWED_ACTIONS:
+                raise SyncError("A current mapping row has an invalid action.")
+            if key in blocked:
+                stats["needs_review"] = int(stats["needs_review"]) + 1
+                stats["safety_excluded"] = int(stats["safety_excluded"]) + 1
+                continue
+            if action in REVIEW_QUEUE_ACTIONS:
+                stats["needs_review"] = int(stats["needs_review"]) + 1
+                continue
+
+            try:
+                enabled = streaming.parse_bool(
+                    row.get("enabled", ""),
+                    default=action not in streaming.REJECTED_ACTIONS,
+                    field_name="mapping enabled",
+                )
+                requested_source = streaming.normalize_requested_source(
+                    row.get("source", ""),
+                    row.get("epg_feed", ""),
+                    row_number=0,
+                )
+            except streaming.BuildError as exc:
+                raise SyncError("A current mapping row has invalid EPG controls.") from exc
+
+            epg_id = streaming.clean_identifier(row.get("epg_id", ""), 300)
+            if enabled and action not in streaming.REJECTED_ACTIONS and not epg_id:
+                raise SyncError("An enabled current mapping row is missing its EPG ID.")
+            runtime_eligible = (
+                enabled
+                and action not in streaming.REJECTED_ACTIONS
+                and bool(epg_id)
+                and not (server_id == "server_1" and requested_source == "panel")
+            )
+            if runtime_eligible and requested_source == "epgshare01":
+                stats["epgshare_enabled"] = int(stats["epgshare_enabled"]) + 1
+            elif runtime_eligible and requested_source == "panel":
+                stats["native_enabled"] = int(stats["native_enabled"]) + 1
+            else:
+                stats["excluded_or_placeholder"] = (
+                    int(stats["excluded_or_placeholder"]) + 1
+                )
+
+        accounted = (
+            int(stats["epgshare_enabled"])
+            + int(stats["native_enabled"])
+            + int(stats["needs_review"])
+            + int(stats["excluded_or_placeholder"])
+        )
+        if accounted != int(stats["provider_channels"]):
+            raise SyncError("The compact channel-status counts do not reconcile.")
+
+    return status
+
+
+def add_channel_status_to_summary(
+    summary: dict[str, Any],
+    table: MappingTable,
+    inventories: Sequence[PanelInventory],
+    *,
+    quarantined_keys: Iterable[tuple[str, str]] = (),
+) -> None:
+    summary["channel_status_by_server"] = current_channel_status_by_server(
+        table,
+        inventories,
+        quarantined_keys=quarantined_keys,
+    )
 
 
 def parse_sync_alert_values(values: Sequence[Sequence[Any]]) -> list[dict[str, str]]:
@@ -4186,6 +4323,7 @@ def _run_sync_review_mode(
         "overlap_issues": overlap_issues,
         "provider_failures": dict(provider_failures or {}),
         "review_recheck_deferred_rows": deferred_safe_matches,
+        "review_recheck_safe_matches_persisted": 0,
         "review_recheck_rows_updated": 0,
         "servers": {
             item.server_id: {
@@ -4199,8 +4337,16 @@ def _run_sync_review_mode(
         **auto_match_summary,
         **ai_summary,
     }
+    status_table = authoritative_table
+    status_quarantine_keys = match_time_quarantine_keys
 
     def persist_reports() -> None:
+        add_channel_status_to_summary(
+            summary,
+            status_table,
+            inventories,
+            quarantined_keys=status_quarantine_keys,
+        )
         write_reports(
             output_dir,
             inventories=inventories,
@@ -4355,6 +4501,7 @@ def _run_sync_review_mode(
             ),
             maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
         )
+        status_table = final_table
         if new_rows:
             if int(summary["appended_rows"]) != len(new_rows):
                 raise SyncError(
@@ -4381,6 +4528,9 @@ def _run_sync_review_mode(
             persist_reports()
             raise
         summary["review_recheck_rows_updated"] = updated_count
+        summary["review_recheck_safe_matches_persisted"] = len(
+            deterministic_updates
+        )
         intentional_mapping_write = intentional_mapping_write or bool(updated_count)
         summary["ai_review_high_suggestions_persisted"] = int(
             ai_summary.get("ai_review_high_suggestion_updates", 0)
@@ -4409,6 +4559,7 @@ def _run_sync_review_mode(
             persist_reports()
             raise SyncError(summary["terminal_mapping_verification_error"])
         final_table = terminal_table
+        status_table = terminal_table
 
     # Alerts are an equal authority to Mappings for snapshot eligibility. A
     # final read after the terminal Mappings read prevents a zero-update run,
@@ -4445,6 +4596,9 @@ def _run_sync_review_mode(
         raise SyncError(summary["sync_alert_verification_error"])
     existing_alerts = terminal_alerts
     persistent_quarantine_keys = terminal_quarantine_keys
+    status_quarantine_keys = snapshot_quarantine_keys(
+        changed_rows, terminal_quarantine_keys
+    )
     summary["open_sync_alerts"] = sum(
         1
         for row in terminal_alerts
@@ -4645,6 +4799,7 @@ def run_sync(
         "review_recheck_mode": "off",
         "review_recheck_eligible_rows": 0,
         "review_recheck_deferred_rows": 0,
+        "review_recheck_safe_matches_persisted": 0,
         "review_recheck_rows_updated": 0,
         "ai_review_enabled": False,
         "ai_review_considered_rows": 0,
@@ -4677,6 +4832,14 @@ def run_sync(
         },
         **auto_match_summary,
     }
+    add_channel_status_to_summary(
+        summary,
+        authoritative_table,
+        inventories,
+        quarantined_keys=snapshot_quarantine_keys(
+            changed_rows, persistent_quarantine_keys
+        ),
+    )
     write_reports(
         output_dir,
         inventories=inventories,
@@ -4778,6 +4941,14 @@ def run_sync(
                     ),
                     maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
                 )
+                add_channel_status_to_summary(
+                    summary,
+                    final_table,
+                    inventories,
+                    quarantined_keys=snapshot_quarantine_keys(
+                        changed_rows, persistent_quarantine_keys
+                    ),
+                )
                 snapshot_validation = write_private_mapping_snapshot_bundle(
                     effective_path=effective_snapshot_path,
                     authoritative_path=authoritative_snapshot_path,
@@ -4843,6 +5014,14 @@ def run_sync(
                 summary=summary,
             )
             raise
+        add_channel_status_to_summary(
+            summary,
+            final_table,
+            inventories,
+            quarantined_keys=snapshot_quarantine_keys(
+                changed_rows, persistent_quarantine_keys
+            ),
+        )
         snapshot_validation = write_private_mapping_snapshot_bundle(
             effective_path=effective_snapshot_path,
             authoritative_path=authoritative_snapshot_path,
