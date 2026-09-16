@@ -139,6 +139,7 @@ TEXT_SECTION_RE = re.compile(
     r"^--\s*epg_ripper_([A-Za-z0-9_+.-]+)\s*--$", re.IGNORECASE
 )
 TEXT_GENERATED_RE = re.compile(r"^\d{12,14}$")
+TEXT_COUNTRY_SECTION_RE = re.compile(r"^([A-Z]{2})\d+$")
 
 
 class CatalogStreamError(streaming.BuildError):
@@ -288,6 +289,41 @@ class TextCatalogEntry:
     route: CatalogRoute
 
 
+def _text_catalog_match_route(entry: TextCatalogEntry) -> CatalogRoute | None:
+    """Corroborate an ID-suffix market with authoritative country sections.
+
+    Most EPGShare sections are country feeds such as ``US2`` or ``IN1``;
+    others are provider families such as ``AUDACY1``.  A recognized country
+    section may supply the market for a dotless ID, but it must never silently
+    contradict an informative ID suffix. Multiple distinct country sections
+    are likewise ambiguous for unattended matching.
+    """
+
+    feeds_by_region: dict[str, set[str]] = defaultdict(set)
+    for section in entry.sections:
+        if re.fullmatch(r"US_[A-Z0-9_]+\d+", section):
+            feeds_by_region["US"].add(section)
+            continue
+        match = TEXT_COUNTRY_SECTION_RE.fullmatch(section)
+        if match is None:
+            continue
+        region = {"GB": "UK"}.get(match.group(1), match.group(1))
+        feeds_by_region[region].add(section)
+    if not feeds_by_region:
+        return entry.route
+    if len(feeds_by_region) != 1:
+        return None
+    section_region = next(iter(feeds_by_region))
+    if entry.route.region not in {"ALL", section_region}:
+        return None
+    if entry.route.region == section_region:
+        return entry.route
+    return CatalogRoute(
+        min(feeds_by_region[section_region]),
+        section_region,
+    )
+
+
 @dataclass(frozen=True)
 class TextCatalogSnapshot:
     """Bounded manual-workflow catalog parsed without loading the XML guide."""
@@ -298,6 +334,57 @@ class TextCatalogSnapshot:
     duplicate_id_lines: int
     casefold_collision_keys: frozenset[str]
     ambiguous_kind_ids: frozenset[str]
+
+    def validate_for_unattended_matching(self) -> None:
+        """Fail closed when official TXT metadata contradicts itself.
+
+        Silently omitting a contradictory entry can make a different, similar
+        station appear unique to the frozen matcher.  Ambiguous real/dummy
+        membership and conflicting country evidence are therefore catalog-wide
+        preflight failures, not merely ineligible approval targets.
+        """
+
+        if self.ambiguous_kind_ids:
+            raise CatalogStreamError(
+                "The ALL_SOURCES1 text catalog assigns an ID to both real and "
+                "dummy sections."
+            )
+        if any(
+            entry.kind == "real" and _text_catalog_match_route(entry) is None
+            for entry in self.entries
+        ):
+            raise CatalogStreamError(
+                "The ALL_SOURCES1 text catalog contains conflicting country "
+                "evidence for an ID."
+            )
+        routes_by_engine_safe_fold: dict[str, set[tuple[str, str]]] = defaultdict(set)
+        kinds_by_engine_safe_fold: dict[str, set[str]] = defaultdict(set)
+        for entry in self.entries:
+            route = _text_catalog_match_route(entry)
+            if route is None:
+                # The contradiction above already fails; keep this loop total
+                # for static analyzers and direct method reuse.
+                continue
+            engine_safe_fold = "".join(
+                " " if character.isspace() else character
+                for character in entry.epg_id
+            ).casefold()
+            routes_by_engine_safe_fold[engine_safe_fold].add(
+                (route.feed, route.region)
+            )
+            kinds_by_engine_safe_fold[engine_safe_fold].add(entry.kind)
+        if any(len(kinds) > 1 for kinds in kinds_by_engine_safe_fold.values()):
+            raise CatalogStreamError(
+                "The ALL_SOURCES1 text catalog has normalization-confusable "
+                "IDs split between real and dummy sections."
+            )
+        if any(
+            len(routes) > 1 for routes in routes_by_engine_safe_fold.values()
+        ):
+            raise CatalogStreamError(
+                "The ALL_SOURCES1 text catalog has normalization-confusable "
+                "IDs in multiple feed/market routes."
+            )
 
     def matcher_inputs(
         self, *, explicit_dummy_ids: Iterable[str] = ()
@@ -339,12 +426,17 @@ class TextCatalogSnapshot:
             ):
                 dummy[entry.epg_id.casefold()] = entry.epg_id
                 continue
+            match_route = _text_catalog_match_route(entry)
+            if match_route is None:
+                # A contradictory or multi-market official section is useful
+                # evidence for review, never for unattended approval.
+                continue
             display_name = _epg_id_match_name(entry.epg_id)
             real.append(
                 {
                     "epg_id": entry.epg_id,
-                    "feed": entry.route.feed,
-                    "region": entry.route.region,
+                    "feed": match_route.feed,
+                    "region": match_route.region,
                     "display_name": display_name,
                     "normalized": _simple_match_key(display_name),
                 }

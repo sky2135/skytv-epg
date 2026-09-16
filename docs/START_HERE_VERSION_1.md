@@ -367,8 +367,9 @@ object storage and a CDN.
 8. Wait for the run to finish with a green check mark.
 9. Read the run's summary. Confirm **Channels found at providers** is not zero
    and the run has no warning about a failed server.
-10. The run summary shows how many channels were found, how many are new, and
-    how many existing channels were not seen during this check.
+10. The run summary shows how many channels were found, how many are new, how
+    many existing channels were not seen, and whether the EPGShare XML/text
+    catalogs were exactly aligned or in a safe `bounded-drift` rollover.
 11. If you want a copy of those counts, download the artifact whose name begins
     with `skytv-channel-sync-summary-`. It contains only `summary.json` and is
     kept for seven days.
@@ -376,7 +377,9 @@ object storage and a CDN.
 This first run is a safety check. It does not write to Google Sheets. It still
 downloads and streams the large combined EPG file and checks its official ID
 list so that the automatic-match result shown in the report is the same
-decision the write-enabled run will use.
+decision the write-enabled run will use. The summary labels **EPG IDs confirmed
+in both catalogs**, **XML-only EPG IDs quarantined**, and **Text-only EPG IDs
+quarantined** show the rollover decision without exposing the individual IDs.
 
 ## 12. Run the inventory again and add newly returned channels
 
@@ -393,6 +396,8 @@ queued or running.
 7. Open the run summary and note:
    - **New channels safely matched automatically**;
    - **New channels left for review**;
+   - **EPG catalog alignment mode** and the shared/XML-only/text-only EPG ID
+     counts;
    - **Rows added to Google Sheet**; and
    - **Open alerts awaiting review**.
 8. Return to the Google Sheet and reload the page.
@@ -414,6 +419,8 @@ For a new channel, automatic EPG approval requires all of the following in the
 same run:
 
 - one exact real EPGShare ID, with no second candidate;
+- that exact, case-sensitive ID appears in both the EPGShare XML and official
+  text catalogs;
 - an explicit matching country/market;
 - at least two different useful current/future programme time slots; and
 - the first useful programme starts within six hours and the guide extends at
@@ -422,6 +429,23 @@ same run:
 Fuzzy, dummy, generic-numbered, adult, ambiguous, or weak-guide results remain
 disabled in `REVIEW`. Server 1 is always matched only to EPGShare; its native
 EPG ID is never used.
+
+There is one important difference between a channel-level uncertainty and a
+bad source catalog. If the official text catalog labels the same ID as both
+real and dummy, contradicts the country implied by an ID, or assigns an ID to
+multiple country markets, the complete matching preflight stops before any
+Sheet write. It does not ignore that entry and continue. IDs that could become
+confusable only after case or Unicode-whitespace normalization remain as safe
+competition: they can prevent a false automatic match but can never be
+automatically approved themselves. An affected new channel stays disabled in
+`REVIEW`. One conservative blocker may represent a confusable family only when
+all members are the same catalog type (all real or all dummy) and share the
+same exact feed and country/market route. If IDs collapsing to the same
+engine-safe identity mix real/dummy status or differ by feed or market, the
+complete preflight stops. Separately, an unscoped real `ALL`-market candidate
+can still serve an exact existing mapping. If it has the same strong station
+identity as a routed new proposal, that new proposal stays disabled in
+`REVIEW`.
 
 ## 13. Review only the channels that automation could not safely decide
 
@@ -630,6 +654,18 @@ If a provider is temporarily unavailable during the daily run, Version 1 keeps
 the last trusted rows in the Sheet. It does not erase channels because a server
 failed to answer once.
 
+EPGShare publishes its XML and text catalogs separately. During a rollover,
+Version 1 continues only when the XML set, text set, and their exact
+case-sensitive intersection each have at least 25,000 IDs, and the total
+one-file-only difference is no more than 64 IDs and no more than 0.25% of the
+union. Only shared IDs can be approved automatically. XML-only and text-only
+IDs are quarantined from automatic approval; a larger or unsafe non-ASCII
+difference stops the run before any Sheet write. Every one-file-only ID must
+also resolve to one clear country/market; an `ALL`/unknown or otherwise
+unresolved route stops the run because it cannot reliably block a false match.
+A real/dummy contradiction or contradictory/multiple-country evidence anywhere
+in the official text catalog also stops the full unattended-matching preflight.
+
 Your regular task is:
 
 1. Open the Google Sheet.
@@ -673,6 +709,31 @@ Your regular task is:
      credential.
    - **HTTP is blocked:** first ask the provider for HTTPS; only then set
      `ALLOW_INSECURE_PANEL_HTTP=true` if no HTTPS endpoint exists.
+   - **The XML and official text catalogs do not declare the same exact IDs:**
+     this exact sentence identifies the older exact-agreement revision. Upload
+     the current Version 1 `repo-overlay` to `main` and rerun in report-only
+     mode. Do not change the Sheet or server passwords. The current revision
+     safely accepts only a small EPGShare rollover: at least 25,000 XML IDs,
+     25,000 text IDs, and 25,000 exact shared IDs, with no more than 64 and no
+     more than 0.25% total XML-only plus text-only IDs. A larger difference or
+     a non-ASCII, whitespace, or control-character drift ID still fails closed;
+     so does any one-file-only ID without one deterministic country/market.
+     Wait for EPGShare to finish publishing and rerun later rather than
+     bypassing the guard.
+   - **`SERVER_n_PASSWORD: ***`:** the asterisks are GitHub secret masking and
+     do not mean the password was rejected. A real credentials failure is
+     reported as HTTP 401 or invalid credentials.
+   - **Provider credentials may be sent over unencrypted HTTP:** this warning
+     means a provider URL uses `http://`. It is not the cause of an EPGShare
+     XML/text catalog error. Ask the provider for HTTPS when available.
+   - **Text catalog assigns an ID to both real and dummy sections / conflicting
+     country evidence / normalization-confusable IDs split between real and
+     dummy or multiple feed/market routes:** do not edit the Sheet or try to
+     approve around it.
+     This is an EPGShare source-catalog contradiction, and Version 1 stops the
+     whole matching pass so an omitted competitor cannot create a false match.
+     Wait for EPGShare's next source update, then rerun once in report-only
+     mode. If it persists, provide the exact error for review.
    - **Google 403 / permission denied:** confirm the Google Sheets API is
      enabled; confirm the exact `client_email` from the JSON key has Editor
      access; then use **Data** → **Protect sheets and ranges** and permit that

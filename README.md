@@ -25,10 +25,11 @@ The daily workflow asks all three configured providers for their live-channel
 inventories. Every valid unique stream returned by the API or playlist fallback
 is compared by `(server_id, stream_id)`. For an unseen pair, Version 1 tries the
 frozen Smart Rules matcher against the complete EPGShare catalog. It enables a
-row only when there is one exact, region-consistent real channel ID and that
-same downloaded guide contains a useful current/future schedule. All uncertain
-rows are appended disabled for review. Existing Sheet rows are never deleted
-or silently remapped. The same single EPGShare parse is reused to build the
+row only when there is one exact, region-consistent real channel ID confirmed
+case-sensitively in both the XML and official text catalog, and that same
+downloaded guide contains a useful current/future schedule. All uncertain rows
+are appended disabled for review. Existing Sheet rows are never deleted or
+silently remapped. The same single EPGShare parse is reused to build the
 TiviMate XMLTV and app JSON outputs, which are validated and deployed through
 GitHub Pages.
 
@@ -102,8 +103,33 @@ reports are generated automatically.
 - The roughly 2 GB expanded EPGShare document is parsed once with
   `lxml.etree.iterparse`; the selected SQLite spool is verified and reused by
   the output builder instead of parsing the XML a second time.
-- Its exact channel-ID set is checked against EPGShare's small sectioned
-  companion catalog before automatic matching, including real/dummy provenance.
+- Its channel-ID set is checked against EPGShare's small sectioned companion
+  catalog before automatic matching, including real/dummy provenance. Because
+  EPGShare can replace those two public files hours apart during a non-atomic
+  rollover, Version 1 permits only a tightly bounded rollover difference: the
+  XML set, text set, and exact shared set must each contain at least 25,000 IDs;
+  the total difference must be no more than 64 IDs and no more than 0.25% of
+  their union.
+  Only exact, case-sensitive shared IDs can be approved automatically. IDs seen
+  in only one file are quarantined from automatic approval; a larger or unsafe
+  non-ASCII difference stops the run. Every one-file-only ID must also resolve
+  to one deterministic country/market; an `ALL`/unknown or otherwise unresolved
+  route stops the run because that shadow could not reliably block false
+  uniqueness. The entire unattended-matching preflight also stops if the
+  official text catalog assigns one ID to both real and dummy sections,
+  contradicts an ID's country with a section, or assigns it to multiple country
+  markets. Those contradictions are not merely ignored, because omission could
+  make a similar channel look falsely unique.
+  Case/Unicode-whitespace normalization-confusable identities remain
+  non-approvable matcher competitors: they can block a false unique match but
+  can never receive automatic approval themselves. One conservative blocker
+  may represent an engine-safe confusable family only when every member has the
+  same catalog kind (all real or all dummy) and the identical exact route—the
+  same feed and market. If the family mixes real/dummy status or differs by
+  feed or market, the entire preflight stops. Separately, an unscoped real
+  candidate routed as `ALL` remains available for an exact existing mapping,
+  but a strong station-identity collision with a routed new proposal keeps that
+  proposal disabled in `REVIEW`.
 - Selected schedules are staged in disk-backed SQLite.
 - XML and JSON outputs are written as deterministic gzip streams.
 - Untrusted downloads, XML structure, compressed/expanded sizes, Sheet rows,
@@ -111,7 +137,9 @@ reports are generated automatically.
 - Generated Pages output is published atomically only after all checks pass.
 - The Pages payload is kept below a 900 MiB safety ceiling for GitHub Pages'
   1 GB published-site limit.
-- Uncertain mappings and severe stream-identity changes fail safe to review.
+- Row-level uncertain mappings and severe stream-identity changes fail safe to
+  review; catalog-wide provenance contradictions stop the run before a Sheet
+  write.
 - The private mapping snapshot and every generated upload pass
   credential-safety checks before the builder or Pages upload can continue;
   gzip outputs are checked after streaming decompression.

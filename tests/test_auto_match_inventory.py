@@ -141,6 +141,26 @@ def xml_bytes(*, strong: bool = True, include_old: bool = False) -> bytes:
     )
 
 
+def custom_xml_bytes(
+    channel_ids: tuple[str, ...], *, programme_id: str
+) -> bytes:
+    channels = [
+        f'<channel id="{epg_id}"><display-name>{epg_id}</display-name></channel>'
+        for epg_id in channel_ids
+    ]
+    programmes = [
+        f'<programme channel="{programme_id}" start="20260915130000 +0000" '
+        'stop="20260915170000 +0000"><title>Programme One</title></programme>',
+        f'<programme channel="{programme_id}" start="20260915170000 +0000" '
+        'stop="20260915200000 +0000"><title>Programme Two</title></programme>',
+    ]
+    return (
+        "<?xml version=\"1.0\"?><tv>"
+        + "".join(channels + programmes)
+        + "</tv>"
+    ).encode("utf-8")
+
+
 def write_gzip(path: Path, content: bytes) -> None:
     with gzip.open(path, "wb") as handle:
         handle.write(content)
@@ -266,6 +286,19 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(row["metadata_status"], original["metadata_status"])
             self.assertEqual(outcome.approved_rows, 1)
             self.assertEqual(outcome.review_rows, 0)
+            self.assertEqual(outcome.catalog_channels, 1)
+            self.assertEqual(outcome.text_catalog_channels, 1)
+            self.assertEqual(outcome.corroborated_catalog_channels, 1)
+            self.assertEqual(outcome.xml_only_catalog_channels, 0)
+            self.assertEqual(outcome.text_only_catalog_channels, 0)
+            self.assertEqual(outcome.catalog_drift_channels, 0)
+            self.assertEqual(outcome.catalog_corroboration_mode, "exact")
+            summary = outcome.summary_fields()
+            self.assertEqual(summary["epgshare_corroborated_catalog_channels"], 1)
+            self.assertEqual(summary["epgshare_shared_catalog_channels"], 1)
+            self.assertEqual(summary["epgshare_xml_only_catalog_channels"], 0)
+            self.assertEqual(summary["epgshare_text_only_catalog_channels"], 0)
+            self.assertRegex(summary["epgshare_catalog_drift_sha256"], r"^[0-9a-f]{64}$")
             self.assertTrue(spool.is_file())
 
     def test_weak_schedule_stays_disabled_review(self) -> None:
@@ -280,6 +313,90 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(outcome.approved_rows, 0)
             self.assertEqual(outcome.rejected_programme_gates, 1)
             self.assertTrue(spool.is_file())
+
+    def test_provisional_and_rejected_gate_summaries_count_rows_not_unique_ids(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(source, xml_bytes(strong=False))
+            text_catalog.write_bytes(text_catalog_bytes("Good.Channel.us2"))
+            two_channel_inventory = inventory()
+            two_channel_inventory.channels.append(
+                {
+                    **two_channel_inventory.channels[0],
+                    "stream_id": "new-2",
+                    "name": "US: Good Channel Backup",
+                }
+            )
+            outcome = auto_match_and_spool(
+                mapping_rows=[],
+                inventories=[two_channel_inventory],
+                new_rows=[
+                    mapping_row(
+                        server_id="server_1",
+                        stream_id="new-1",
+                        channel_name="US: Good Channel",
+                    ),
+                    mapping_row(
+                        server_id="server_1",
+                        stream_id="new-2",
+                        channel_name="US: Good Channel Backup",
+                    ),
+                ],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                minimum_unique_channels=1,
+                runtime_factory=RuntimeFactory(),
+            )
+            self.assertEqual(outcome.considered_rows, 2)
+            self.assertEqual(outcome.provisional_rows, 2)
+            self.assertEqual(outcome.approved_rows, 0)
+            self.assertEqual(outcome.review_rows, 2)
+            self.assertEqual(outcome.rejected_programme_gates, 2)
+
+    def test_official_country_section_conflict_can_never_auto_approve(self) -> None:
+        target_id = "PTC.CHAK.DE.in"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes((target_id,), programme_id=target_id),
+            )
+            text_catalog.write_bytes(
+                ("20260915120000\n-- epg_ripper_US2 --\n" + target_id + "\n").encode(
+                    "utf-8"
+                )
+            )
+            with self.assertRaisesRegex(
+                AutoMatchError, "conflicting country evidence"
+            ):
+                auto_match_and_spool(
+                    mapping_rows=[],
+                    inventories=[inventory(name="IN: PTC Chak De")],
+                    new_rows=[
+                        mapping_row(
+                            server_id="server_1",
+                            stream_id="new-1",
+                            channel_name="IN: PTC Chak De",
+                        )
+                    ],
+                    all_source_file=source,
+                    all_source_catalog_file=text_catalog,
+                    spool_out=spool,
+                    generated_at=GENERATED_AT,
+                    minimum_unique_channels=1,
+                    runtime_factory=RuntimeFactory(target_id),
+                )
+            self.assertFalse(spool.exists())
 
     def test_server_one_panel_identity_and_url_never_reach_matcher(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -441,7 +558,7 @@ class AutoMatchInventoryTests(unittest.TestCase):
                 )
             self.assertFalse(spool.exists())
 
-    def test_xml_and_text_catalog_mismatch_blocks_before_spool(self) -> None:
+    def test_catalogs_with_no_complete_exact_intersection_block_before_spool(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             source = base / "all.xml.gz"
@@ -449,7 +566,7 @@ class AutoMatchInventoryTests(unittest.TestCase):
             spool = base / "selected.sqlite3"
             write_gzip(source, xml_bytes(strong=True))
             text_catalog.write_bytes(text_catalog_bytes("Different.Channel.us2"))
-            with self.assertRaisesRegex(AutoMatchError, "do not declare the same exact IDs"):
+            with self.assertRaisesRegex(AutoMatchError, "intersection is below"):
                 auto_match_and_spool(
                     mapping_rows=[],
                     inventories=[inventory()],
@@ -468,6 +585,632 @@ class AutoMatchInventoryTests(unittest.TestCase):
                     runtime_factory=RuntimeFactory(),
                 )
             self.assertFalse(spool.exists())
+
+    def test_small_catalog_drift_approves_only_exactly_corroborated_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    ("Good.Channel.us2", "XML.Only.us2"),
+                    programme_id="Good.Channel.us2",
+                ),
+            )
+            text_catalog.write_bytes(
+                text_catalog_bytes(
+                    "Good.Channel.us2",
+                    "Text.Only.us2",
+                    dummy_ids=("Text.Only.DUMMY.us2",),
+                )
+            )
+            factory = RuntimeFactory()
+            # Production catalogs have >25k IDs, so a two-ID publication skew
+            # is far below 1%. This tiny fixture raises only the fractional
+            # ceiling while retaining the production absolute ceiling.
+            with mock.patch.object(
+                integration, "MAX_CATALOG_ID_DRIFT_RATIO_DENOMINATOR", 1
+            ):
+                outcome = auto_match_and_spool(
+                    mapping_rows=[],
+                    inventories=[inventory()],
+                    new_rows=[
+                        mapping_row(
+                            server_id="server_1",
+                            stream_id="new-1",
+                            channel_name="US: Good Channel",
+                        )
+                    ],
+                    all_source_file=source,
+                    all_source_catalog_file=text_catalog,
+                    spool_out=spool,
+                    generated_at=GENERATED_AT,
+                    minimum_unique_channels=1,
+                    runtime_factory=factory,
+                )
+
+            candidate_ids = {item["epg_id"] for item in factory.candidates}
+            self.assertEqual(
+                candidate_ids,
+                {"Good.Channel.us2", "Text.Only.us2", "XML.Only.us2"},
+            )
+            self.assertEqual(
+                factory.dummies,
+                {"text.only.dummy.us2": "Text.Only.DUMMY.us2"},
+            )
+            self.assertEqual(outcome.rows[0]["action"], "AUTO_EPGSHARE")
+            self.assertEqual(outcome.rows[0]["enabled"], "TRUE")
+            self.assertEqual(outcome.corroborated_catalog_channels, 1)
+            self.assertEqual(outcome.xml_only_catalog_channels, 1)
+            self.assertEqual(outcome.text_only_catalog_channels, 2)
+            self.assertEqual(outcome.catalog_drift_channels, 3)
+            self.assertEqual(outcome.catalog_corroboration_mode, "bounded-drift")
+            self.assertTrue(spool.is_file())
+
+    def test_xml_only_target_is_an_ambiguity_blocker_but_never_approved(self) -> None:
+        target_id = "XML.Only.us2"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    ("Good.Channel.us2", target_id), programme_id=target_id
+                ),
+            )
+            text_catalog.write_bytes(
+                text_catalog_bytes("Good.Channel.us2", "Text.Only.us2")
+            )
+            factory = RuntimeFactory(target_id)
+            with mock.patch.object(
+                integration, "MAX_CATALOG_ID_DRIFT_RATIO_DENOMINATOR", 1
+            ):
+                outcome = auto_match_and_spool(
+                    mapping_rows=[],
+                    inventories=[inventory(name="US: XML Only")],
+                    new_rows=[
+                        mapping_row(
+                            server_id="server_1",
+                            stream_id="new-1",
+                            channel_name="US: XML Only",
+                        )
+                    ],
+                    all_source_file=source,
+                    all_source_catalog_file=text_catalog,
+                    spool_out=spool,
+                    generated_at=GENERATED_AT,
+                    minimum_unique_channels=1,
+                    runtime_factory=factory,
+                )
+
+            self.assertIn(target_id, {item["epg_id"] for item in factory.candidates})
+            self.assertEqual(outcome.rows[0]["epg_id"], target_id)
+            self.assertEqual(outcome.rows[0]["action"], "REVIEW")
+            self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
+            self.assertIn("lacks unambiguous real-catalog", outcome.rows[0]["reason"])
+            self.assertEqual(outcome.approved_rows, 0)
+
+    def test_case_only_catalog_drift_is_never_casefold_reconciled(self) -> None:
+        xml_target = "Alkass_5_En.bein"
+        text_target = "Alkass_5_EN.bein"
+        result = None
+        with mock.patch.object(
+            integration, "MAX_CATALOG_ID_DRIFT_RATIO_DENOMINATOR", 1
+        ):
+            result = integration._corroborate_catalog_ids(
+                {"Good.Channel.us2", xml_target},
+                {"Good.Channel.us2", text_target},
+                minimum_unique_channels=1,
+            )
+        self.assertEqual(result.exact_ids, frozenset({"Good.Channel.us2"}))
+        self.assertEqual(result.xml_only_ids, frozenset({xml_target}))
+        self.assertEqual(result.text_only_ids, frozenset({text_target}))
+        self.assertEqual(
+            result.union_casefold_collision_keys,
+            frozenset({xml_target.casefold()}),
+        )
+
+    def test_union_casefold_collision_cannot_auto_approve_either_spelling(self) -> None:
+        xml_target = "Alkass_5_En.bein"
+        text_target = "Alkass_5_EN.bein"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    ("Good.Channel.us2", xml_target), programme_id=xml_target
+                ),
+            )
+            text_catalog.write_bytes(
+                (
+                    "20260915120000\n"
+                    "-- epg_ripper_US2 --\n"
+                    "Good.Channel.us2\n"
+                    "-- epg_ripper_BEIN1 --\n"
+                    f"{text_target}\n"
+                ).encode("utf-8")
+            )
+            factory = RuntimeFactory(xml_target)
+            with mock.patch.object(
+                integration, "MAX_CATALOG_ID_DRIFT_RATIO_DENOMINATOR", 1
+            ):
+                outcome = auto_match_and_spool(
+                    mapping_rows=[],
+                    inventories=[inventory(name="US: Alkass")],
+                    new_rows=[
+                        mapping_row(
+                            server_id="server_1",
+                            stream_id="new-1",
+                            channel_name="US: Alkass",
+                        )
+                    ],
+                    all_source_file=source,
+                    all_source_catalog_file=text_catalog,
+                    spool_out=spool,
+                    generated_at=GENERATED_AT,
+                    minimum_unique_channels=1,
+                    runtime_factory=factory,
+                )
+
+            self.assertIn(text_target, {item["epg_id"] for item in factory.candidates})
+            self.assertNotIn(xml_target, {item["epg_id"] for item in factory.candidates})
+            self.assertEqual(outcome.rows[0]["action"], "REVIEW")
+            self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
+            self.assertEqual(outcome.approved_rows, 0)
+
+    def test_xml_only_case_collision_family_cannot_create_false_uniqueness(
+        self,
+    ) -> None:
+        common_id = "KABC-DT.us_locals1"
+        xml_only_variants = ("KABC-TV.us_locals1", "kabc-TV.us_locals1")
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    (common_id, *xml_only_variants), programme_id=common_id
+                ),
+            )
+            text_catalog.write_bytes(
+                (
+                    "20260915120000\n"
+                    "-- epg_ripper_US_LOCALS1 --\n"
+                    f"{common_id}\n"
+                ).encode("utf-8")
+            )
+            with mock.patch.object(
+                integration, "MAX_CATALOG_ID_DRIFT_RATIO_DENOMINATOR", 1
+            ):
+                outcome = auto_match_and_spool(
+                    mapping_rows=[],
+                    inventories=[inventory(name="US: KABC")],
+                    new_rows=[
+                        mapping_row(
+                            server_id="server_1",
+                            stream_id="new-1",
+                            channel_name="US: KABC",
+                        )
+                    ],
+                    all_source_file=source,
+                    all_source_catalog_file=text_catalog,
+                    spool_out=spool,
+                    generated_at=GENERATED_AT,
+                    minimum_unique_channels=1,
+                )
+            self.assertEqual(outcome.rows[0]["action"], "REVIEW")
+            self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
+            self.assertEqual(outcome.approved_rows, 0)
+
+    def test_shared_non_ascii_whitespace_competitor_cannot_create_false_uniqueness(
+        self,
+    ) -> None:
+        """The actual pinned matcher must never approve after dropping a twin.
+
+        Its legacy text cleanup converts NBSP to ordinary whitespace.  The
+        integration must retain a deterministic, non-approvable blocker in
+        that exact engine-safe form and must not auto-approve the similar KABC
+        candidate.
+        """
+
+        valid_id = "KABC-DT.us_locals1"
+        unsafe_competitor = "KABC\u00a0TV.us_locals1"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    (valid_id, unsafe_competitor), programme_id=valid_id
+                ),
+            )
+            text_catalog.write_text(
+                "20260915120000\n"
+                "-- epg_ripper_US_LOCALS1 --\n"
+                f"{valid_id}\n"
+                f"{unsafe_competitor}\n",
+                encoding="utf-8",
+            )
+
+            outcome = auto_match_and_spool(
+                mapping_rows=[],
+                inventories=[inventory(name="US: KABC")],
+                new_rows=[
+                    mapping_row(
+                        server_id="server_1",
+                        stream_id="new-1",
+                        channel_name="US: KABC",
+                    )
+                ],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                minimum_unique_channels=1,
+            )
+            self.assertEqual(outcome.rows[0]["action"], "REVIEW")
+            self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
+            self.assertEqual(outcome.approved_rows, 0)
+            self.assertTrue(spool.is_file())
+
+    def test_real_and_dummy_text_membership_fails_before_spool_actual_pinned(
+        self,
+    ) -> None:
+        ambiguous_id = "KABC-TV.us_locals1"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes((ambiguous_id,), programme_id=ambiguous_id),
+            )
+            text_catalog.write_text(
+                "20260915120000\n"
+                "-- epg_ripper_US_LOCALS1 --\n"
+                f"{ambiguous_id}\n"
+                "-- epg_ripper_DUMMY_CHANNELS --\n"
+                f"{ambiguous_id}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                AutoMatchError, "assigns an ID to both real and dummy sections"
+            ):
+                auto_match_and_spool(
+                    mapping_rows=[],
+                    inventories=[inventory(name="US: KABC")],
+                    new_rows=[
+                        mapping_row(
+                            server_id="server_1",
+                            stream_id="new-1",
+                            channel_name="US: KABC",
+                        )
+                    ],
+                    all_source_file=source,
+                    all_source_catalog_file=text_catalog,
+                    spool_out=spool,
+                    generated_at=GENERATED_AT,
+                    minimum_unique_channels=1,
+                )
+            self.assertFalse(spool.exists())
+
+    def test_country_conflict_competitor_fails_globally_before_actual_matcher(
+        self,
+    ) -> None:
+        valid_id = "KABC-DT.us_locals1"
+        contradictory_competitor = "KABC-TV.in"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    (valid_id, contradictory_competitor), programme_id=valid_id
+                ),
+            )
+            text_catalog.write_text(
+                "20260915120000\n"
+                "-- epg_ripper_US_LOCALS1 --\n"
+                f"{valid_id}\n"
+                f"{contradictory_competitor}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                AutoMatchError, "conflicting country evidence for an ID"
+            ):
+                auto_match_and_spool(
+                    mapping_rows=[],
+                    inventories=[inventory(name="US: KABC")],
+                    new_rows=[
+                        mapping_row(
+                            server_id="server_1",
+                            stream_id="new-1",
+                            channel_name="US: KABC",
+                        )
+                    ],
+                    all_source_file=source,
+                    all_source_catalog_file=text_catalog,
+                    spool_out=spool,
+                    generated_at=GENERATED_AT,
+                    minimum_unique_channels=1,
+                )
+            self.assertFalse(spool.exists())
+
+    def test_cross_market_unicode_shadow_collision_fails_before_matcher(self) -> None:
+        valid_id = "KABC-DT.us_locals1"
+        india_competitor = "KABC\u00a0TV"
+        usa_competitor = "KABC\u3000TV"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    (valid_id, india_competitor, usa_competitor),
+                    programme_id=valid_id,
+                ),
+            )
+            text_catalog.write_text(
+                "20260915120000\n"
+                "-- epg_ripper_US_LOCALS1 --\n"
+                f"{valid_id}\n"
+                f"{usa_competitor}\n"
+                "-- epg_ripper_IN1 --\n"
+                f"{india_competitor}\n",
+                encoding="utf-8",
+            )
+            spool.write_bytes(b"stale")
+
+            with self.assertRaisesRegex(
+                AutoMatchError,
+                "normalization-confusable IDs in multiple feed/market routes",
+            ):
+                auto_match_and_spool(
+                    mapping_rows=[],
+                    inventories=[inventory(name="US: KABC")],
+                    new_rows=[
+                        mapping_row(
+                            server_id="server_1",
+                            stream_id="new-1",
+                            channel_name="US: KABC",
+                        )
+                    ],
+                    all_source_file=source,
+                    all_source_catalog_file=text_catalog,
+                    spool_out=spool,
+                    generated_at=GENERATED_AT,
+                    minimum_unique_channels=1,
+                )
+            self.assertFalse(spool.exists())
+
+    def test_shared_all_route_station_competitor_blocks_false_uniqueness(self) -> None:
+        target_id = "KABC-DT.us_locals1"
+        all_route_competitor = "plex.tv.KABC-TV.plex"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    (target_id, all_route_competitor), programme_id=target_id
+                ),
+            )
+            text_catalog.write_text(
+                "20260915120000\n"
+                "-- epg_ripper_US_LOCALS1 --\n"
+                f"{target_id}\n"
+                "-- epg_ripper_PLEX1 --\n"
+                f"{all_route_competitor}\n",
+                encoding="utf-8",
+            )
+
+            outcome = auto_match_and_spool(
+                mapping_rows=[],
+                inventories=[inventory(name="US: KABC")],
+                new_rows=[
+                    mapping_row(
+                        server_id="server_1",
+                        stream_id="new-1",
+                        channel_name="US: KABC",
+                    )
+                ],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                minimum_unique_channels=1,
+            )
+            self.assertEqual(outcome.rows[0]["action"], "REVIEW")
+            self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
+            self.assertEqual(outcome.approved_rows, 0)
+            self.assertIn("unscoped ALL-market", outcome.rows[0]["reason"])
+            self.assertTrue(spool.is_file())
+
+    def test_shared_all_route_approved_identity_competitor_blocks_approval(self) -> None:
+        target_id = "PTC.CHAK.DE.in"
+        all_route_competitor = "PTC Chak De"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    (target_id, all_route_competitor), programme_id=target_id
+                ),
+            )
+            text_catalog.write_text(
+                "20260915120000\n"
+                "-- epg_ripper_IN1 --\n"
+                f"{target_id}\n"
+                "-- epg_ripper_PLEX1 --\n"
+                f"{all_route_competitor}\n",
+                encoding="utf-8",
+            )
+
+            outcome = auto_match_and_spool(
+                mapping_rows=[],
+                inventories=[inventory(name="IN: PTC Chak De")],
+                new_rows=[
+                    mapping_row(
+                        server_id="server_1",
+                        stream_id="new-1",
+                        channel_name="IN: PTC Chak De",
+                    )
+                ],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                minimum_unique_channels=1,
+            )
+            self.assertEqual(outcome.rows[0]["action"], "REVIEW")
+            self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
+            self.assertEqual(outcome.approved_rows, 0)
+            self.assertIn("unscoped ALL-market", outcome.rows[0]["reason"])
+
+    def test_shared_all_route_strict_competitor_blocks_approval(self) -> None:
+        target_id = "A.us2"
+        all_route_competitor = "A"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    (target_id, all_route_competitor), programme_id=target_id
+                ),
+            )
+            text_catalog.write_text(
+                "20260915120000\n"
+                "-- epg_ripper_US2 --\n"
+                f"{target_id}\n"
+                "-- epg_ripper_PLEX1 --\n"
+                f"{all_route_competitor}\n",
+                encoding="utf-8",
+            )
+
+            outcome = auto_match_and_spool(
+                mapping_rows=[],
+                inventories=[inventory(name="US: A")],
+                new_rows=[
+                    mapping_row(
+                        server_id="server_1",
+                        stream_id="new-1",
+                        channel_name="US: A",
+                    )
+                ],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                minimum_unique_channels=1,
+            )
+            self.assertEqual(outcome.rows[0]["action"], "REVIEW")
+            self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
+            self.assertEqual(outcome.approved_rows, 0)
+            self.assertIn("unscoped ALL-market", outcome.rows[0]["reason"])
+
+    def test_catalog_drift_fraction_and_absolute_boundaries_are_exact(self) -> None:
+        ratio_boundary_common = {
+            f"Ratio.Common.{index}.us2" for index in range(399)
+        }
+        accepted_ratio_boundary = integration._corroborate_catalog_ids(
+            ratio_boundary_common.union({"Ratio.XML.Only.us2"}),
+            ratio_boundary_common,
+            minimum_unique_channels=1,
+        )
+        self.assertEqual(accepted_ratio_boundary.mode, "bounded-drift")
+        ratio_over_common = set(list(ratio_boundary_common)[:398])
+        with self.assertRaisesRegex(
+            integration.catalog_stream.CatalogStreamError, "drift exceeds"
+        ):
+            integration._corroborate_catalog_ids(
+                ratio_over_common.union({"Ratio.XML.Only.us2"}),
+                ratio_over_common,
+                minimum_unique_channels=1,
+            )
+
+        absolute_common = {
+            f"Absolute.Common.{index}.us2" for index in range(26_000)
+        }
+        accepted_absolute_boundary = integration._corroborate_catalog_ids(
+            absolute_common.union(
+                {f"Absolute.XML.Only.{index}.us2" for index in range(64)}
+            ),
+            absolute_common,
+            minimum_unique_channels=1,
+        )
+        self.assertEqual(accepted_absolute_boundary.mode, "bounded-drift")
+        with self.assertRaisesRegex(
+            integration.catalog_stream.CatalogStreamError, "drift exceeds"
+        ):
+            integration._corroborate_catalog_ids(
+                absolute_common.union(
+                    {f"Absolute.XML.Only.{index}.us2" for index in range(65)}
+                ),
+                absolute_common,
+                minimum_unique_channels=1,
+            )
+
+    def test_bounded_drift_rejects_non_ascii_whitespace_or_control_ids(self) -> None:
+        unsafe_ids = ("Café.us2", "Has Space.us2", "Has\tTab.us2")
+        for unsafe_id in unsafe_ids:
+            with self.subTest(unsafe_id=repr(unsafe_id)), mock.patch.object(
+                integration, "MAX_CATALOG_ID_DRIFT_RATIO_DENOMINATOR", 1
+            ), self.assertRaisesRegex(
+                integration.catalog_stream.CatalogStreamError,
+                "non-ASCII, whitespace, or control-character",
+            ):
+                integration._corroborate_catalog_ids(
+                    {"Common.us2", unsafe_id},
+                    {"Common.us2"},
+                    minimum_unique_channels=1,
+                )
+
+    def test_catalog_inputs_and_intersection_each_keep_completeness_floor(self) -> None:
+        with self.assertRaisesRegex(
+            integration.catalog_stream.CatalogStreamError,
+            "below its corroboration completeness floor",
+        ):
+            integration._corroborate_catalog_ids(
+                {"Only.One.us2"},
+                {"Only.One.us2", "Text.Two.us2"},
+                minimum_unique_channels=2,
+            )
+
+        with self.assertRaisesRegex(
+            integration.catalog_stream.CatalogStreamError,
+            "intersection is below its completeness floor",
+        ):
+            integration._corroborate_catalog_ids(
+                {"Common.us2", "XML.Only.us2"},
+                {"Common.us2", "Text.Only.us2"},
+                minimum_unique_channels=2,
+            )
 
     def test_non_dummy_named_id_in_dummy_section_never_auto_enables(self) -> None:
         dummy_id = "Synthetic.Placeholder.us2"

@@ -359,11 +359,96 @@ class OnePassCatalogTests(unittest.TestCase):
         self.assertEqual(
             [row["epg_id"] for row in real], ["Real.in", "SBS World Watch"]
         )
+        real_by_id = {row["epg_id"]: row for row in real}
+        self.assertEqual(real_by_id["Real.in"]["region"], "IN")
+        self.assertEqual(real_by_id["SBS World Watch"]["region"], "IN")
+        self.assertEqual(real_by_id["SBS World Watch"]["feed"], "IN1")
         self.assertEqual(dummy, {"movie.dummy.us": "Movie.Dummy.us"})
         self.assertIn(
             "Opaque\u00a0ID.za", {entry.epg_id for entry in snapshot.entries}
         )
         self.assertIn("Opaque ID.za", {entry.epg_id for entry in snapshot.entries})
+
+    def test_text_catalog_country_section_must_not_contradict_id_market(self) -> None:
+        for section in ("US2", "US_LOCALS1", "US_SPORTS1"):
+            with self.subTest(section=section):
+                content = "\n".join(
+                    (
+                        "20260915120000",
+                        f"-- epg_ripper_{section} --",
+                        "PTC.CHAK.DE.in",
+                    )
+                )
+                snapshot = parse_all_sources_text(content, minimum_ids=1)
+                real, dummy = snapshot.matcher_inputs()
+                self.assertEqual(real, [])
+                self.assertEqual(dummy, {})
+                self.assertEqual(snapshot.entries[0].sections, (section,))
+                self.assertEqual(snapshot.entries[0].route.region, "IN")
+                with self.assertRaisesRegex(
+                    CatalogStreamError, "conflicting country evidence"
+                ):
+                    snapshot.validate_for_unattended_matching()
+
+    def test_text_catalog_real_dummy_ambiguity_fails_matching_preflight(self) -> None:
+        content = "\n".join(
+            (
+                "20260915120000",
+                "-- epg_ripper_US_LOCALS1 --",
+                "KABC-TV.us_locals1",
+                "-- epg_ripper_DUMMY_CHANNELS --",
+                "KABC-TV.us_locals1",
+            )
+        )
+        snapshot = parse_all_sources_text(content, minimum_ids=1)
+        with self.assertRaisesRegex(CatalogStreamError, "real and dummy"):
+            snapshot.validate_for_unattended_matching()
+
+    def test_text_catalog_confusable_shadow_cannot_span_country_markets(self) -> None:
+        content = "\n".join(
+            (
+                "20260915120000",
+                "-- epg_ripper_IN1 --",
+                "KABC\u00a0TV",
+                "-- epg_ripper_US_LOCALS1 --",
+                "KABC\u3000TV",
+            )
+        )
+        snapshot = parse_all_sources_text(content, minimum_ids=1)
+        with self.assertRaisesRegex(
+            CatalogStreamError, "normalization-confusable IDs in multiple feed/market routes"
+        ):
+            snapshot.validate_for_unattended_matching()
+
+    def test_text_catalog_confusable_shadow_cannot_span_feeds_in_one_market(self) -> None:
+        content = "\n".join(
+            (
+                "20260915120000",
+                "-- epg_ripper_US_LOCALS1 --",
+                "KABC-TV",
+                "-- epg_ripper_US_SPORTS1 --",
+                "kabc-tv",
+            )
+        )
+        snapshot = parse_all_sources_text(content, minimum_ids=1)
+        with self.assertRaisesRegex(CatalogStreamError, "multiple feed/market routes"):
+            snapshot.validate_for_unattended_matching()
+
+    def test_text_catalog_confusable_shadow_cannot_mix_real_and_dummy(self) -> None:
+        content = "\n".join(
+            (
+                "20260915120000",
+                "-- epg_ripper_US_LOCALS1 --",
+                "kabc-tv.us_locals1",
+                "-- epg_ripper_DUMMY_CHANNELS --",
+                "KABC-TV.us_locals1",
+            )
+        )
+        snapshot = parse_all_sources_text(content, minimum_ids=1)
+        with self.assertRaisesRegex(
+            CatalogStreamError, "split between real and dummy sections"
+        ):
+            snapshot.validate_for_unattended_matching()
 
     def test_text_catalog_rejects_whitespace_normalization_of_opaque_id(self) -> None:
         for unsafe_id in ("  Foo.in  ", "\tFoo.in\t"):

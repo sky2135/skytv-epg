@@ -18,7 +18,24 @@ This is the final Version 1 decision record. The setup steps are in
 ## Implemented efficiency and safety controls
 
 - The combined EPGShare gzip and its small official ID catalog are each
-  downloaded once; the guide is decompressed as a stream.
+  downloaded once; the guide is decompressed as a stream. Their separately
+  published ID sets are corroborated without a second download: each set and
+  their exact, case-sensitive intersection must contain at least 25,000 IDs.
+  A publication rollover is accepted only when XML-only plus text-only drift is
+  no more than 64 IDs and no more than 0.25% of the union. Drift IDs are
+  quarantined from automatic approval; larger or unsafe non-ASCII drift fails
+  closed. Every drift ID must also resolve to one deterministic market; an
+  `ALL`/unknown or otherwise unresolved route fails because its shadow could
+  not reliably block false uniqueness. Catalog-wide preflight also rejects
+  real/dummy contradictions and contradictory or multiple-country evidence.
+  Normalization-confusable IDs remain non-approvable runtime competitors so
+  removing them cannot make a similar candidate look falsely unique. One
+  conservative blocker may represent an engine-safe confusable family only
+  when every member has the same catalog kind and identical exact
+  `(feed, region)` route; a family mixing real/dummy status or differing by
+  feed/market route fails the whole preflight. An unscoped real `ALL`-route
+  candidate remains available for exact existing mappings, but a strong
+  identity collision keeps a routed new proposal disabled in `REVIEW`.
 - XML is parsed once with `lxml.etree.iterparse`; completed elements are cleared.
 - Only selected channels and programmes are staged in disk-backed SQLite.
 - XMLTV, app JSON, and personalization metadata are written as streams.

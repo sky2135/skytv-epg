@@ -15,10 +15,14 @@ branch. It does not need a second repository or a `gh-pages` branch.
    channel inventory.
 3. Exact `(server_id, stream_id)` identities are compared with `Mappings`.
 4. The complete EPGShare channel catalog is frozen during one bounded XMLTV
-   stream and checked against EPGShare's sectioned companion ID catalog. The
-   pinned matcher may propose an EPG for previously unseen
-   identities only; a proposal is activated only after exact-ID, route, and
-   current/future programme-gate verification from that same open source file.
+   stream and corroborated against EPGShare's sectioned companion ID catalog.
+   EPGShare can publish those two files hours apart during a non-atomic
+   rollover, so Version 1 uses
+   only their exact, case-sensitive intersection and accepts only the small,
+   bounded rollover described below. The pinned matcher may propose an EPG for
+   previously unseen identities only; a proposal is activated only after
+   exact-ID, route, and current/future programme-gate verification from that
+   same open source file.
    The compressed SHA-256, safety scan, catalog, and programmes are bound to
    one verified file descriptor rather than separate pathname reads.
    Uncertain rows remain disabled in `REVIEW`. Existing mapping rows are not
@@ -187,8 +191,10 @@ A new row is activated as `AUTO_EPGSHARE` only when all of these independent
 checks succeed:
 
 - the frozen matcher and legacy engine hashes/build IDs match their manifest;
-- the complete combined-source catalog passes its minimum-size and XML safety
-  checks and exactly agrees with the official sectioned ID catalog;
+- the complete combined-source catalog and official sectioned ID catalog pass
+  the minimum-size, exact-intersection, bounded-rollover, and XML safety checks;
+- the official text catalog has no ID declared as both real and dummy, and no
+  real ID with contradictory or multiple-country market evidence;
 - the method is an allowlisted deterministic identity method, never fuzzy or
   broad containment;
 - exactly one case-sensitive, real, non-dummy EPG ID is selected;
@@ -198,7 +204,10 @@ checks succeed:
   time intervals, its first useful interval starts within six hours, and its
   final useful interval reaches at least six hours beyond the check time.
 
-Every other result is appended with `enabled=FALSE` and `action=REVIEW`.
+After the catalog-wide preflight succeeds, every other row-level result is
+appended with `enabled=FALSE` and `action=REVIEW`. A catalog-wide contradiction
+stops the run before any new row is written; it is not converted into one
+particular channel's review result.
 Server 1 panel identifiers are stripped before matching and can never be
 activated. Provider icon URLs are discarded because their paths may contain
 account credentials.
@@ -206,6 +215,66 @@ account credentials.
 Automatic EPG approval changes only schedule-control fields. New rows retain
 `metadata_status=review`; personalization language, region, genre, sport, and
 religion are not promoted to human-approved status.
+
+### EPGShare XML/text catalog rollover contract
+
+EPGShare publishes the large XML guide and its official text catalog as two
+separate files. Their replacement is not atomic, so a new copy of one file can
+appear hours before the matching copy of the other. Version 1 handles only a
+small, measurable rollover difference; it does not broadly reconcile IDs:
+
+- the XML catalog must declare at least 25,000 unique IDs;
+- the text catalog must declare at least 25,000 unique IDs;
+- their exact, case-sensitive intersection must contain at least 25,000 IDs;
+- the combined count of XML-only and text-only IDs must be no more than 64;
+- that same combined difference must also be no more than 0.25% of the union;
+  both limits apply, so the smaller allowance wins;
+- every differing ID must be printable ASCII without whitespace or control
+  characters; and
+- every XML-only and text-only ID must resolve to one deterministic market;
+  an `ALL`/unknown or otherwise unresolved route is not accepted.
+
+The text catalog must also pass catalog-wide semantic preflight. If one exact
+ID appears in both a real section and `DUMMY_CHANNELS`, the entire unattended
+matching pass fails. For real candidates, a recognized country section such as
+`US2` or `IN1` must not contradict the market inferred from the exact ID. A
+dotless ID may inherit one unambiguous country market; contradictory evidence
+or sections from multiple distinct country markets also fail the entire
+preflight. These entries are not simply omitted, because removing a competitor
+could make another similar station appear falsely unique.
+
+Only an ID in the exact intersection is eligible for unattended approval.
+An XML-only or text-only ID is recorded in the drift counts and quarantined
+from automatic approval; a new channel involving it remains disabled in
+`REVIEW`. Case-only variants are two different IDs and are never silently
+merged. If either catalog or their shared set falls below 25,000 IDs, the
+difference exceeds either limit, or a differing ID contains non-ASCII,
+whitespace, or control characters, the run fails before a Sheet write. It also
+fails if any one-file-only ID lacks one deterministic market, because an
+unroutable shadow cannot reliably remain in the matcher competition to block
+false uniqueness.
+
+Some shared IDs are unsafe for automatic approval because the frozen matcher's
+compatibility normalization could collapse distinct opaque IDs—for example a
+Unicode non-breaking-space form and an ordinary-space form. Version 1 omits
+such identities from the approvable real/dummy catalog but preserves a
+conservative representative in the runtime competition. It can therefore
+block a false claim that another candidate is unique, while no
+normalization-confusable member can be approved automatically. When this
+ambiguity affects a new-channel decision, that row remains in `REVIEW`; it is
+never permission to normalize or rewrite the ID. One representative may stand
+for IDs that collapse to the same engine-safe identity after casefold and
+Unicode-whitespace cleanup only when every member has the same catalog kind
+(all real or all dummy) and the identical exact `(feed, region)` route. If such
+a confusable family mixes real/dummy status or differs by feed or market,
+catalog-wide preflight fails instead of choosing a blocker.
+
+A separate row-level veto covers a shared real candidate whose route is
+`ALL`. That candidate remains valid for an exact existing mapping, but it is
+not visible inside one explicit-market matcher index. If its strong exact or
+station identity collides with a market-routed proposed target, the new
+proposal remains disabled in `REVIEW`; this ambiguity does not stop unrelated
+rows or rewrite the existing mapping.
 
 After confirming the channel identity, exact EPG source/ID, and personalization
 metadata, the owner sets `action=APPROVED` and `enabled=TRUE`. Approval without
@@ -355,6 +424,21 @@ Full inventory and mapping snapshots are not uploaded as public-repository
 artifacts. The manual sync workflow retains only aggregate `summary.json` for
 seven days.
 
+Catalog rollover evidence is available without publishing the differing IDs.
+The GitHub run summary shows:
+
+| Run-summary label | `summary.json` field | Meaning |
+|---|---|---|
+| EPG catalog alignment mode | `epgshare_catalog_corroboration_mode` | `exact` when the ID sets are identical; `bounded-drift` when the small-rollover rules were used. |
+| EPG IDs confirmed in both catalogs | `epgshare_shared_catalog_channels` | Size of the exact, case-sensitive intersection. |
+| XML-only EPG IDs quarantined | `epgshare_xml_only_catalog_channels` | IDs found only in the XML file and excluded from automatic approval. |
+| Text-only EPG IDs quarantined | `epgshare_text_only_catalog_channels` | IDs found only in the text file and excluded from automatic approval. |
+
+`summary.json` also records `epgshare_catalog_channels`,
+`epgshare_text_catalog_channels`, `epgshare_catalog_drift_channels`, and
+`epgshare_catalog_drift_sha256`. The last value is a reproducible fingerprint
+of the directional difference, not a list of the IDs.
+
 ## Streaming build command
 
 The production workflow runs the equivalent of:
@@ -377,10 +461,23 @@ python -u scripts/build_epg_streaming.py \
 ```
 
 The workflow downloads the combined guide and its small official sectioned ID
-catalog once. The synchronizer requires their exact channel-ID sets to agree,
-parses the guide once, and creates the temporary spool used by the builder.
+catalog once. The synchronizer requires at least 25,000 IDs in each input and
+in their exact, case-sensitive intersection. It accepts at most 64 differing
+IDs and at most 0.25% of the union, uses only the intersection for automatic
+approval, and requires every one-file-only ID to have one deterministic market
+route. It then parses the guide once and creates the temporary spool used by
+the builder.
 The companion catalog prevents an incomplete source or an unknown dummy section
-from becoming an automatic real-channel match. Local fixtures may use repeated
+from becoming an automatic real-channel match. Its catalog-wide preflight also
+rejects any ID classified as both real and dummy, and any real ID with
+contradictory or multiple-country market evidence. Normalization-confusable IDs
+remain non-approvable runtime competitors so omitting them cannot manufacture
+false uniqueness. A single conservative blocker can represent a confusable
+family only when all members share one catalog kind and one identical
+`(feed, region)` route; a mixed real/dummy or differing feed/market family fails
+preflight. A real `ALL`-route candidate may still serve an exact existing
+mapping, while a strong identity collision keeps a routed new proposal in
+`REVIEW`. Local fixtures may use repeated
 `--panel-file server_2=/path/guide.xml.gz` arguments. A Server 1 panel file is
 always rejected.
 
@@ -525,8 +622,23 @@ the custom app's preference screens or client-side filtering implementation.
   Provider base URLs and high-risk Google service-account values are searched
   globally.
 - EPG source: at most 1 GiB compressed and 4 GiB expanded.
-- Automatic matching requires at least 25,000 unique IDs and exact agreement
-  between the XML channel set and the sectioned companion catalog.
+- Automatic matching requires at least 25,000 unique IDs in the XML catalog,
+  the sectioned companion text catalog, and their exact, case-sensitive shared
+  set. XML-only plus text-only drift is accepted only when it is no more than
+  64 IDs and no more than 0.25% of the union; all drift IDs are excluded from
+  automatic approval. Larger drift and non-ASCII, whitespace, or control
+  characters in a drifting ID stop the run. So does an XML-only or text-only ID
+  whose market route is `ALL`/unknown or otherwise unresolved.
+- Text-catalog real/dummy ambiguity and contradictory or multiple-country
+  evidence are catalog-wide preflight failures. Case- or Unicode-whitespace
+  normalization-confusable IDs remain runtime ambiguity blockers but cannot be
+  approved automatically. A blocker may represent one engine-safe confusable
+  family only when all members share the same catalog kind and exact
+  `(feed, region)` route; a family mixing real/dummy status or differing by
+  feed/market route stops the entire preflight.
+- A shared real `ALL`-route candidate remains available for exact existing
+  mappings. If it shares a strong exact/station identity with a routed proposed
+  target, that new proposal remains disabled in `REVIEW`.
 - XMLTV parse: at most 20 million elements and 10,000 child elements in one
   record; DTD/entity declarations are rejected.
 - SQLite ingestion batch: 2,000 programme rows.
@@ -556,6 +668,9 @@ hashes are checked before deployment.
   region-consistent EPGShare identities with a strong same-snapshot programme
   guide are activated automatically. All fuzzy, ambiguous, adult, dummy,
   generic-numbered, or weak-guide matches require human review.
+- A row-level ambiguous result goes to `REVIEW`; a text catalog that is itself
+  contradictory about real/dummy status or country market fails the full
+  preflight before rows are written.
 - Missing and ordinary drift rows are reported but not deleted or rewritten.
 - Only possible stream-ID reuse is persisted in `Sync Alerts`; ordinary drift
   and missing counts are not a historical inventory database.

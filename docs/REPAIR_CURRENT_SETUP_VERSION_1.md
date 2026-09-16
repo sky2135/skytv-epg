@@ -25,6 +25,59 @@ Google Sheet, repository, `main` branch, and Pages setup.
   writes. Installing the new `repo-overlay` is therefore required before the
   next test.
 
+## If the next run reports an XML/text catalog mismatch
+
+The message below comes from an older Version 1 revision that required the two
+separately published EPGShare files to change at exactly the same instant:
+
+```text
+ERROR: The XML and official text catalogs do not declare the same exact IDs.
+```
+
+Install the current Version 1 `repo-overlay`; do not change the Google Sheet or
+server credentials for this error. The current workflow safely tolerates only
+a small EPGShare publication rollover. The XML catalog, text catalog, and their
+exact case-sensitive intersection must each contain at least 25,000 IDs. The
+total XML-only plus text-only difference must be no more than 64 IDs **and** no
+more than 0.25% of the union. Only shared IDs can be approved automatically;
+one-file-only IDs are quarantined in `REVIEW`. A larger difference, or a
+differing ID containing non-ASCII, whitespace, or control characters, still
+stops the run safely before a Sheet write. Every XML-only and text-only ID must
+also resolve to one deterministic country/market. An `ALL`/unknown or otherwise
+unresolved route stops the run because an unroutable shadow cannot reliably
+block a false unique match.
+
+The current workflow also stops the whole unattended-matching preflight if the
+official text catalog declares one ID in both real and dummy sections, gives a
+real ID country evidence that contradicts its suffix, or places it in multiple
+distinct country markets. These source-wide contradictions are not appended as
+ordinary review rows, because silently omitting an ID could make a similar
+channel appear falsely unique. By contrast, case- or Unicode-whitespace
+normalization-confusable IDs remain conservative runtime competitors: they may
+block automatic approval and leave an affected new channel in `REVIEW`, but
+they can never be approved automatically themselves. One conservative blocker
+may represent IDs that collapse to the same engine-safe identity after
+casefold/Unicode-whitespace cleanup only when every member shares the same
+catalog kind (all real or all dummy) and identical exact route—the same feed
+and market. If that family mixes real/dummy status or differs by feed or market,
+the whole preflight stops instead. Separately, a real candidate with the
+unscoped `ALL` route may still serve an exact existing mapping. If it shares a
+strong exact/station identity with a market-routed new proposal, that proposal
+stays disabled in `REVIEW` rather than being approved as falsely unique.
+
+These lines are unrelated to the catalog mismatch:
+
+```text
+SERVER_3_PASSWORD: ***
+Warning: Provider credentials may be sent over unencrypted HTTP.
+```
+
+The asterisks are GitHub's secret masking, not a rejected password. The HTTP
+warning means at least one provider URL uses unencrypted `http://`; it does not
+cause XML/text catalog comparison to fail. A credential problem is reported
+separately as HTTP 401 or invalid credentials. Ask the provider for HTTPS when
+available, but do not rotate a password merely to fix this catalog error.
+
 ## Install the repaired files
 
 1. Download and extract the repaired Version 1 ZIP.
@@ -69,7 +122,8 @@ Google Sheet, repository, `main` branch, and Pages setup.
    turned **on**.
 9. Wait for a green check mark, then reload the Sheet.
 10. In the run summary, check **Rows added**, **Alerts added**, **Open alerts**,
-   automatically matched channels, and channels left for review.
+    automatically matched channels, channels left for review, **EPG catalog
+    alignment mode**, and the shared/XML-only/text-only EPG ID counts.
 11. If the providers have not changed since the attached report, expect about
    24,588 mapping rows added and 1,499 alerts added/open. The exact live counts
    may change. Automatic matches plus review rows must equal the new-channel
@@ -100,6 +154,17 @@ useful near-term programme guide pass every safety check. The guide must start
 within six hours, contain at least two useful time slots, and extend at least
 six hours ahead. Uncertain rows remain disabled with `action=REVIEW`. Server 1
 always uses EPGShare.
+
+For a healthy source, **EPG catalog alignment mode** is `exact` or
+`bounded-drift`. In `bounded-drift` mode, XML-only and text-only counts are the
+quarantined rollover IDs; they are not automatic matches. The downloaded
+`summary.json` records the same evidence as
+`epgshare_catalog_corroboration_mode`,
+`epgshare_shared_catalog_channels`,
+`epgshare_xml_only_catalog_channels`,
+`epgshare_text_only_catalog_channels`,
+`epgshare_catalog_drift_channels`, and a non-identifying
+`epgshare_catalog_drift_sha256` fingerprint.
 
 ## If Google still rejects the write
 

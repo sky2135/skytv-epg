@@ -14,7 +14,7 @@ import hashlib
 import importlib.util
 import math
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -42,10 +42,20 @@ from skytv_epg_auto_match_v1 import (  # noqa: E402
 from skytv_epg_contextual_v8 import install_contextual_v8  # noqa: E402
 
 
-AUTO_MATCH_INTEGRATION_VERSION = "1.0"
+AUTO_MATCH_INTEGRATION_VERSION = "1.1"
 SUPPORTED_SERVERS = frozenset({"server_1", "server_2", "server_3"})
 DEFAULT_EPG_HISTORY_DAYS = 3
 MINIMUM_CORROBORATED_CATALOG_IDS = 25_000
+# EPGShare publishes the large XML guide and its companion text catalog as
+# separate files. Their replacement is not atomic, so a small number of IDs
+# can legitimately differ while one file is newer than the other. Automatic
+# matching may use only their exact, case-sensitive intersection. These two
+# independent ceilings keep that availability allowance from accepting a
+# stale, partial, or unrelated catalog pair.
+MAX_CATALOG_ID_DRIFT = 64
+# At most one drifting ID per 400 union IDs (0.25%). Keeping this as an
+# integer denominator makes the boundary exact and deterministic.
+MAX_CATALOG_ID_DRIFT_RATIO_DENOMINATOR = 400
 SOURCE_BASE_URL = "https://epgshare01.online/epgshare01/"
 ENGINE_SOURCE_PATH = SRC_DIR / "skytv_epg_engine.py"
 CONTEXTUAL_SOURCE_PATH = SRC_DIR / "skytv_epg_contextual_v8.py"
@@ -99,6 +109,16 @@ class MatcherRuntime:
 
 
 @dataclass(frozen=True)
+class _CatalogCorroboration:
+    exact_ids: frozenset[str]
+    xml_only_ids: frozenset[str]
+    text_only_ids: frozenset[str]
+    union_casefold_collision_keys: frozenset[str]
+    mode: str
+    drift_sha256: str
+
+
+@dataclass(frozen=True)
 class AutoMatchOutcome:
     rows: tuple[dict[str, str], ...]
     considered_rows: int
@@ -108,6 +128,13 @@ class AutoMatchOutcome:
     rejected_programme_gates: int
     fixed_requested_ids: int
     catalog_channels: int
+    text_catalog_channels: int
+    corroborated_catalog_channels: int
+    xml_only_catalog_channels: int
+    text_only_catalog_channels: int
+    catalog_drift_channels: int
+    catalog_corroboration_mode: str
+    catalog_drift_sha256: str
     source_sha256: str
     catalog_sha256: str
     text_catalog_generated_token: str
@@ -129,6 +156,16 @@ class AutoMatchOutcome:
             "auto_match_rejected_programme_gates": self.rejected_programme_gates,
             "epgshare_spool_fixed_ids": self.fixed_requested_ids,
             "epgshare_catalog_channels": self.catalog_channels,
+            "epgshare_text_catalog_channels": self.text_catalog_channels,
+            "epgshare_corroborated_catalog_channels": (
+                self.corroborated_catalog_channels
+            ),
+            "epgshare_shared_catalog_channels": self.corroborated_catalog_channels,
+            "epgshare_xml_only_catalog_channels": self.xml_only_catalog_channels,
+            "epgshare_text_only_catalog_channels": self.text_only_catalog_channels,
+            "epgshare_catalog_drift_channels": self.catalog_drift_channels,
+            "epgshare_catalog_corroboration_mode": self.catalog_corroboration_mode,
+            "epgshare_catalog_drift_sha256": self.catalog_drift_sha256,
             "epgshare_source_sha256": self.source_sha256,
             "epgshare_catalog_sha256": self.catalog_sha256,
             "epgshare_text_catalog_generated_token": self.text_catalog_generated_token,
@@ -151,6 +188,221 @@ class AutoMatchOutcome:
 MatcherRuntimeFactory = Callable[
     [list[dict[str, str]], dict[str, str]], MatcherRuntime
 ]
+
+
+def _catalog_drift_sha256(
+    xml_only_ids: Iterable[str], text_only_ids: Iterable[str]
+) -> str:
+    """Fingerprint the exact directional difference without logging every ID."""
+
+    digest = hashlib.sha256()
+    for side, values in (
+        (b"xml", xml_only_ids),
+        (b"text", text_only_ids),
+    ):
+        for value in sorted(values, key=lambda item: (item.casefold(), item)):
+            encoded = value.encode("utf-8")
+            digest.update(side)
+            digest.update(len(encoded).to_bytes(4, "big"))
+            digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _runtime_shadow_id(value: str) -> str:
+    """Return the exact safe identity the frozen matcher can retain.
+
+    The pinned engine repairs non-ASCII whitespace before indexing.  Supplying
+    the original opaque ID would therefore fail strict live-catalog preflight.
+    A shadow is deliberately non-approvable, so it may use that deterministic
+    ASCII-space form solely to preserve ambiguity in the runtime competition.
+    """
+
+    return "".join(" " if character.isspace() else character for character in value)
+
+
+def _strong_runtime_identity_keys(resolver: Any, context: Any) -> frozenset[tuple[str, str]]:
+    """Return conservative exact-identity keys for cross-route ambiguity vetoes."""
+
+    keys: set[tuple[str, str]] = set()
+
+    def add(label: str, value: object, *, minimum_compact: int = 3) -> None:
+        normalized = " ".join(str(value or "").casefold().split())
+        if len("".join(character for character in normalized if character.isalnum())) >= minimum_compact:
+            keys.add((label, normalized))
+
+    # The frozen strict path accepts even one-character exact identities.
+    add("strict", getattr(context, "strict_key", ""), minimum_compact=1)
+    add("relaxed", getattr(context, "relaxed_key", ""))
+    add("compact", getattr(context, "compact_key", ""), minimum_compact=5)
+    add("edition", getattr(context, "edition_key", ""))
+    add("bag", getattr(context, "bag_key", ""))
+    for value in tuple(getattr(context, "identity_keys", ()) or ()):
+        add("identity", value)
+
+    candidate = dict(getattr(context, "candidate", {}) or {})
+    callsign_parser = getattr(
+        getattr(resolver, "engine", None), "_candidate_callsign_parts_v7", None
+    )
+    if not callable(callsign_parser):
+        raise AutoMatchError(
+            "The Version 1 matcher cross-route station parser is unavailable."
+        )
+    try:
+        parts = callsign_parser(candidate)
+        if parts is not None:
+            base, _station_class, subchannel = parts
+            base_text = str(base or "").upper()
+            sub_text = str(subchannel or "")
+            if base_text:
+                keys.add(("callsign", f"{base_text}:{sub_text}"))
+    except Exception as exc:
+        raise AutoMatchError(
+            "The Version 1 matcher could not verify cross-route station identities."
+        ) from exc
+    return frozenset(keys)
+
+
+def _all_route_ambiguity_labels(
+    runtime: MatcherRuntime,
+) -> Mapping[str, frozenset[str]]:
+    """Map routed candidates to identity labels shadowed in region ALL.
+
+    The frozen resolver deliberately searches one explicit market. An official
+    real candidate whose route is ``ALL`` would otherwise be invisible to that
+    market's indexes and could manufacture false uniqueness. Such a candidate
+    remains usable for exact existing mappings, but any colliding new-channel
+    proposal must stay in REVIEW.
+    """
+
+    state = getattr(runtime.resolver, "state", None)
+    by_region = getattr(state, "by_region", None)
+    all_contexts = by_region.get("ALL") if isinstance(by_region, dict) else None
+    if not isinstance(all_contexts, list):
+        raise AutoMatchError("The Version 1 matcher cross-route index is unavailable.")
+
+    blocker_keys: set[tuple[str, str]] = set()
+    routed: list[tuple[str, frozenset[tuple[str, str]]]] = []
+    for context in all_contexts:
+        candidate = dict(getattr(context, "candidate", {}) or {})
+        epg_id = str(candidate.get("epg_id") or "")
+        region = str(candidate.get("region") or "").upper()
+        if not epg_id or not region:
+            raise AutoMatchError("The Version 1 matcher cross-route index is invalid.")
+        keys = _strong_runtime_identity_keys(runtime.resolver, context)
+        if region == "ALL":
+            blocker_keys.update(keys)
+        else:
+            routed.append((epg_id, keys))
+    if not blocker_keys:
+        return {}
+    return {
+        epg_id: frozenset(label for label, _value in keys.intersection(blocker_keys))
+        for epg_id, keys in routed
+        if keys.intersection(blocker_keys)
+    }
+
+
+def _proposal_blocked_by_all_route(
+    proposal: Any,
+    ambiguity_labels: Mapping[str, frozenset[str]],
+) -> bool:
+    """Apply only the exact identity family used by an allowlisted method."""
+
+    labels = ambiguity_labels.get(str(proposal.target_epg_id or ""), frozenset())
+    method = str(proposal.match_method or "").casefold()
+    if method == "verified_station_identity":
+        return "callsign" in labels
+    if method == "strict":
+        return "strict" in labels
+    if method == "approved_knowledge":
+        # Approved aliases select a specific target, but a catalog identity
+        # that is exact under any of the matcher's strong canonical forms is
+        # still material competing evidence and requires human review.
+        return bool(
+            labels.intersection(
+                {"callsign", "strict", "relaxed", "compact", "edition", "identity", "bag"}
+            )
+        )
+    return False
+
+
+def _corroborate_catalog_ids(
+    xml_ids: Iterable[str],
+    text_ids: Iterable[str],
+    *,
+    minimum_unique_channels: int,
+) -> _CatalogCorroboration:
+    """Accept only a small, bounded publication skew between official files.
+
+    XMLTV IDs are opaque. The intersection therefore remains exact and
+    case-sensitive: a capitalization-only rename is deliberately represented
+    as one XML-only ID and one text-only ID, never silently reconciled.
+    """
+
+    xml_exact = frozenset(xml_ids)
+    text_exact = frozenset(text_ids)
+    minimum = int(minimum_unique_channels)
+    if minimum < 1:
+        raise catalog_stream.CatalogStreamError(
+            "The catalog corroboration completeness floor is invalid."
+        )
+    if len(xml_exact) < minimum or len(text_exact) < minimum:
+        raise catalog_stream.CatalogStreamError(
+            "An ALL_SOURCES1 catalog is below its corroboration completeness floor."
+        )
+
+    exact_ids = xml_exact.intersection(text_exact)
+    xml_only_ids = xml_exact.difference(text_exact)
+    text_only_ids = text_exact.difference(xml_exact)
+    if len(exact_ids) < minimum:
+        raise catalog_stream.CatalogStreamError(
+            "The XML/text exact-ID intersection is below its completeness floor "
+            f"(xml={len(xml_exact):,}, text={len(text_exact):,}, "
+            f"corroborated={len(exact_ids):,})."
+        )
+
+    drift_ids = xml_only_ids.union(text_only_ids)
+    if any(
+        not value.isascii()
+        or not value.isprintable()
+        or any(character.isspace() for character in value)
+        for value in drift_ids
+    ):
+        raise catalog_stream.CatalogStreamError(
+            "Bounded XML/text catalog drift contains a non-ASCII, whitespace, "
+            "or control-character ID."
+        )
+
+    variants_by_fold: dict[str, set[str]] = {}
+    for value in xml_exact.union(text_exact):
+        variants_by_fold.setdefault(value.casefold(), set()).add(value)
+    union_casefold_collision_keys = frozenset(
+        folded for folded, variants in variants_by_fold.items() if len(variants) > 1
+    )
+
+    drift_count = len(drift_ids)
+    union_count = len(xml_exact.union(text_exact))
+    drift_sha256 = _catalog_drift_sha256(xml_only_ids, text_only_ids)
+    if (
+        drift_count > MAX_CATALOG_ID_DRIFT
+        # Use integer arithmetic for the 0.25% production boundary so an
+        # exactly-on-the-limit catalog cannot fail because of float rounding.
+        or drift_count * MAX_CATALOG_ID_DRIFT_RATIO_DENOMINATOR > union_count
+    ):
+        raise catalog_stream.CatalogStreamError(
+            "The XML/text catalog ID drift exceeds its safety limit "
+            f"(xml={len(xml_exact):,}, text={len(text_exact):,}, "
+            f"corroborated={len(exact_ids):,}, xml_only={len(xml_only_ids):,}, "
+            f"text_only={len(text_only_ids):,}, drift_sha256={drift_sha256})."
+        )
+    return _CatalogCorroboration(
+        exact_ids=frozenset(exact_ids),
+        xml_only_ids=frozenset(xml_only_ids),
+        text_only_ids=frozenset(text_only_ids),
+        union_casefold_collision_keys=union_casefold_collision_keys,
+        mode="exact" if drift_count == 0 else "bounded-drift",
+        drift_sha256=drift_sha256,
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -419,6 +671,7 @@ def auto_match_and_spool(
             text_catalog_bytes,
             minimum_ids=int(minimum_unique_channels),
         )
+        text_catalog.validate_for_unattended_matching()
     except AutoMatchError:
         raise
     except (OSError, catalog_stream.CatalogStreamError) as exc:
@@ -442,24 +695,130 @@ def auto_match_and_spool(
     proposals: dict[tuple[str, str], Any] = {}
     runtime_box: list[MatcherRuntime] = []
     matcher_catalog_box: list[MatcherCatalogSnapshot] = []
+    corroboration_box: list[_CatalogCorroboration] = []
 
     def select_provisional_ids(
         source_catalog: catalog_stream.CatalogSnapshot,
     ) -> Iterable[str]:
         xml_ids = frozenset(channel.epg_id for channel in source_catalog.channels)
         text_ids = frozenset(entry.epg_id for entry in text_catalog.entries)
-        if xml_ids != text_ids:
-            raise catalog_stream.CatalogStreamError(
-                "The XML and official text catalogs do not declare the same exact IDs."
+        corroboration = _corroborate_catalog_ids(
+            xml_ids,
+            text_ids,
+            minimum_unique_channels=int(minimum_unique_channels),
+        )
+
+        xml_by_id = {channel.epg_id: channel for channel in source_catalog.channels}
+        text_by_id = {entry.epg_id: entry for entry in text_catalog.entries}
+        if any(
+            xml_by_id[epg_id].route.region == "ALL"
+            for epg_id in corroboration.xml_only_ids
+        ) or any(
+            (
+                (route := catalog_stream._text_catalog_match_route(text_by_id[epg_id]))
+                is None
+                or route.region == "ALL"
             )
-        real_candidates, dummy_ids = text_catalog.matcher_inputs()
-        runtime = runtime_factory(real_candidates, dummy_ids)
+            for epg_id in corroboration.text_only_ids
+        ):
+            raise AutoMatchError(
+                "Bounded XML/text catalog drift contains an ID without one "
+                "deterministic market."
+            )
+
+        text_real_candidates, text_dummy_ids = text_catalog.matcher_inputs()
+        corroborated_real_candidates = [
+            candidate
+            for candidate in text_real_candidates
+            if candidate.get("epg_id") in corroboration.exact_ids
+            and str(candidate.get("epg_id") or "").casefold()
+            not in corroboration.union_casefold_collision_keys
+        ]
+        corroborated_dummy_ids = {
+            folded: epg_id
+            for folded, epg_id in text_dummy_ids.items()
+            if epg_id in corroboration.exact_ids
+            and epg_id.casefold()
+            not in corroboration.union_casefold_collision_keys
+        }
+
+        # Keep every official TXT identity represented in the runtime
+        # competition, including TXT-only entries and conservative shadows for
+        # case-collision or Unicode-whitespace identities which may not earn an
+        # approval. Add XML-only shadows as well. An ineligible shadow can
+        # block false uniqueness, but the approval catalog below cannot approve
+        # it because it lacks exact corroboration.
+        runtime_candidates = list(text_real_candidates)
+        runtime_dummy_ids = dict(text_dummy_ids)
+        occupied_folds = {
+            str(candidate.get("epg_id") or "").casefold()
+            for candidate in runtime_candidates
+        }.union(runtime_dummy_ids)
+        for entry in text_catalog.entries:
+            original_epg_id = entry.epg_id
+            epg_id = _runtime_shadow_id(original_epg_id)
+            folded = epg_id.casefold()
+            if folded in occupied_folds:
+                continue
+            match_route = catalog_stream._text_catalog_match_route(entry)
+            if match_route is None:
+                # validate_for_unattended_matching() already rejects this;
+                # retain a defensive assertion at the use boundary.
+                raise AutoMatchError(
+                    "The official text catalog has unsafe country evidence."
+                )
+            display_name = catalog_stream._epg_id_match_name(original_epg_id)
+            runtime_candidates.append(
+                {
+                    "epg_id": epg_id,
+                    "feed": match_route.feed,
+                    "region": match_route.region,
+                    "display_name": display_name,
+                    "normalized": catalog_stream._simple_match_key(display_name),
+                }
+            )
+            occupied_folds.add(folded)
+        for channel in source_catalog.channels:
+            epg_id = channel.epg_id
+            folded = epg_id.casefold()
+            if (
+                epg_id not in corroboration.xml_only_ids
+                or folded in occupied_folds
+            ):
+                continue
+            # Keep one deterministic, non-approvable representative even for
+            # an XML-only case-collision family. Omitting every member of such
+            # a family could manufacture false uniqueness for a similar shared
+            # station. Corroborated kind/region metadata is intentionally not
+            # added below, so a shadow can only block an approval, never earn
+            # one. Bounded-drift validation has already restricted these IDs
+            # to printable ASCII without whitespace or controls.
+            display_name = catalog_stream._epg_id_match_name(epg_id)
+            runtime_candidates.append(
+                {
+                    "epg_id": epg_id,
+                    "feed": channel.route.feed,
+                    "region": channel.route.region,
+                    "display_name": display_name,
+                    "normalized": catalog_stream._simple_match_key(display_name),
+                }
+            )
+            occupied_folds.add(folded)
+        runtime = runtime_factory(runtime_candidates, runtime_dummy_ids)
         if not runtime.identity.is_expected or not runtime.preflight.ready:
             raise AutoMatchError("The Version 1 matcher verification failed safely.")
+        all_route_ambiguity = (
+            _all_route_ambiguity_labels(runtime)
+            if any(
+                str(candidate.get("region") or "").upper() == "ALL"
+                for candidate in runtime_candidates
+            )
+            else {}
+        )
         matcher_catalog = MatcherCatalogSnapshot.from_matcher_catalog(
             (channel.epg_id for channel in source_catalog.channels),
-            real_candidates=real_candidates,
-            dummy_ids=dummy_ids,
+            real_candidates=corroborated_real_candidates,
+            dummy_ids=corroborated_dummy_ids,
             # This digest was computed from the same still-open descriptor
             # which supplied the XML catalog and will supply its programmes.
             # Never bind matcher provenance to a separate pathname pre-read.
@@ -478,6 +837,20 @@ def auto_match_and_spool(
                 matcher_identity=runtime.identity,
                 preflight=runtime.preflight,
             )
+            server_proposals = {
+                key: replace(
+                    proposal,
+                    eligible_for_finalization=False,
+                    decision_reason=(
+                        "An unscoped ALL-market EPG candidate shares a strong "
+                        "identity with the proposed target"
+                    ),
+                )
+                if proposal.eligible_for_finalization
+                and _proposal_blocked_by_all_route(proposal, all_route_ambiguity)
+                else proposal
+                for key, proposal in server_proposals.items()
+            }
             overlap = set(proposals).intersection(server_proposals)
             if overlap:
                 raise AutoMatchError("The matcher returned duplicate stream identities.")
@@ -486,6 +859,7 @@ def auto_match_and_spool(
             raise AutoMatchError("The matcher result did not cover the exact new-channel set.")
         runtime_box.append(runtime)
         matcher_catalog_box.append(matcher_catalog)
+        corroboration_box.append(corroboration)
         return sorted(
             {
                 proposal.target_epg_id
@@ -510,7 +884,11 @@ def auto_match_and_spool(
                 source_base_url=SOURCE_BASE_URL,
                 minimum_unique_channels=int(minimum_unique_channels),
             )
-            if len(runtime_box) != 1 or len(matcher_catalog_box) != 1:
+            if (
+                len(runtime_box) != 1
+                or len(matcher_catalog_box) != 1
+                or len(corroboration_box) != 1
+            ):
                 raise AutoMatchError("The ALL_SOURCES1 catalog boundary was not verified.")
             if (
                 result.catalog.source_sha256 != result.source_sha256
@@ -609,26 +987,36 @@ def auto_match_and_spool(
         raise AutoMatchError("Automatic EPG matching stopped safely before any Sheet write.") from exc
 
     runtime = runtime_box[0]
-    provisional_ids = {
-        proposal.target_epg_id
+    corroboration = corroboration_box[0]
+    provisional_proposals = tuple(
+        proposal
         for proposal in proposals.values()
         if proposal.eligible_for_finalization and proposal.target_epg_id
-    }
+    )
     rejected_gates = sum(
         1
-        for epg_id in provisional_ids
-        if epg_id not in result.programme_gates
-        or not result.programme_gates[epg_id].passed
+        for proposal in provisional_proposals
+        if proposal.target_epg_id not in result.programme_gates
+        or not result.programme_gates[proposal.target_epg_id].passed
     )
     return AutoMatchOutcome(
         rows=tuple(patched_rows),
         considered_rows=len(proposals),
-        provisional_rows=len(provisional_ids),
+        provisional_rows=len(provisional_proposals),
         approved_rows=approved_count,
         review_rows=len(patched_rows) - approved_count,
         rejected_programme_gates=rejected_gates,
         fixed_requested_ids=len(result.requested_fixed_ids),
         catalog_channels=len(result.catalog.channels),
+        text_catalog_channels=len(text_catalog.entries),
+        corroborated_catalog_channels=len(corroboration.exact_ids),
+        xml_only_catalog_channels=len(corroboration.xml_only_ids),
+        text_only_catalog_channels=len(corroboration.text_only_ids),
+        catalog_drift_channels=(
+            len(corroboration.xml_only_ids) + len(corroboration.text_only_ids)
+        ),
+        catalog_corroboration_mode=corroboration.mode,
+        catalog_drift_sha256=corroboration.drift_sha256,
         source_sha256=result.source_sha256,
         catalog_sha256=result.catalog.fingerprint_sha256,
         text_catalog_generated_token=text_catalog.generated_token,
