@@ -206,6 +206,10 @@ jobs:
               --sheet-tab "$GOOGLE_SHEET_TAB"
               --output-dir .build/channel-sync
               --snapshot-out .build/channel-sync/effective_mapping.csv
+              --authoritative-snapshot-out
+                .build/channel-sync/authoritative_mapping.csv
+              --snapshot-manifest-out
+                .build/channel-sync/mapping_snapshot_manifest.json
               --all-source-file
                 "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz"
               --all-source-catalog-file
@@ -220,6 +224,8 @@ jobs:
           fi
           "${sync_command[@]}"
           test -s .build/channel-sync/effective_mapping.csv
+          test -s .build/channel-sync/authoritative_mapping.csv
+          test -s .build/channel-sync/mapping_snapshot_manifest.json
 
       - name: Verify private snapshot contains no passwords, private URLs, or credential fields
         shell: bash
@@ -566,10 +572,10 @@ jobs:
               ("epgshare_text_only_catalog_channels", "Text-only EPG IDs quarantined"),
               ("appended_rows", "Rows added to Google Sheet"),
               ("changed_rows", "Changed channel details"),
-              ("possible_id_reuse_rows", "Rows quarantined for possible ID reuse"),
+              ("possible_id_reuse_rows", "Current provider/mapping identity mismatches"),
               ("new_sync_alerts", "New safety alerts found"),
-              ("sync_alerts_appended", "Alerts added to the private Sync Alerts tab"),
-              ("open_sync_alerts", "Open safety alerts awaiting review"),
+              ("sync_alerts_appended", "New deduplicated alerts added this run"),
+              ("open_sync_alerts", "Total OPEN alerts after refresh"),
               ("missing_rows", "Previously listed channels not found"),
               ("projected_sheet_rows", "Current mapping rows"),
           )
@@ -582,6 +588,41 @@ jobs:
               failures = payload.get("provider_failures", {})
               count = len(failures) if isinstance(failures, dict) else 0
               handle.write(f"- Provider checks unavailable: **{count}**\n")
+              snapshot_servers = payload.get("snapshot_integrity_servers", {})
+              if isinstance(snapshot_servers, dict) and snapshot_servers:
+                  handle.write("\n### Mapping snapshot integrity\n\n")
+                  minimums = {
+                      "server_1": 4000,
+                      "server_2": 10500,
+                      "server_3": 9400,
+                  }
+                  for server_id in sorted(snapshot_servers):
+                      stats = snapshot_servers.get(server_id, {})
+                      if not isinstance(stats, dict):
+                          continue
+                      label = server_id.replace("_", " ").title()
+                      effective = int(stats.get("effective_runnable_rows", 0))
+                      quarantined = int(
+                          stats.get(
+                              "quarantined_authoritative_runnable_rows", 0
+                          )
+                      )
+                      authoritative = int(
+                          stats.get("authoritative_runnable_rows", 0)
+                      )
+                      handle.write(
+                          f"- {label} output-eligible rows: "
+                          f"**{effective:,}**\n"
+                      )
+                      handle.write(
+                          f"- {label} rows safely excluded by OPEN alerts: "
+                          f"**{quarantined:,}**\n"
+                      )
+                      handle.write(
+                          f"- {label} snapshot-integrity rows: "
+                          f"**{authoritative:,}** "
+                          f"(minimum **{minimums.get(server_id, 0):,}**)\n"
+                      )
           PY
 
       - name: Build XMLTV, app JSON, and personalization metadata
@@ -621,6 +662,10 @@ jobs:
           build_command=(
             python -u scripts/build_epg_streaming.py
               --mapping-file .build/channel-sync/effective_mapping.csv \
+              --mapping-authoritative-file \
+                .build/channel-sync/authoritative_mapping.csv \
+              --mapping-snapshot-manifest \
+                .build/channel-sync/mapping_snapshot_manifest.json \
               --all-source-file \
                 "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
               --all-source-file-origin-url "$EPG_ALL_SOURCE_URL" \
