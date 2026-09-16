@@ -28,7 +28,7 @@ import sys
 import time
 import unicodedata
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from itertools import chain
 from pathlib import Path
@@ -49,6 +49,12 @@ PIPELINE_BUILD_ID = "SKYTV-EPG-V1-2026-09-15"
 APP_SCHEMA_VERSION = 1
 METADATA_SCHEMA_VERSION = 1
 LOGO_POLICY = "SHEET_OR_EXACT_CONFIG_OR_EPGSHARE_SOURCE"
+MAPPING_SNAPSHOT_MANIFEST_SCHEMA = "skytv-private-mapping-snapshot-v1"
+MAX_MAPPING_SNAPSHOT_MANIFEST_BYTES = 256 * 1024
+EFFECTIVE_QUARANTINE_REASON = (
+    "Effective snapshot quarantine: OPEN Sync Alerts stream-ID reuse "
+    "review; the Google Sheet Mappings row was not changed."
+)
 DEFAULT_ALL_SOURCE_URL = (
     "https://epgshare01.online/epgshare01/"
     "epg_ripper_ALL_SOURCES1.xml.gz"
@@ -1013,7 +1019,12 @@ def normalize_requested_source(
     return normalized or inferred
 
 
-def parse_mapping_csv(content: bytes, selected_servers: set[str]) -> list[MappingRow]:
+def parse_mapping_csv(
+    content: bytes,
+    selected_servers: set[str],
+    *,
+    require_enabled_servers: bool = True,
+) -> list[MappingRow]:
     if len(content) > MAX_MAPPING_BYTES:
         raise BuildError(
             f"Mapping CSV exceeds the configured {MAX_MAPPING_BYTES:,}-byte limit."
@@ -1155,14 +1166,179 @@ def parse_mapping_csv(content: bytes, selected_servers: set[str]) -> list[Mappin
             )
         rows.append(row)
 
-    missing_servers = sorted(
-        selected_servers - {row.server_id for row in rows if row.enabled}
-    )
-    if missing_servers:
-        raise BuildError(
-            "No enabled mapping rows were found for: " + ", ".join(missing_servers)
+    if require_enabled_servers:
+        missing_servers = sorted(
+            selected_servers - {row.server_id for row in rows if row.enabled}
         )
+        if missing_servers:
+            raise BuildError(
+                "No enabled mapping rows were found for: " + ", ".join(missing_servers)
+            )
     return rows
+
+
+def validate_private_mapping_snapshots(
+    authoritative_content: bytes,
+    effective_content: bytes,
+    selected_servers: set[str],
+) -> dict[str, Any]:
+    """Prove that the build snapshot is only a quarantined Sheet snapshot.
+
+    The fixed row floors protect the final authoritative Google Sheet read.
+    The effective snapshot remains the only input used for publication.  Every
+    difference between the two must be the exact, fail-closed OPEN-alert
+    quarantine transform; rows may never be added, dropped, reordered, or
+    otherwise edited between these private hand-off files.
+    """
+    authoritative_rows = parse_mapping_csv(
+        authoritative_content,
+        selected_servers,
+        require_enabled_servers=False,
+    )
+    effective_rows = parse_mapping_csv(
+        effective_content,
+        selected_servers,
+        require_enabled_servers=False,
+    )
+    authoritative_keys = [
+        (row.server_id, row.stream_id) for row in authoritative_rows
+    ]
+    effective_keys = [(row.server_id, row.stream_id) for row in effective_rows]
+    if authoritative_keys != effective_keys:
+        raise BuildError(
+            "Private mapping snapshot pair has a row identity or order mismatch."
+        )
+
+    server_stats: dict[str, dict[str, int]] = {
+        server_id: {
+            "authoritative_rows": 0,
+            "authoritative_runnable_rows": 0,
+            "effective_rows": 0,
+            "effective_runnable_rows": 0,
+            "quarantined_rows": 0,
+            "quarantined_authoritative_runnable_rows": 0,
+            "quarantined_already_ineligible_rows": 0,
+        }
+        for server_id in sorted(selected_servers)
+    }
+    changed_keys: list[list[str]] = []
+    for authoritative, effective in zip(
+        authoritative_rows, effective_rows, strict=True
+    ):
+        stats = server_stats[authoritative.server_id]
+        stats["authoritative_rows"] += 1
+        stats["effective_rows"] += 1
+        if authoritative.runtime_eligible:
+            stats["authoritative_runnable_rows"] += 1
+        if effective.runtime_eligible:
+            stats["effective_runnable_rows"] += 1
+
+        if effective == authoritative:
+            continue
+        expected = replace(
+            authoritative,
+            enabled=False,
+            action="REVIEW",
+            reason=EFFECTIVE_QUARANTINE_REASON,
+            metadata=replace(authoritative.metadata, status="review"),
+        )
+        if effective != expected:
+            raise BuildError(
+                "Private mapping snapshot pair contains a change other than "
+                "the exact OPEN-alert quarantine transform at "
+                f"{authoritative.server_id} row {authoritative.row_number}."
+            )
+        if effective.runtime_eligible:
+            raise BuildError(
+                "An OPEN-alert quarantine row remained runtime eligible."
+            )
+        stats["quarantined_rows"] += 1
+        if authoritative.runtime_eligible:
+            stats["quarantined_authoritative_runnable_rows"] += 1
+        else:
+            stats["quarantined_already_ineligible_rows"] += 1
+        changed_keys.append([authoritative.server_id, authoritative.stream_id])
+
+    for server_id, stats in server_stats.items():
+        expected_effective = (
+            stats["authoritative_runnable_rows"]
+            - stats["quarantined_authoritative_runnable_rows"]
+        )
+        if stats["effective_runnable_rows"] != expected_effective:
+            raise BuildError(
+                "Private mapping snapshot quarantine accounting failed for "
+                f"{server_id}."
+            )
+
+    changed_keys.sort(key=lambda item: (item[0], stream_sort_key(item[1])))
+    return {
+        "authoritative_sha256": hashlib.sha256(authoritative_content).hexdigest(),
+        "effective_sha256": hashlib.sha256(effective_content).hexdigest(),
+        "quarantine_keys_sha256": hashlib.sha256(
+            json_compact(changed_keys).encode("utf-8")
+        ).hexdigest(),
+        "authoritative_rows": len(authoritative_rows),
+        "effective_rows": len(effective_rows),
+        "servers": server_stats,
+    }
+
+
+def expected_mapping_snapshot_manifest(
+    validation: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema": MAPPING_SNAPSHOT_MANIFEST_SCHEMA,
+        "authoritative_sha256": validation["authoritative_sha256"],
+        "effective_sha256": validation["effective_sha256"],
+        "quarantine_keys_sha256": validation["quarantine_keys_sha256"],
+        "authoritative_rows": validation["authoritative_rows"],
+        "effective_rows": validation["effective_rows"],
+        "servers": validation["servers"],
+    }
+
+
+def parse_and_validate_mapping_snapshot_manifest(
+    content: bytes,
+    validation: Mapping[str, Any],
+) -> dict[str, Any]:
+    if len(content) > MAX_MAPPING_SNAPSHOT_MANIFEST_BYTES:
+        raise BuildError("Private mapping snapshot manifest is unexpectedly large.")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BuildError("Private mapping snapshot manifest must be UTF-8 JSON.") from exc
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise BuildError(
+                    "Private mapping snapshot manifest contains duplicate JSON keys."
+                )
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(text, object_pairs_hook=unique_object)
+    except json.JSONDecodeError as exc:
+        raise BuildError("Private mapping snapshot manifest is not valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise BuildError("Private mapping snapshot manifest must be a JSON object.")
+    canonical_payload = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    canonical_expected = json.dumps(
+        expected_mapping_snapshot_manifest(validation),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if canonical_payload != canonical_expected:
+        raise BuildError(
+            "Private mapping snapshot manifest does not match the authoritative "
+            "and effective snapshot files."
+        )
+    return payload
 
 
 def canonical_mapping_sha256(rows: Sequence[MappingRow]) -> str:
@@ -1420,6 +1596,33 @@ def mapping_bytes_from_args(args: argparse.Namespace, work_dir: Path) -> bytes:
         allowed_host_suffixes=("docs.google.com", "googleusercontent.com"),
     )
     return path.read_bytes()
+
+
+def bounded_private_file_bytes(
+    path_value: Path,
+    *,
+    label: str,
+    maximum_bytes: int,
+) -> bytes:
+    source = Path(path_value)
+    if source.is_symlink():
+        raise BuildError(f"{label} must not be a symbolic link.")
+    path = source.resolve()
+    if not path.is_file():
+        raise BuildError(f"{label} does not exist: {path}")
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise BuildError(f"{label} could not be inspected.") from exc
+    if size > int(maximum_bytes):
+        raise BuildError(f"{label} exceeds its configured size limit.")
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise BuildError(f"{label} could not be read.") from exc
+    if len(content) > int(maximum_bytes):
+        raise BuildError(f"{label} exceeds its configured size limit.")
+    return content
 
 
 def create_database(path: Path) -> sqlite3.Connection:
@@ -3415,6 +3618,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     mapping = parser.add_mutually_exclusive_group()
     mapping.add_argument("--mapping-url", default="")
     mapping.add_argument("--mapping-file", type=Path)
+    parser.add_argument(
+        "--mapping-authoritative-file",
+        type=Path,
+        help=(
+            "Final authoritative private Sheet snapshot before OPEN-alert "
+            "quarantine. Required with row floors in production."
+        ),
+    )
+    parser.add_argument(
+        "--mapping-snapshot-manifest",
+        type=Path,
+        help="Hash-bound manifest for the authoritative/effective snapshot pair.",
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--all-source-url", default=DEFAULT_ALL_SOURCE_URL)
     source.add_argument("--all-source-file", type=Path)
@@ -3531,9 +3747,65 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Row-count gates were provided for unselected servers: "
             + ", ".join(unknown_minimums)
         )
-    server_row_counts = Counter(
-        row.server_id for row in rows if row.runtime_eligible
+    pair_arguments = (
+        args.mapping_authoritative_file is not None,
+        args.mapping_snapshot_manifest is not None,
     )
+    if any(pair_arguments) and not all(pair_arguments):
+        raise BuildError(
+            "Use --mapping-authoritative-file and --mapping-snapshot-manifest together."
+        )
+    if all(pair_arguments) and args.mapping_file is None:
+        raise BuildError(
+            "Private snapshot-pair validation requires --mapping-file."
+        )
+    if minimum_rows and not all(pair_arguments):
+        raise BuildError(
+            "--minimum-server-rows requires the authoritative private snapshot "
+            "and its snapshot manifest."
+        )
+
+    snapshot_validation: dict[str, Any] | None = None
+    if all(pair_arguments):
+        authoritative_content = bounded_private_file_bytes(
+            args.mapping_authoritative_file,
+            label="Authoritative private mapping snapshot",
+            maximum_bytes=MAX_MAPPING_BYTES,
+        )
+        snapshot_validation = validate_private_mapping_snapshots(
+            authoritative_content,
+            mapping_content,
+            selected_servers,
+        )
+        manifest_content = bounded_private_file_bytes(
+            args.mapping_snapshot_manifest,
+            label="Private mapping snapshot manifest",
+            maximum_bytes=MAX_MAPPING_SNAPSHOT_MANIFEST_BYTES,
+        )
+        parse_and_validate_mapping_snapshot_manifest(
+            manifest_content,
+            snapshot_validation,
+        )
+        for server_id in sorted(selected_servers):
+            stats = snapshot_validation["servers"][server_id]
+            print(
+                f"Snapshot guard {server_id}: "
+                f"{stats['effective_runnable_rows']:,} output-eligible; "
+                f"{stats['quarantined_authoritative_runnable_rows']:,} safely "
+                "excluded by OPEN alerts; "
+                f"{stats['authoritative_runnable_rows']:,} integrity rows.",
+                flush=True,
+            )
+        server_row_counts = Counter(
+            {
+                server_id: stats["authoritative_runnable_rows"]
+                for server_id, stats in snapshot_validation["servers"].items()
+            }
+        )
+    else:
+        server_row_counts = Counter(
+            row.server_id for row in rows if row.runtime_eligible
+        )
     below_minimum = [
         f"{server_id}={server_row_counts.get(server_id, 0):,} "
         f"(minimum {minimum:,})"
@@ -3542,7 +3814,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ]
     if below_minimum:
         raise BuildError(
-            "Private mapping snapshot failed the runnable-row truncation guard: "
+            "Private authoritative mapping snapshot failed the runnable-row "
+            "truncation guard: "
             + "; ".join(below_minimum)
         )
     mapping_sha = canonical_mapping_sha256(rows)

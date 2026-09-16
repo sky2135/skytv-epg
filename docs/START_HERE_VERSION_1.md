@@ -765,10 +765,14 @@ Your regular task is:
 3. If the error says the Sheet cannot be read, confirm the Google Sheets API is
    enabled, `GOOGLE_SHEET_ID` is correct, and the service-account email still
    has Editor access.
-4. If the error says **runnable-row truncation guard**, do not lower the stated
-   minimum. Open `Sync Alerts`, filter to that server's `OPEN` rows, and resolve
-   enough verified mappings using Section 13; alternatively provide the exact
-   error for review. Then rerun Workflow 2.
+4. If the error says **runnable-row truncation guard**, first confirm the current
+   corrected Version 1 files are installed. Do not lower the minimum and do not
+   resolve alerts merely to increase the count. The corrected guard recognizes
+   rows excluded solely by a verified `OPEN` alert as present for snapshot
+   integrity, while they remain disabled and absent from every published
+   output. If a corrected run still reports this error, copy the complete error
+   and run summary for review; it now indicates actual mapping loss or an
+   invalid private snapshot pair.
 5. If a recent Sheet edit caused the problem, open the Sheet and use
    **File** → **Version history** → **See version history** to restore the last
    working version.

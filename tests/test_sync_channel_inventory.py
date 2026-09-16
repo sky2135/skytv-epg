@@ -814,6 +814,245 @@ class MappingAndComparisonTests(unittest.TestCase):
 
 
 class ReportsAndSheetsTests(unittest.TestCase):
+    def test_private_snapshot_bundle_deduplicates_and_accounts_quarantine_keys(self) -> None:
+        runnable_quarantine = mapping_row(
+            "server_3", "7001", "Old Sports Name", category_name="Sports"
+        )
+        unaffected = mapping_row(
+            "server_3", "7002", "Unaffected News", category_name="News"
+        )
+        already_disabled = mapping_row(
+            "server_3", "7003", "Already Under Review", action="REVIEW"
+        )
+        already_disabled["enabled"] = "FALSE"
+        current_risk = {
+            "server_id": "server_3",
+            "stream_id": "7001",
+            "risk": "POSSIBLE_STREAM_ID_REUSE_REVIEW_REQUIRED",
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            effective_path = root / "effective.csv"
+            authoritative_path = root / "authoritative.csv"
+            manifest_path = root / "manifest.json"
+            validation = sync.write_private_mapping_snapshot_bundle(
+                effective_path=effective_path,
+                authoritative_path=authoritative_path,
+                manifest_path=manifest_path,
+                table=table([runnable_quarantine, unaffected, already_disabled]),
+                changed_rows=[current_risk],
+                persistent_quarantine_keys=[
+                    ("server_3", "7001"),
+                    ("server_3", "7001"),
+                    ("server_3", "7003"),
+                ],
+            )
+
+            stats = validation["servers"]["server_3"]
+            self.assertEqual(stats["authoritative_rows"], 3)
+            self.assertEqual(stats["authoritative_runnable_rows"], 2)
+            self.assertEqual(stats["effective_rows"], 3)
+            self.assertEqual(stats["effective_runnable_rows"], 1)
+            self.assertEqual(stats["quarantined_rows"], 2)
+            self.assertEqual(
+                stats["quarantined_authoritative_runnable_rows"], 1
+            )
+            self.assertEqual(stats["quarantined_already_ineligible_rows"], 1)
+
+            effective = streaming.parse_mapping_csv(
+                effective_path.read_bytes(), {"server_3"}
+            )
+            by_stream = {row.stream_id: row for row in effective}
+            self.assertFalse(by_stream["7001"].runtime_eligible)
+            self.assertTrue(by_stream["7002"].runtime_eligible)
+            self.assertFalse(by_stream["7003"].runtime_eligible)
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                manifest["authoritative_sha256"],
+                streaming.sha256_file(authoritative_path),
+            )
+            self.assertEqual(
+                manifest["effective_sha256"],
+                streaming.sha256_file(effective_path),
+            )
+            serialized_manifest = json.dumps(manifest, sort_keys=True)
+            self.assertNotIn("7001", serialized_manifest)
+            self.assertNotIn("7003", serialized_manifest)
+
+    def test_orphan_open_alert_blocks_every_snapshot_bundle_file(self) -> None:
+        current = table(
+            [mapping_row("server_3", "7051", "Present Mapping Channel")]
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            effective_path = root / "effective.csv"
+            authoritative_path = root / "authoritative.csv"
+            manifest_path = root / "manifest.json"
+            with self.assertRaisesRegex(
+                sync.SyncError,
+                "quarantine identities are missing.*server_3=1",
+            ):
+                sync.write_private_mapping_snapshot_bundle(
+                    effective_path=effective_path,
+                    authoritative_path=authoritative_path,
+                    manifest_path=manifest_path,
+                    table=current,
+                    persistent_quarantine_keys=[
+                        ("server_3", "orphan-not-in-mappings")
+                    ],
+                )
+            self.assertFalse(effective_path.exists())
+            self.assertFalse(authoritative_path.exists())
+            self.assertFalse(manifest_path.exists())
+
+    def test_reserved_snapshot_reason_cannot_be_copied_into_google_sheet(self) -> None:
+        for quarantined in (False, True):
+            with self.subTest(quarantined=quarantined):
+                copied = mapping_row(
+                    "server_3", "7061", "Copied System Reason Channel"
+                )
+                copied["reason"] = streaming.EFFECTIVE_QUARANTINE_REASON
+                persistent = [("server_3", "7061")] if quarantined else []
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    effective_path = root / "effective.csv"
+                    authoritative_path = root / "authoritative.csv"
+                    manifest_path = root / "manifest.json"
+                    with self.assertRaisesRegex(
+                        sync.SyncError, "reserved effective-snapshot"
+                    ):
+                        sync.write_private_mapping_snapshot_bundle(
+                            effective_path=effective_path,
+                            authoritative_path=authoritative_path,
+                            manifest_path=manifest_path,
+                            table=table([copied]),
+                            persistent_quarantine_keys=persistent,
+                        )
+                    self.assertFalse(effective_path.exists())
+                    self.assertFalse(authoritative_path.exists())
+                    self.assertFalse(manifest_path.exists())
+
+    def test_private_snapshot_manifest_binds_both_snapshot_files(self) -> None:
+        current = table(
+            [mapping_row("server_3", "7101", "Hash Bound Channel")]
+        )
+        risk = {
+            "server_id": "server_3",
+            "stream_id": "7101",
+            "risk": "POSSIBLE_STREAM_ID_REUSE_REVIEW_REQUIRED",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            effective_path = root / "effective.csv"
+            authoritative_path = root / "authoritative.csv"
+            manifest_path = root / "manifest.json"
+            sync.write_private_mapping_snapshot_bundle(
+                effective_path=effective_path,
+                authoritative_path=authoritative_path,
+                manifest_path=manifest_path,
+                table=current,
+                changed_rows=[risk],
+            )
+            authoritative = authoritative_path.read_bytes()
+            effective = effective_path.read_bytes()
+            manifest = manifest_path.read_bytes()
+
+            for changed_authoritative, changed_effective in (
+                (authoritative + b"\n", effective),
+                (authoritative, effective + b"\n"),
+            ):
+                with self.subTest(
+                    changed=(
+                        "authoritative"
+                        if changed_authoritative != authoritative
+                        else "effective"
+                    )
+                ):
+                    validation = streaming.validate_private_mapping_snapshots(
+                        changed_authoritative,
+                        changed_effective,
+                        {"server_3"},
+                    )
+                    with self.assertRaisesRegex(
+                        streaming.BuildError, "manifest does not match"
+                    ):
+                        streaming.parse_and_validate_mapping_snapshot_manifest(
+                            manifest, validation
+                        )
+
+    def test_sync_summary_reports_only_per_server_quarantine_accounting(self) -> None:
+        current = table(
+            [
+                mapping_row(
+                    "server_3",
+                    "private-stream-7201",
+                    "Old Private Sports Name",
+                    category_name="Sports",
+                ),
+                mapping_row(
+                    "server_3",
+                    "private-stream-7202",
+                    "Stable Private News Name",
+                    category_name="News",
+                ),
+            ]
+        )
+        provider = inventory(
+            "server_3",
+            [
+                {
+                    "stream_id": "private-stream-7201",
+                    "name": "Completely Different Kids Name",
+                    "category_name": "Children",
+                },
+                {
+                    "stream_id": "private-stream-7202",
+                    "name": "Stable Private News Name",
+                    "category_name": "News",
+                },
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reports = root / "reports"
+            effective_path = root / "private" / "effective.csv"
+            summary = sync.run_sync(
+                table=current,
+                inventories=[provider],
+                output_dir=reports,
+                generated_at="2026-09-16T00:00:00Z",
+                snapshot_out=effective_path,
+            )
+
+            stats = summary["snapshot_integrity_servers"]["server_3"]
+            self.assertEqual(stats["authoritative_runnable_rows"], 2)
+            self.assertEqual(stats["effective_runnable_rows"], 1)
+            self.assertEqual(
+                stats["quarantined_authoritative_runnable_rows"], 1
+            )
+            self.assertEqual(stats["quarantined_already_ineligible_rows"], 0)
+
+            summary_payload = (reports / "summary.json").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("private-stream-7201", summary_payload)
+            self.assertNotIn("Old Private Sports Name", summary_payload)
+            self.assertNotIn("Completely Different Kids Name", summary_payload)
+            self.assertIn("snapshot_integrity_servers", summary_payload)
+            self.assertNotIn("snapshot_authoritative_sha256", summary_payload)
+            self.assertNotIn("snapshot_effective_sha256", summary_payload)
+            self.assertNotIn("snapshot_quarantine_keys_sha256", summary_payload)
+
+            effective = streaming.parse_mapping_csv(
+                effective_path.read_bytes(), {"server_3"}
+            )
+            by_stream = {row.stream_id: row for row in effective}
+            self.assertFalse(by_stream["private-stream-7201"].runtime_eligible)
+            self.assertTrue(by_stream["private-stream-7202"].runtime_eligible)
+
     def test_reflected_provider_secret_blocks_all_sheet_and_report_writes(self) -> None:
         current = table([mapping_row("server_1", "1", "One")])
         reflected = inventory(
@@ -3048,6 +3287,22 @@ class ReportsAndSheetsTests(unittest.TestCase):
         self.assertNotIn("path: .build/channel-sync\n", upload_section)
         self.assertNotIn("path: .build/channel-sync/\n", upload_section)
         self.assertIn("retention-days: 7", upload_section)
+
+    def test_workflow_two_requires_the_hash_bound_snapshot_bundle(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "main.yml"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "--authoritative-snapshot-out",
+            "--snapshot-manifest-out",
+            "--mapping-authoritative-file",
+            "--mapping-snapshot-manifest",
+            "test -s .build/channel-sync/authoritative_mapping.csv",
+            "test -s .build/channel-sync/mapping_snapshot_manifest.json",
+            "--minimum-server-rows server_3=9400",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, workflow)
 
 
 if __name__ == "__main__":

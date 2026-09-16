@@ -3,14 +3,56 @@
 **Local release status: PASS**  
 Validated through: 2026-09-16 UTC
 
-The catalog-rollover repair has passed a production-sized one-pass validation
-against the currently published EPGShare XML and text catalog. The integrity
-manifest has been resealed for the repaired files, and the complete repository
-suite now passes.
+The catalog-rollover and Workflow 2 snapshot-guard repairs have passed focused
+adversarial validation. The integrity manifest has been resealed for the
+repaired files, and the complete repository suite now passes.
 
 The owner must still run the private Google Sheet/provider checks in
 [`docs/REPAIR_CURRENT_SETUP_VERSION_1.md`](docs/REPAIR_CURRENT_SETUP_VERSION_1.md).
 Those are the only checks requiring the owner's private accounts.
+
+## Workflow 2 quarantine-aware snapshot guard
+
+The reported Workflow 2 failure was:
+
+```text
+ERROR: Private mapping snapshot failed the runnable-row truncation guard:
+server_3=8,763 (minimum 9,400)
+```
+
+This was a guard-layer conflict, not Sheet truncation and not resource
+exhaustion. Server 3 had 9,943 authoritative runnable rows. The private
+`Sync Alerts` state correctly excluded 1,180 of those rows, leaving 8,763
+output-eligible rows. The old code incorrectly applied the 9,400
+snapshot-integrity floor after that deliberate quarantine.
+
+The corrected Version 1 design keeps both protections:
+
+- fixed floors remain **4,000 / 10,500 / 9,400** and are applied to the final
+  authoritative pre-quarantine runnable snapshot;
+- the effective snapshot remains the only mapping used for publication;
+- every `OPEN` identity stays disabled and absent from XML, JSON, metadata, and
+  personalization;
+- authoritative and effective snapshots must have the same exact ordered
+  `(server_id, stream_id)` identities;
+- the only permitted row delta is the exact quarantine transformation;
+- already-disabled or `REVIEW` rows provide no floor credit;
+- duplicate alert keys count once and orphan alert identities fail closed; and
+- a private manifest SHA-256-binds both snapshots and the deduplicated
+  quarantine census before the EPG source is processed.
+
+The production-shaped regression fixture proves the intended arithmetic:
+
+| Server 3 measurement | Rows |
+|---|---:|
+| Authoritative runnable | 9,943 |
+| Safely excluded by OPEN alerts | 1,180 |
+| Effective/output-eligible | 8,763 |
+| Fixed integrity minimum | 9,400 |
+
+The attached resource report recorded about 380 MiB peak RSS, zero swap, and a
+14.62-second controlled exit, confirming that RAM, disk, and timeout limits did
+not cause this event.
 
 ## Catalog-rollover repair
 
@@ -47,7 +89,16 @@ verifiable non-atomic source rollout to complete without silently approving the
 
 ## Automated code and workflow checks
 
-- Full repository suite: **265 tests passed, 0 failed**.
+- Full repository suite: **277 tests passed, 0 failed**.
+- Snapshot/builder/synchronizer suite: **126 tests passed, 0 failed**.
+- Full 25,170-row Version 1 seed snapshot-bundle exercise: **passed**, including
+  the exact Server 3 census of 9,943 authoritative, 1,180 quarantined, and 8,763
+  effective runnable rows.
+- New quarantine-guard regressions cover the production 9,943 → 8,763 case,
+  genuine authoritative truncation, dropped/reordered identities, hidden name
+  or EPG edits, stale hashes, duplicate and orphan alerts, pre-disabled rows,
+  reserved-marker spoofing, per-server accounting, and last-good publication
+  preservation.
 - Exact manual-workflow suite: **186 tests passed, 0 failed**.
 - Frozen matcher regression: **222 matching and safety cases passed**.
 - Independent adversarial catalog/auto-match/sync audit: **136 focused tests
@@ -109,11 +160,18 @@ rather than a provider-login or Google Sheet problem. If the source pair is
 unchanged when the owner runs the repaired workflow, the expected summary is
 `bounded-drift`, 27,111 shared IDs, 3 XML-only IDs, and 17 TXT-only IDs.
 
-## The two reported failures are separate
+## The reported failures are separate
 
-### Current exit-code-2 failure
+### Latest Workflow 2 runnable-floor failure
 
-The current error occurs during public EPGShare catalog validation. It is not
+The latest error happened after the private Sheet refresh and before EPG source
+processing. It is the quarantine/floor collision documented at the start of
+this report. It did not undo the 43 newly stored alerts, modify the Sheet, or
+replace the last successful public output.
+
+### Prior XML/text exit-code-2 failure
+
+That earlier error occurred during public EPGShare catalog validation. It was not
 caused by Server 3 credentials and happens before Google Sheet mapping writes.
 
 - `SERVER_3_PASSWORD: ***` is GitHub Actions masking a configured secret; it
@@ -121,7 +179,7 @@ caused by Server 3 credentials and happens before Google Sheet mapping writes.
 - `Warning: Provider credentials may be sent over unencrypted HTTP.` is a
   transport-security warning because the provider URL uses HTTP. It should be
   addressed by switching to the provider's HTTPS endpoint if one exists, but it
-  did not cause this exact-ID mismatch.
+  did not cause that exact-ID mismatch.
 - `Process completed with exit code 2` is the workflow's controlled stop after
   the old exact-catalog check rejected the 20-ID upstream rollover.
 
@@ -134,8 +192,9 @@ zero appended mapping rows. The safety boundary correctly blocked both the
 mapping append and build snapshot because Google did not authoritatively confirm
 the `Sync Alerts` append.
 
-That earlier event was a Google Sheet durable-write verification failure. It is
-not evidence for, and did not cause, today's public XML/TXT catalog mismatch.
+That initial event was a Google Sheet durable-write verification failure. It is
+not evidence for, and did not cause, the later public XML/TXT catalog mismatch
+or the latest snapshot-floor collision.
 The repaired Sheet writer uses a logical RAW row append with `INSERT_ROWS`,
 checks exact committed ranges and cell counts, expands an imported native table
 only after values exist, and authoritatively rereads the rows. A real write to
@@ -159,21 +218,22 @@ the owner's private Sheet remains part of the documented OFF-then-ON test.
 
 | File | SHA-256 |
 |---|---|
-| `scripts/build_epg_streaming.py` | `b85556ddf99466bb01fa7baa93be2a3bebb694aba856bfc97b82673a9f005bba` |
+| `scripts/build_epg_streaming.py` | `7b7b8becd084bd2bbff0e534ca3c116acbf5d59143373c569c4aa517732f230b` |
 | `src/skytv_epg_auto_match_v1.py` | `e2f175e3fd5be2cbe814305ef8eb5ae05dddce054e3ca0e46b1aab44988a049c` |
 | `scripts/auto_match_inventory.py` | `647f7bab7d11e9021639f67038a9d2faba54356c85da1b5513ec2cbcd882a66b` |
 | `scripts/epg_catalog_stream.py` | `fb04f5f9097bffe96ba4f3a421b4d53f1ce6110dc80e390ee45a91f2d99a9821` |
 | `scripts/epg_selection_spool.py` | `c0ad4e485972b206515f2205e37cf056593cb1105035a6031ef95b5371cd1336` |
-| `scripts/sync_channel_inventory.py` | `72646cf46067a8a580c513e43dee6e673f00f8682629fbe181ea3cbc81a8785b` |
-| `.github/workflows/main.yml` | `eea26e0dd9959e82c85d87d3bcca4519f8f3123f68c4b6ca9f75836b12d4f122` |
+| `scripts/sync_channel_inventory.py` | `df1a544c3f86aeaacfd88e2105769ed2b4fbb476b14c26fb0b844dbe0fb20bff` |
+| `.github/workflows/main.yml` | `23770174a7690423b9c835c789ebb6ca43c701bdf448b65a1970132e5c0e4a11` |
 | `.github/workflows/channel_inventory_sync.yml` | `0f4a477b18012436691bf08ffb884eaa818fc14bbaa3ac871b55bc37f97a4eb4` |
 | `requirements-sync.txt` | `cb80ac4377fa3656ea135c65273fdc1b6ba7f5ce198f1f14ccb13de0e3ed593f` |
-| `MATCHER_INTEGRITY.json` | `96918aa8d1550ab2497bb23ae73120c5fcd728717faa06aaa651805b7d1f0fb4` |
+| `MATCHER_INTEGRITY.json` | `f84705e958abdd224d4fa08239d5598aedb8fc65bf247281b9ca551256adbc0b` |
 
 ## External validation still required
 
 This local repair did not use the owner's provider credentials, Google service
-account, private Sheet, or GitHub Pages environment. Keep the current Sheet and
-repository, install the repaired overlay, confirm the exact service account is
-an Editor, run the channel workflow with writes off, and then run it with writes
-on. Do not run Workflow 2 until the write-enabled run is green.
+account, private Sheet, or GitHub Pages environment. Keep the current Sheet,
+repository, `main` branch, and Pages setup. Install the affected replacement
+files and rerun Workflow 2. The 43 alerts were already durably stored, so there
+is no need to rerun Workflow 1 solely for this error and no reason to bulk-mark
+the approximately 1,570 alerts `RESOLVED`.

@@ -51,6 +51,33 @@ def _mapping_bytes(rows: list[dict[str, str]]) -> bytes:
     return output.getvalue().encode("utf-8")
 
 
+def _snapshot_mapping_bytes(rows: list[dict[str, str]]) -> bytes:
+    """Serialize the exact private-Sheet schema used by snapshot attestation."""
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        output,
+        fieldnames=runner.SHEET_COLUMNS,
+        extrasaction="ignore",
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+    return output.getvalue().encode("utf-8")
+
+
+def _quarantined_snapshot_row(row: dict[str, str]) -> dict[str, str]:
+    quarantined = dict(row)
+    quarantined.update(
+        {
+            "enabled": "FALSE",
+            "action": "REVIEW",
+            "metadata_status": "review",
+            "reason": runner.EFFECTIVE_QUARANTINE_REASON,
+        }
+    )
+    return quarantined
+
+
 def _mapping_row(
     *,
     server_id: str,
@@ -93,6 +120,195 @@ def _write_deterministic_gzip(path: Path, content: str) -> None:
 def _read_gzip_json(path: Path) -> dict[str, object]:
     with gzip.open(path, "rt", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+class PrivateMappingSnapshotGuardTests(unittest.TestCase):
+    def test_valid_open_alert_quarantine_counts_authoritative_rows_for_floor(self) -> None:
+        safe = _mapping_row(
+            server_id="server_3",
+            stream_id="1",
+            channel_name="Safe Channel",
+            category_name="General",
+            epg_id="Safe.test",
+        )
+        suspect = _mapping_row(
+            server_id="server_3",
+            stream_id="2",
+            channel_name="Suspect Channel",
+            category_name="General",
+            epg_id="Suspect.test",
+        )
+        authoritative = _snapshot_mapping_bytes([safe, suspect])
+        effective = _snapshot_mapping_bytes(
+            [safe, _quarantined_snapshot_row(suspect)]
+        )
+        validation = runner.validate_private_mapping_snapshots(
+            authoritative, effective, {"server_3"}
+        )
+        stats = validation["servers"]["server_3"]
+        self.assertEqual(stats["authoritative_runnable_rows"], 2)
+        self.assertEqual(stats["effective_runnable_rows"], 1)
+        self.assertEqual(stats["quarantined_authoritative_runnable_rows"], 1)
+
+        # Exercise the production floor path. Reaching database creation proves
+        # the two-row floor used the attested authoritative count, while the
+        # effective snapshot still exposes only one row to publication.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            authoritative_path = root / "authoritative.csv"
+            effective_path = root / "effective.csv"
+            manifest_path = root / "manifest.json"
+            authoritative_path.write_bytes(authoritative)
+            effective_path.write_bytes(effective)
+            manifest_path.write_text(
+                json.dumps(
+                    runner.expected_mapping_snapshot_manifest(validation),
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                runner,
+                "create_database",
+                side_effect=RuntimeError("row floor passed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "row floor passed"):
+                    runner.main(
+                        [
+                            "--mapping-file",
+                            str(effective_path),
+                            "--mapping-authoritative-file",
+                            str(authoritative_path),
+                            "--mapping-snapshot-manifest",
+                            str(manifest_path),
+                            "--public-dir",
+                            str(root / "public"),
+                            "--work-dir",
+                            str(root / "work"),
+                            "--servers",
+                            "server_3",
+                            "--minimum-server-rows",
+                            "server_3=2",
+                        ]
+                    )
+
+    def test_snapshot_pair_rejects_a_dropped_row(self) -> None:
+        first = _mapping_row(
+            server_id="server_3",
+            stream_id="1",
+            channel_name="One",
+            category_name="General",
+            epg_id="One.test",
+        )
+        second = _mapping_row(
+            server_id="server_3",
+            stream_id="2",
+            channel_name="Two",
+            category_name="General",
+            epg_id="Two.test",
+        )
+        with self.assertRaisesRegex(
+            runner.BuildError, "row identity or order mismatch"
+        ):
+            runner.validate_private_mapping_snapshots(
+                _snapshot_mapping_bytes([first, second]),
+                _snapshot_mapping_bytes([first]),
+                {"server_3"},
+            )
+
+    def test_snapshot_pair_rejects_identity_or_epg_edits_hidden_as_quarantine(self) -> None:
+        authoritative_row = _mapping_row(
+            server_id="server_3",
+            stream_id="7",
+            channel_name="Original Channel",
+            category_name="General",
+            epg_id="Original.test",
+        )
+        for field, value in (
+            ("channel_name", "Replacement Channel"),
+            ("epg_id", "Replacement.test"),
+        ):
+            with self.subTest(field=field):
+                effective_row = _quarantined_snapshot_row(authoritative_row)
+                effective_row[field] = value
+                with self.assertRaisesRegex(
+                    runner.BuildError, "exact OPEN-alert quarantine transform"
+                ):
+                    runner.validate_private_mapping_snapshots(
+                        _snapshot_mapping_bytes([authoritative_row]),
+                        _snapshot_mapping_bytes([effective_row]),
+                        {"server_3"},
+                    )
+
+    def test_quarantining_an_already_disabled_row_adds_no_floor_credit(self) -> None:
+        disabled = _mapping_row(
+            server_id="server_3",
+            stream_id="8",
+            channel_name="Already Disabled",
+            category_name="General",
+            epg_id="Disabled.test",
+        )
+        disabled["enabled"] = "FALSE"
+        validation = runner.validate_private_mapping_snapshots(
+            _snapshot_mapping_bytes([disabled]),
+            _snapshot_mapping_bytes([_quarantined_snapshot_row(disabled)]),
+            {"server_3"},
+        )
+        stats = validation["servers"]["server_3"]
+        self.assertEqual(stats["authoritative_runnable_rows"], 0)
+        self.assertEqual(stats["effective_runnable_rows"], 0)
+        self.assertEqual(stats["quarantined_authoritative_runnable_rows"], 0)
+        self.assertEqual(stats["quarantined_already_ineligible_rows"], 1)
+
+    def test_production_shaped_quarantine_keeps_integrity_floor_above_9400(self) -> None:
+        authoritative_rows = [
+            _mapping_row(
+                server_id="server_3",
+                stream_id=str(index),
+                channel_name=f"Channel {index}",
+                category_name="General",
+                epg_id="Shared.fixture",
+            )
+            for index in range(9_943)
+        ]
+        effective_rows = [
+            (
+                _quarantined_snapshot_row(row)
+                if index < 1_180
+                else row
+            )
+            for index, row in enumerate(authoritative_rows)
+        ]
+        validation = runner.validate_private_mapping_snapshots(
+            _snapshot_mapping_bytes(authoritative_rows),
+            _snapshot_mapping_bytes(effective_rows),
+            {"server_3"},
+        )
+        stats = validation["servers"]["server_3"]
+        self.assertEqual(stats["authoritative_runnable_rows"], 9_943)
+        self.assertEqual(stats["effective_runnable_rows"], 8_763)
+        self.assertEqual(stats["quarantined_authoritative_runnable_rows"], 1_180)
+        self.assertGreaterEqual(stats["authoritative_runnable_rows"], 9_400)
+        self.assertLess(stats["effective_runnable_rows"], 9_400)
+
+    def test_true_authoritative_truncation_remains_below_9400(self) -> None:
+        authoritative_rows = [
+            _mapping_row(
+                server_id="server_3",
+                stream_id=str(index),
+                channel_name=f"Channel {index}",
+                category_name="General",
+                epg_id="Shared.fixture",
+            )
+            for index in range(9_399)
+        ]
+        content = _snapshot_mapping_bytes(authoritative_rows)
+        validation = runner.validate_private_mapping_snapshots(
+            content, content, {"server_3"}
+        )
+        stats = validation["servers"]["server_3"]
+        self.assertEqual(stats["authoritative_runnable_rows"], 9_399)
+        self.assertLess(stats["authoritative_runnable_rows"], 9_400)
 
 
 class MappingContractTests(unittest.TestCase):
@@ -1091,11 +1307,22 @@ class MappingContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             mapping = root / "mapping.csv"
+            authoritative = root / "authoritative.csv"
+            manifest = root / "manifest.json"
             public = root / "public"
             public.mkdir()
             sentinel = public / "last-good.txt"
             sentinel.write_text("keep", encoding="utf-8")
-            mapping.write_bytes(_mapping_bytes([approved, review]))
+            mapping_content = _mapping_bytes([approved, review])
+            mapping.write_bytes(mapping_content)
+            authoritative.write_bytes(mapping_content)
+            validation = runner.validate_private_mapping_snapshots(
+                mapping_content, mapping_content, {"server_1"}
+            )
+            manifest.write_text(
+                json.dumps(runner.expected_mapping_snapshot_manifest(validation)),
+                encoding="utf-8",
+            )
 
             with self.assertRaisesRegex(
                 runner.BuildError, "runnable-row truncation guard"
@@ -1104,6 +1331,10 @@ class MappingContractTests(unittest.TestCase):
                     [
                         "--mapping-file",
                         str(mapping),
+                        "--mapping-authoritative-file",
+                        str(authoritative),
+                        "--mapping-snapshot-manifest",
+                        str(manifest),
                         "--all-source-file",
                         str(root / "must-not-be-read.xml.gz"),
                         "--public-dir",

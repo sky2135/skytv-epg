@@ -124,20 +124,28 @@ available, but do not rotate a password merely to fix this catalog error.
 10. In the run summary, check **Rows added**, **Alerts added**, **Open alerts**,
     automatically matched channels, channels left for review, **EPG catalog
     alignment mode**, and the shared/XML-only/text-only EPG ID counts.
-11. If the providers have not changed since the attached report, expect about
-   24,588 mapping rows added and 1,499 alerts added/open. The exact live counts
-   may change. Automatic matches plus review rows must equal the new-channel
-   count.
-12. Confirm the `Mappings` and `Sync Alerts` row counts increased. A successful
-   rerun after rows were already added can correctly report zero newly added.
+11. Live counts change whenever the providers change. Automatic matches plus
+   review rows must equal the new-channel count. A retry after rows and alerts
+   were already saved can correctly report zero newly added rows and alerts.
+12. Confirm the `Mappings` and `Sync Alerts` row counts agree with the run
+   summary. They increase on a first successful write; a retry after the rows
+   were already saved can correctly remain unchanged.
 13. Run **2 - Build and publish EPG** on `main`.
 
 Workflow 2 keeps every unresolved `OPEN` identity quarantined and excluded. You
 normally do not need to resolve every alert before building unaffected channels.
-If the build reports a **runnable-row truncation guard**, the quarantine reduced
-one server below its safety floor. Do not lower that floor. Resolve enough of
-that server's alerts using the Sheet instructions, or provide the exact error
-for review, and then run Workflow 2 again.
+The corrected Workflow 2 checks fixed row floors against the authoritative
+pre-quarantine runnable snapshot, then proves that the effective snapshot differs
+only by exact `OPEN`-alert quarantine fields. Do not lower a floor and do not
+resolve alerts merely to increase its count. If the corrected build still
+reports a **runnable-row truncation guard**, provide the complete new error and
+summary for review because it now indicates actual mapping loss or corruption.
+
+For the September 16 repair incident, the 43 new alerts were durably saved
+before the old build check stopped. Leave the 1,570 `OPEN` alerts unchanged
+unless each one has been checked individually. After installing the corrected
+files, rerun Workflow 2. Zero newly added alerts on that retry is normal; every
+still-OPEN identity remains excluded while the unaffected rows can build.
 
 The 742 historical rows not seen at the providers are retained rather than
 deleted. That is why, if the source is unchanged, the Sheet will have 49,758

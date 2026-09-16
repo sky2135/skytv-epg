@@ -1944,18 +1944,20 @@ def write_mapping_snapshot(
     persistent_quarantine_keys: Iterable[tuple[str, str]] = (),
 ) -> None:
     """Write the build snapshot, quarantining severe ID reuse without editing Sheet."""
-    quarantine_keys = {
-        (str(row.get("server_id", "")), str(row.get("stream_id", "")))
-        for row in changed_rows
-        if str(row.get("risk", "")).startswith("POSSIBLE_")
-    }
-    quarantine_keys.update(
-        (streaming.normalize_server_id(server_id), streaming.clean_identifier(stream_id, 120))
-        for server_id, stream_id in persistent_quarantine_keys
+    quarantine_keys = snapshot_quarantine_keys(
+        changed_rows, persistent_quarantine_keys
     )
     effective_rows: list[dict[str, str]] = []
     for original in table.rows:
         row = dict(original)
+        if (
+            streaming.clean_text(row.get("reason", ""), 500)
+            == streaming.EFFECTIVE_QUARANTINE_REASON
+        ):
+            raise SyncError(
+                "A Google Sheet row contains the reserved effective-snapshot "
+                "quarantine reason. Remove that copied system-only reason and retry."
+            )
         key = (
             streaming.normalize_server_id(row.get("server_id", "")),
             streaming.clean_identifier(row.get("stream_id", ""), 120),
@@ -1969,12 +1971,153 @@ def write_mapping_snapshot(
             row["enabled"] = "FALSE"
             row["action"] = "REVIEW"
             row["metadata_status"] = "review"
-            row["reason"] = (
-                "Effective snapshot quarantine: OPEN Sync Alerts stream-ID reuse "
-                "review; the Google Sheet Mappings row was not changed."
-            )
+            row["reason"] = streaming.EFFECTIVE_QUARANTINE_REASON
         effective_rows.append(row)
     write_csv_report(path, effective_rows, streaming.SHEET_COLUMNS)
+
+
+def snapshot_quarantine_keys(
+    changed_rows: Sequence[Mapping[str, str]],
+    persistent_quarantine_keys: Iterable[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    keys = {
+        (
+            streaming.normalize_server_id(row.get("server_id", "")),
+            streaming.clean_identifier(row.get("stream_id", ""), 120),
+        )
+        for row in changed_rows
+        if str(row.get("risk", "")).startswith("POSSIBLE_")
+    }
+    keys.update(
+        (
+            streaming.normalize_server_id(server_id),
+            streaming.clean_identifier(stream_id, 120),
+        )
+        for server_id, stream_id in persistent_quarantine_keys
+    )
+    return keys
+
+
+def write_private_mapping_snapshot_bundle(
+    *,
+    effective_path: Path,
+    authoritative_path: Path,
+    manifest_path: Path,
+    table: MappingTable,
+    changed_rows: Sequence[Mapping[str, str]] = (),
+    persistent_quarantine_keys: Iterable[tuple[str, str]] = (),
+) -> dict[str, Any]:
+    """Atomically create and cross-check the private pre/post quarantine hand-off."""
+    raw_paths = (
+        Path(effective_path),
+        Path(authoritative_path),
+        Path(manifest_path),
+    )
+    try:
+        for path in raw_paths:
+            streaming.reject_symlink_components(
+                path, label="private snapshot bundle path"
+            )
+    except streaming.BuildError as exc:
+        raise SyncError(str(exc)) from exc
+    effective_path, authoritative_path, manifest_path = (
+        path.resolve() for path in raw_paths
+    )
+    if len({effective_path, authoritative_path, manifest_path}) != 3:
+        raise SyncError(
+            "Authoritative, effective, and manifest snapshot paths must be different."
+        )
+    if any(
+        streaming.clean_text(row.get("reason", ""), 500)
+        == streaming.EFFECTIVE_QUARANTINE_REASON
+        for row in table.rows
+    ):
+        raise SyncError(
+            "A Google Sheet row contains the reserved effective-snapshot "
+            "quarantine reason. Remove that copied system-only reason and retry."
+        )
+
+    persistent_keys = tuple(persistent_quarantine_keys)
+    required_keys = snapshot_quarantine_keys(changed_rows, persistent_keys)
+    orphan_keys = required_keys - table.keys
+    if orphan_keys:
+        counts = Counter(server_id for server_id, _stream_id in orphan_keys)
+        detail = "; ".join(
+            f"{server_id}={count:,}" for server_id, count in sorted(counts.items())
+        )
+        raise SyncError(
+            "OPEN-alert quarantine identities are missing from the authoritative "
+            f"Mappings snapshot ({detail}). Restore or resolve them individually."
+        )
+    applied_keys = required_keys
+    write_csv_report(authoritative_path, table.rows, streaming.SHEET_COLUMNS)
+    write_mapping_snapshot(
+        effective_path,
+        table,
+        changed_rows=changed_rows,
+        persistent_quarantine_keys=persistent_keys,
+    )
+    try:
+        authoritative_content = authoritative_path.read_bytes()
+        effective_content = effective_path.read_bytes()
+    except OSError as exc:
+        raise SyncError("The private mapping snapshot bundle could not be read.") from exc
+    selected_servers = {
+        streaming.normalize_server_id(row.get("server_id", ""))
+        for row in table.rows
+    }
+    if not selected_servers:
+        raise SyncError("The authoritative private mapping snapshot is empty.")
+    try:
+        validation = streaming.validate_private_mapping_snapshots(
+            authoritative_content,
+            effective_content,
+            selected_servers,
+        )
+    except streaming.BuildError as exc:
+        raise SyncError(str(exc)) from exc
+
+    ordered_applied_keys = sorted(
+        ([server_id, stream_id] for server_id, stream_id in applied_keys),
+        key=lambda item: (item[0], streaming.stream_sort_key(item[1])),
+    )
+    applied_digest = hashlib.sha256(
+        streaming.json_compact(ordered_applied_keys).encode("utf-8")
+    ).hexdigest()
+    if applied_digest != validation["quarantine_keys_sha256"]:
+        raise SyncError(
+            "The effective mapping snapshot did not quarantine exactly the "
+            "required current-risk and OPEN-alert identities."
+        )
+    expected_counts = Counter(server_id for server_id, _stream_id in applied_keys)
+    for server_id, stats in validation["servers"].items():
+        if stats["quarantined_rows"] != expected_counts.get(server_id, 0):
+            raise SyncError(
+                "Private mapping quarantine count mismatch for " + server_id + "."
+            )
+
+    manifest = streaming.expected_mapping_snapshot_manifest(validation)
+    manifest_content = (
+        json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    atomic_write_bytes(manifest_path, manifest_content)
+    try:
+        manifest_check = manifest_path.read_bytes()
+        streaming.parse_and_validate_mapping_snapshot_manifest(
+            manifest_check, validation
+        )
+    except (OSError, streaming.BuildError) as exc:
+        raise SyncError(str(exc)) from exc
+    return validation
+
+
+def add_snapshot_validation_to_summary(
+    summary: dict[str, Any], validation: Mapping[str, Any]
+) -> None:
+    # The aggregate summary is retained as an artifact in the public
+    # repository's manual workflow. Keep exact snapshot/key fingerprints only
+    # in the ephemeral private manifest on the runner.
+    summary["snapshot_integrity_servers"] = validation["servers"]
 
 
 def decode_service_account_json(value: str) -> dict[str, Any]:
@@ -3143,6 +3286,8 @@ def run_sync(
     output_dir: Path,
     generated_at: str,
     snapshot_out: Path,
+    authoritative_snapshot_out: Path | None = None,
+    snapshot_manifest_out: Path | None = None,
     write_to_sheet: bool = False,
     google_session: Any = None,
     sheet_id: str = "",
@@ -3154,6 +3299,17 @@ def run_sync(
     all_source_catalog_file: Path | None = None,
     epgshare_spool_out: Path | None = None,
 ) -> dict[str, Any]:
+    effective_snapshot_path = Path(snapshot_out)
+    authoritative_snapshot_path = (
+        Path(authoritative_snapshot_out)
+        if authoritative_snapshot_out is not None
+        else effective_snapshot_path.with_name("authoritative_mapping.csv")
+    )
+    snapshot_manifest_path = (
+        Path(snapshot_manifest_out)
+        if snapshot_manifest_out is not None
+        else effective_snapshot_path.with_name("mapping_snapshot_manifest.json")
+    )
     authoritative_table = table
     existing_alerts: list[dict[str, str]] = []
     if write_to_sheet and google_session is None:
@@ -3290,11 +3446,22 @@ def run_sync(
     )
     write_mapping_snapshot(output_dir / "mapping_before_append.csv", authoritative_table)
     if not write_to_sheet:
-        write_mapping_snapshot(
-            Path(snapshot_out),
-            authoritative_table,
+        snapshot_validation = write_private_mapping_snapshot_bundle(
+            effective_path=effective_snapshot_path,
+            authoritative_path=authoritative_snapshot_path,
+            manifest_path=snapshot_manifest_path,
+            table=authoritative_table,
             changed_rows=changed_rows,
             persistent_quarantine_keys=persistent_quarantine_keys,
+        )
+        add_snapshot_validation_to_summary(summary, snapshot_validation)
+        write_reports(
+            output_dir,
+            inventories=inventories,
+            new_rows=new_rows,
+            changed_rows=changed_rows,
+            missing_rows=missing_rows,
+            summary=summary,
         )
     if overlap_issues:
         raise SyncError(" ".join(overlap_issues))
@@ -3370,12 +3537,15 @@ def run_sync(
                     ),
                     maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
                 )
-                write_mapping_snapshot(
-                    Path(snapshot_out),
-                    final_table,
+                snapshot_validation = write_private_mapping_snapshot_bundle(
+                    effective_path=effective_snapshot_path,
+                    authoritative_path=authoritative_snapshot_path,
+                    manifest_path=snapshot_manifest_path,
+                    table=final_table,
                     changed_rows=changed_rows,
                     persistent_quarantine_keys=persistent_quarantine_keys,
                 )
+                add_snapshot_validation_to_summary(summary, snapshot_validation)
             except SyncError:
                 summary["snapshot_after_write_error"] = "unavailable"
             write_reports(
@@ -3432,12 +3602,15 @@ def run_sync(
                 summary=summary,
             )
             raise
-        write_mapping_snapshot(
-            Path(snapshot_out),
-            final_table,
+        snapshot_validation = write_private_mapping_snapshot_bundle(
+            effective_path=effective_snapshot_path,
+            authoritative_path=authoritative_snapshot_path,
+            manifest_path=snapshot_manifest_path,
+            table=final_table,
             changed_rows=changed_rows,
             persistent_quarantine_keys=persistent_quarantine_keys,
         )
+        add_snapshot_validation_to_summary(summary, snapshot_validation)
         write_reports(
             output_dir,
             inventories=inventories,
@@ -3463,6 +3636,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--snapshot-out",
         type=Path,
         default=Path(".build/inventory-sync/effective_mapping.csv"),
+    )
+    parser.add_argument(
+        "--authoritative-snapshot-out",
+        type=Path,
+        help=(
+            "Final private Sheet snapshot before OPEN-alert quarantine. Defaults "
+            "beside --snapshot-out."
+        ),
+    )
+    parser.add_argument(
+        "--snapshot-manifest-out",
+        type=Path,
+        help=(
+            "Hash-bound authoritative/effective snapshot manifest. Defaults "
+            "beside --snapshot-out."
+        ),
     )
     parser.add_argument("--sheet-id", default=os.environ.get("GOOGLE_SHEET_ID", ""))
     parser.add_argument("--sheet-tab", default="Mappings")
@@ -3507,6 +3696,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     generated_at = generated_timestamp(args.now_utc)
     output_dir = Path(args.output_dir).resolve()
     snapshot_out = Path(args.snapshot_out).resolve()
+    authoritative_snapshot_out = (
+        Path(args.authoritative_snapshot_out).resolve()
+        if args.authoritative_snapshot_out is not None
+        else snapshot_out.with_name("authoritative_mapping.csv")
+    )
+    snapshot_manifest_out = (
+        Path(args.snapshot_manifest_out).resolve()
+        if args.snapshot_manifest_out is not None
+        else snapshot_out.with_name("mapping_snapshot_manifest.json")
+    )
+    if len(
+        {snapshot_out, authoritative_snapshot_out, snapshot_manifest_out}
+    ) != 3:
+        raise SyncError(
+            "Authoritative, effective, and manifest snapshot paths must be different."
+        )
     auto_match_args = (
         bool(args.all_source_file),
         bool(args.all_source_catalog_file),
@@ -3630,6 +3835,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=output_dir,
             generated_at=generated_at,
             snapshot_out=snapshot_out,
+            authoritative_snapshot_out=authoritative_snapshot_out,
+            snapshot_manifest_out=snapshot_manifest_out,
             write_to_sheet=args.write_to_sheet and not bootstrap_error,
             google_session=google_session,
             sheet_id=args.sheet_id,

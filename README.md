@@ -70,6 +70,15 @@ sport, and religion. A fuzzy name match is never approved unattended.
 Possible stream-ID reuse is recorded in the private `Sync Alerts` tab and stays
 quarantined from builds while the alert status is `OPEN`.
 
+Workflow 2 keeps two private same-run mapping snapshots: the final authoritative
+Sheet read and the effective snapshot after applying those quarantines. A
+hash-bound manifest proves that both contain the same channel identities and
+that the only allowed differences are the exact quarantine fields. Fixed
+row-count floors apply to the authoritative pre-quarantine runnable rows, while
+all `OPEN` identities remain disabled and absent from XML, JSON, metadata, and
+personalization output. This prevents a deliberate quarantine from being
+mistaken for lost Sheet data without weakening either safety check.
+
 Schedule mapping and personalization review are separate jobs. All 25,170
 starter rows contain automatically inferred, unlocked metadata rather than
 human-approved metadata. The starter has 22,720 undetermined primary languages,
@@ -143,6 +152,10 @@ reports are generated automatically.
 - The private mapping snapshot and every generated upload pass
   credential-safety checks before the builder or Pages upload can continue;
   gzip outputs are checked after streaming decompression.
+- The authoritative/effective private snapshot pair is SHA-256-bound and
+  compared row by row before the fixed 4,000 / 10,500 / 9,400 integrity floors
+  are evaluated. Missing rows, reordered identities, stale manifests, or any
+  non-quarantine field change stop before the EPG source is processed.
 
 ## Developer validation
 

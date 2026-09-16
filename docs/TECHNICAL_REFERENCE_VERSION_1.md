@@ -342,6 +342,27 @@ An alert lifecycle is:
    new `OPEN` alert for that identity. Resolution is therefore not a bypass for
    an unfixed mapping.
 
+The production hand-off contains an authoritative snapshot from the final
+post-append Sheet re-read, an effective snapshot after quarantine, and a small
+SHA-256-bound manifest. Both CSVs must have the same ordered exact
+`(server_id, stream_id)` identities. A quarantined row may differ only in
+`enabled`, `action`, `metadata_status`, and the reserved effective-snapshot
+reason. The builder recomputes and verifies every count and hash before reading
+the EPG source.
+
+Three counts are intentionally distinct:
+
+- **authoritative runnable rows** are eligible immediately before alert
+  quarantine and are used by the fixed snapshot-integrity floors;
+- **quarantined authoritative runnable rows** are verified rows deliberately
+  removed solely by the current-risk/`OPEN` alert set; and
+- **effective runnable rows** are the only rows eligible for published output.
+
+Thus `authoritative runnable = effective runnable + quarantined authoritative
+runnable` for each server. Already-disabled or `REVIEW` rows receive no floor
+credit. An `OPEN` row remains absent from XML, JSON, metadata, and
+personalization even though its existence is recognized by the integrity check.
+
 Only `OPEN` and `RESOLVED` are valid status values. Do not delete an alert
 instead of resolving it; set `RESOLVED` with `review_notes`. Old resolved rows
 may later be moved through the documented Sheet-limit archival procedure.
@@ -360,6 +381,8 @@ python -u scripts/sync_channel_inventory.py \
   --sheet-tab Mappings \
   --output-dir .build/channel-sync \
   --snapshot-out .build/channel-sync/effective_mapping.csv \
+  --authoritative-snapshot-out .build/channel-sync/authoritative_mapping.csv \
+  --snapshot-manifest-out .build/channel-sync/mapping_snapshot_manifest.json \
   --all-source-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
   --all-source-catalog-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt" \
   --epgshare-spool-out "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3" \
@@ -380,6 +403,8 @@ python -u scripts/sync_channel_inventory.py \
   --sheet-tab Mappings \
   --output-dir .build/channel-sync \
   --snapshot-out .build/channel-sync/effective_mapping.csv \
+  --authoritative-snapshot-out .build/channel-sync/authoritative_mapping.csv \
+  --snapshot-manifest-out .build/channel-sync/mapping_snapshot_manifest.json \
   --all-source-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
   --all-source-catalog-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt" \
   --epgshare-spool-out "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3" \
@@ -396,7 +421,9 @@ python -u scripts/sync_channel_inventory.py \
   --mode refresh \
   --mapping-file path/to/mapping.csv \
   --output-dir .build/channel-sync \
-  --snapshot-out .build/channel-sync/effective_mapping.csv
+  --snapshot-out .build/channel-sync/effective_mapping.csv \
+  --authoritative-snapshot-out .build/channel-sync/authoritative_mapping.csv \
+  --snapshot-manifest-out .build/channel-sync/mapping_snapshot_manifest.json
 ```
 
 `--mapping-file` is for tests/offline diagnostics and cannot be combined with
@@ -417,7 +444,9 @@ changed_channels.csv
 possible_id_reuse.csv
 missing_channels.csv
 mapping_before_append.csv
+authoritative_mapping.csv
 effective_mapping.csv
+mapping_snapshot_manifest.json
 ```
 
 Full inventory and mapping snapshots are not uploaded as public-repository
@@ -446,6 +475,8 @@ The production workflow runs the equivalent of:
 ```bash
 python -u scripts/build_epg_streaming.py \
   --mapping-file .build/channel-sync/effective_mapping.csv \
+  --mapping-authoritative-file .build/channel-sync/authoritative_mapping.csv \
+  --mapping-snapshot-manifest .build/channel-sync/mapping_snapshot_manifest.json \
   --all-source-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
   --epgshare-spool-file "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3" \
   --public-dir public \
@@ -459,6 +490,11 @@ python -u scripts/build_epg_streaming.py \
   --public-base-url "$EPG_PUBLIC_BASE_URL" \
   --minimum-coverage "${EPG_MINIMUM_COVERAGE:-80}"
 ```
+
+The row floors remain 4,000 / 10,500 / 9,400. They are evaluated against the
+manifest-verified authoritative runnable counts, never total Sheet rows and
+never the smaller post-quarantine effective counts. The effective CSV remains
+the sole mapping input used to generate public files.
 
 The workflow downloads the combined guide and its small official sectioned ID
 catalog once. The synchronizer requires at least 25,000 IDs in each input and
