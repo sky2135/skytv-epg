@@ -38,6 +38,8 @@ env:
   ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
   EPG_ALL_SOURCE_URL: >-
     https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz
+  EPG_ALL_CATALOG_URL: >-
+    https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.txt
   EPG_PUBLIC_BASE_URL: ${{ vars.EPG_PUBLIC_BASE_URL }}
   EPG_MINIMUM_COVERAGE: ${{ vars.EPG_MINIMUM_COVERAGE || '80' }}
 
@@ -109,6 +111,17 @@ jobs:
           ):
               raise SystemExit("Unexpected EPG_ALL_SOURCE_URL.")
 
+          catalog = urlsplit(os.environ["EPG_ALL_CATALOG_URL"])
+          if (
+              catalog.scheme != "https"
+              or catalog.hostname != "epgshare01.online"
+              or catalog.path
+                  != "/epgshare01/epg_ripper_ALL_SOURCES1.txt"
+              or catalog.query
+              or catalog.fragment
+          ):
+              raise SystemExit("Unexpected EPG_ALL_CATALOG_URL.")
+
           try:
               minimum_coverage = float(os.environ["EPG_MINIMUM_COVERAGE"])
           except ValueError as exc:
@@ -128,6 +141,45 @@ jobs:
 
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
+
+      - name: Download the combined EPG guide and its official ID catalog once
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/skytv-epg-v1"
+          mkdir -p "$source_dir"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from scripts import build_epg_streaming as streaming
+          from scripts import epg_catalog_stream as catalog_stream
+
+          destination = (
+              Path(os.environ["RUNNER_TEMP"])
+              / "skytv-epg-v1"
+              / "epg_ripper_ALL_SOURCES1.xml.gz"
+          )
+          streaming.safe_download(
+              os.environ["EPG_ALL_SOURCE_URL"],
+              destination,
+              maximum_bytes=streaming.MAX_SOURCE_COMPRESSED_BYTES,
+              expected_gzip=True,
+              allowed_host_suffixes=("epgshare01.online",),
+          )
+          catalog_destination = (
+              Path(os.environ["RUNNER_TEMP"])
+              / "skytv-epg-v1"
+              / "epg_ripper_ALL_SOURCES1.txt"
+          )
+          streaming.safe_download(
+              os.environ["EPG_ALL_CATALOG_URL"],
+              catalog_destination,
+              maximum_bytes=catalog_stream.MAX_CATALOG_TEXT_BYTES,
+              expected_gzip=False,
+              allowed_host_suffixes=("epgshare01.online",),
+          )
+          PY
 
       - name: Refresh the private Google Sheet and create this run's mapping snapshot
         shell: bash
@@ -154,6 +206,12 @@ jobs:
               --sheet-tab "$GOOGLE_SHEET_TAB"
               --output-dir .build/channel-sync
               --snapshot-out .build/channel-sync/effective_mapping.csv
+              --all-source-file
+                "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz"
+              --all-source-catalog-file
+                "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt"
+              --epgshare-spool-out
+                "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3"
               --write-to-sheet
           )
           if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
@@ -500,6 +558,8 @@ jobs:
           labels = (
               ("inventory_rows", "Channels found at available providers"),
               ("new_rows", "New channels found"),
+              ("auto_matched_rows", "New channels safely matched automatically"),
+              ("auto_match_review_rows", "New channels left for review"),
               ("appended_rows", "Rows added to Google Sheet"),
               ("changed_rows", "Changed channel details"),
               ("possible_id_reuse_rows", "Rows quarantined for possible ID reuse"),
@@ -557,7 +617,11 @@ jobs:
           build_command=(
             python -u scripts/build_epg_streaming.py
               --mapping-file .build/channel-sync/effective_mapping.csv \
-              --all-source-url "$EPG_ALL_SOURCE_URL" \
+              --all-source-file \
+                "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
+              --all-source-file-origin-url "$EPG_ALL_SOURCE_URL" \
+              --epgshare-spool-file \
+                "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3" \
               --public-dir public \
               --work-dir .build/work \
               --servers server_1 server_2 server_3 \

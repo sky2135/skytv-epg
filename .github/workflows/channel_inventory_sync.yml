@@ -31,13 +31,17 @@ env:
   GOOGLE_SHEET_TAB: ${{ vars.GOOGLE_SHEET_TAB || 'Mappings' }}
   ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
   REQUEST_SHEET_WRITE: ${{ inputs.update_google_sheet }}
+  EPG_ALL_SOURCE_URL: >-
+    https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz
+  EPG_ALL_CATALOG_URL: >-
+    https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.txt
 
 jobs:
   sync:
     name: Compare all provider lineups with the private Sheet
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
 
     steps:
       - name: Check out repository
@@ -51,7 +55,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-sync.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-sync.txt
 
       - name: Check settings without printing secrets
         shell: bash
@@ -100,6 +106,28 @@ jobs:
           write_requested = required("REQUEST_SHEET_WRITE").casefold()
           if write_requested not in {"true", "false"}:
               raise SystemExit("update_google_sheet must be true or false.")
+
+          source = urlsplit(required("EPG_ALL_SOURCE_URL"))
+          if (
+              source.scheme != "https"
+              or source.hostname != "epgshare01.online"
+              or source.path
+                  != "/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz"
+              or source.query
+              or source.fragment
+          ):
+              raise SystemExit("Unexpected EPG_ALL_SOURCE_URL.")
+
+          catalog = urlsplit(required("EPG_ALL_CATALOG_URL"))
+          if (
+              catalog.scheme != "https"
+              or catalog.hostname != "epgshare01.online"
+              or catalog.path
+                  != "/epgshare01/epg_ripper_ALL_SOURCES1.txt"
+              or catalog.query
+              or catalog.fragment
+          ):
+              raise SystemExit("Unexpected EPG_ALL_CATALOG_URL.")
 
           try:
               service_account = json.loads(
@@ -152,11 +180,59 @@ jobs:
       - name: Install pinned dependencies
         shell: bash
         run: |
-          python -m pip install --only-binary=:all: -r requirements-sync.txt
+          python -m pip install --only-binary=:all: \
+            -r requirements.txt -r requirements-sync.txt
           python -m pip check
 
-      - name: Test channel synchronization
-        run: python -m unittest tests.test_sync_channel_inventory -v
+      - name: Test channel synchronization and automatic EPG matching
+        run: |
+          python -m unittest \
+            tests.test_sync_channel_inventory \
+            tests.test_auto_match_inventory \
+            tests.test_auto_match_v1 \
+            tests.test_epg_catalog_stream \
+            tests.test_epg_spool_reuse \
+            tests.test_matcher_regression \
+            -v
+
+      - name: Download the combined EPG guide and its official ID catalog once
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/skytv-epg-v1"
+          mkdir -p "$source_dir"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from scripts import build_epg_streaming as streaming
+          from scripts import epg_catalog_stream as catalog_stream
+
+          destination = (
+              Path(os.environ["RUNNER_TEMP"])
+              / "skytv-epg-v1"
+              / "epg_ripper_ALL_SOURCES1.xml.gz"
+          )
+          streaming.safe_download(
+              os.environ["EPG_ALL_SOURCE_URL"],
+              destination,
+              maximum_bytes=streaming.MAX_SOURCE_COMPRESSED_BYTES,
+              expected_gzip=True,
+              allowed_host_suffixes=("epgshare01.online",),
+          )
+          catalog_destination = (
+              Path(os.environ["RUNNER_TEMP"])
+              / "skytv-epg-v1"
+              / "epg_ripper_ALL_SOURCES1.txt"
+          )
+          streaming.safe_download(
+              os.environ["EPG_ALL_CATALOG_URL"],
+              catalog_destination,
+              maximum_bytes=catalog_stream.MAX_CATALOG_TEXT_BYTES,
+              expected_gzip=False,
+              allowed_host_suffixes=("epgshare01.online",),
+          )
+          PY
 
       - name: Find new, changed, and missing channels
         shell: bash
@@ -182,6 +258,12 @@ jobs:
               --sheet-tab "$GOOGLE_SHEET_TAB"
               --output-dir .build/channel-sync
               --snapshot-out .build/channel-sync/effective_mapping.csv
+              --all-source-file
+                "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz"
+              --all-source-catalog-file
+                "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt"
+              --epgshare-spool-out
+                "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3"
               --minimum-server-channels
                 server_1=4000
                 server_2=10500
@@ -560,6 +642,8 @@ jobs:
               labels = (
                   ("inventory_rows", "Channels found at providers"),
                   ("new_rows", "New channels found"),
+                  ("auto_matched_rows", "New channels safely matched automatically"),
+                  ("auto_match_review_rows", "New channels left for review"),
                   ("appended_rows", "Rows added to Google Sheet"),
                   ("changed_rows", "Changed channel details"),
                   ("possible_id_reuse_rows", "Possible reused stream IDs"),
