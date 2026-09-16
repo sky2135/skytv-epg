@@ -280,6 +280,7 @@ jobs:
             tests.test_epg_catalog_stream \
             tests.test_epg_spool_reuse \
             tests.test_ai_review_gemini \
+            tests.test_native_epg_review \
             tests.test_matcher_regression \
             -v
 
@@ -367,6 +368,17 @@ jobs:
             )
           else
             command+=(--review-recheck-servers "$REVIEW_RECHECK_SERVER")
+          fi
+
+          # Native-panel validation is automatic only inside an explicit
+          # REVIEW recheck. Server 1 is deliberately excluded because its
+          # native guide is forbidden by policy.
+          if [[ "$REVIEW_RECHECK_MODE" != "off" ]]; then
+            case "$REVIEW_RECHECK_SERVER" in
+              server_2|server_3|all)
+                command+=(--validate-native-review)
+                ;;
+            esac
           fi
 
           if [[ "${USE_GEMINI_AI,,}" == "true" ]]; then
@@ -819,21 +831,55 @@ jobs:
 
               handle.write("\n### This run\n\n")
               mode = str(payload.get("review_recheck_mode", "off"))
+              recheck_servers = payload.get("review_recheck_servers", [])
+              if not isinstance(recheck_servers, list) or any(
+                  server_id not in {"server_1", "server_2", "server_3"}
+                  for server_id in recheck_servers
+              ):
+                  raise SystemExit("Invalid REVIEW server scope in summary.json.")
+              native_review_enabled = mode in {"dry-run", "apply"} and bool(
+                  {"server_2", "server_3"}.intersection(recheck_servers)
+              )
               if mode == "dry-run":
                   handle.write(
-                      "- Smart Rules safe matches found: "
+                      "- Total verified EPG matches found: "
                       f"**{int(payload.get('review_recheck_safe_matches', 0)):,}** "
                       "(preview only)\n"
                   )
               elif mode == "apply":
                   handle.write(
-                      "- Smart Rules EPG matches enabled: "
+                      "- Total verified EPG matches enabled: "
                       f"**{int(payload.get('review_recheck_safe_matches_persisted', 0)):,}**\n"
                   )
               else:
                   handle.write(
                       "- New channels safely enabled: "
                       f"**{int(payload.get('auto_matched_rows', 0)):,}**\n"
+                  )
+              if native_review_enabled:
+                  native_candidates = count(payload, "native_review_candidates")
+                  native_verified = count(payload, "native_review_verified")
+                  native_unavailable = count(
+                      payload, "native_review_source_unavailable"
+                  )
+                  handle.write(
+                      f"- Native EPG candidates found: **{native_candidates:,}**\n"
+                  )
+                  handle.write(
+                      f"- Native EPG matches verified: **{native_verified:,}**"
+                      + (" (preview only)\n" if mode == "dry-run" else "\n")
+                  )
+                  if mode == "apply":
+                      native_persisted = count(
+                          payload, "native_review_persisted"
+                      )
+                      handle.write(
+                          "- Native EPG matches enabled (included in total above): "
+                          f"**{native_persisted:,}**\n"
+                      )
+                  handle.write(
+                      "- Native EPG sources unavailable: "
+                      f"**{native_unavailable:,}**\n"
                   )
               deferred = int(payload.get("review_recheck_deferred_rows", 0))
               if deferred:
