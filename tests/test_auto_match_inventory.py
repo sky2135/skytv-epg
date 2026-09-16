@@ -1371,6 +1371,63 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
             self.assertEqual(outcome.approved_rows, 0)
 
+    def test_current_exact_dummy_review_proposal_is_exposed_only_in_memory(self) -> None:
+        dummy_id = "Synthetic.Placeholder.us2"
+        xml = (
+            "<?xml version=\"1.0\"?><tv>"
+            f'<channel id="{dummy_id}"><display-name>Placeholder</display-name></channel>'
+            "</tv>"
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(source, xml)
+            text_catalog.write_bytes(text_catalog_bytes(dummy_ids=(dummy_id,)))
+            factory = RuntimeFactory(dummy_id)
+
+            def resolve(_row, **_kwargs):
+                return SimpleNamespace(
+                    route_explicit=True,
+                    explicit_market="US",
+                    route_plan=("US",),
+                ), {
+                    "action": "AUTO_DUMMY",
+                    "source": "dummy",
+                    "epg_feed": "DUMMY_CHANNELS",
+                    "epg_id": dummy_id,
+                    "match_method": "safety_rule",
+                    "reason": "exact current dummy fixture",
+                    "second_epg_id": "",
+                }
+
+            factory.resolver.resolve = resolve
+            row = mapping_row(
+                server_id="server_1",
+                stream_id="review-1",
+                channel_name="US: Placeholder",
+            )
+            outcome = auto_match_and_spool(
+                mapping_rows=[row],
+                inventories=[inventory(stream_id="review-1", name="US: Placeholder")],
+                new_rows=(),
+                review_rows=[row],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                minimum_unique_channels=1,
+                runtime_factory=factory,
+            )
+            self.assertEqual(outcome.rows[0]["action"], "REVIEW")
+            self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
+            self.assertEqual(
+                outcome.verified_placeholder_keys,
+                frozenset({("server_1", "review-1")}),
+            )
+            self.assertNotIn("verified_placeholder", outcome.summary_fields())
+
     def test_source_failure_happens_before_any_google_write_or_snapshot(self) -> None:
         headers = list(streaming.SHEET_COLUMNS)
         empty_table = sync.MappingTable(headers, headers, [])

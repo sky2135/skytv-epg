@@ -3633,6 +3633,36 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertEqual(stats[field], 1)
 
+    def test_review_selector_excludes_actual_inventory_drift_identity(self) -> None:
+        review = self.disabled_review("drift")
+        review["channel_name"] = "Original Channel"
+        review["category_name"] = "General"
+        provider = inventory(
+            "server_1",
+            [
+                {
+                    "stream_id": "drift",
+                    "name": "Renamed Channel",
+                    "category_name": "General",
+                }
+            ],
+        )
+        _new, changed, _missing = sync.compare_inventory(
+            table([review]),
+            [provider],
+            discovered_at="2026-09-16T12:34:56Z",
+        )
+        self.assertEqual(len(changed), 1)
+
+        selected, stats = sync.select_review_recheck_rows(
+            table([review]),
+            [provider],
+            selected_servers={"server_1"},
+            changed_rows=changed,
+        )
+        self.assertEqual(selected, [])
+        self.assertEqual(stats["review_recheck_excluded_changed_identity"], 1)
+
     def test_review_update_is_one_atomic_seven_column_targeted_write(self) -> None:
         review = self.disabled_review("review-1")
         unaffected = mapping_row("server_1", "stable-2", "Stable")

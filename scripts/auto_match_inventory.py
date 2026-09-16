@@ -35,6 +35,7 @@ import epg_catalog_stream as catalog_stream  # noqa: E402
 from epg_selection_spool import EpgSelectionSpoolWriter, SpoolError  # noqa: E402
 from skytv_epg_auto_match_v1 import (  # noqa: E402
     CatalogSnapshot as MatcherCatalogSnapshot,
+    DUMMY_REVIEW_METHODS,
     MatcherIdentity,
     MatcherPreflight,
     ScheduleEvidence,
@@ -231,6 +232,11 @@ class AutoMatchOutcome:
     ai_review_attempted_rows: int
     ai_review_comparisons: int
     ai_review_shortlists: tuple[AiReviewShortlist, ...]
+    # Current-run, exact XML/TXT-corroborated dummy proposals.  These remain
+    # REVIEW-only and are intentionally omitted from public sync summaries;
+    # the read-only backlog analyzer uses the identities only in memory to
+    # produce an aggregate count.
+    verified_placeholder_keys: frozenset[tuple[str, str]]
 
     def summary_fields(self) -> dict[str, Any]:
         return {
@@ -1055,6 +1061,7 @@ def _learn_cross_server_approved_aliases(
     mapping_rows: Sequence[Mapping[str, Any]],
     corroborated_real_candidates: Sequence[Mapping[str, str]],
     quarantined_keys: frozenset[tuple[str, str]],
+    current_unchanged_keys: frozenset[tuple[str, str]],
 ) -> _LearnedAliasMemory:
     """Register only independently repeated, human-approved mapping memory.
 
@@ -1086,7 +1093,7 @@ def _learn_cross_server_approved_aliases(
         if not _mapping_is_enabled(row, action):
             continue
         key = _canonical_key(row.get("server_id", ""), row.get("stream_id", ""))
-        if key in quarantined_keys:
+        if key in quarantined_keys or key not in current_unchanged_keys:
             continue
         epg_id = streaming.clean_identifier(row.get("epg_id", ""), 300)
         candidate_rows = candidates_by_id.get(epg_id, ())
@@ -1211,6 +1218,52 @@ def _learn_cross_server_approved_aliases(
     )
 
 
+def _current_unchanged_mapping_keys(
+    *,
+    mapping_rows: Sequence[Mapping[str, Any]],
+    safe_inventories: Sequence[
+        tuple[str, Sequence[Mapping[str, str]], Mapping[str, str]]
+    ],
+) -> frozenset[tuple[str, str]]:
+    """Return exact mapping identities still present under the same label.
+
+    Cross-server alias memory is stronger than an ordinary match hint, so its
+    human evidence uses exact current provider labels and categories. Missing
+    rows and even non-severe provider drift are excluded. This is deliberately
+    stricter than the display-oriented inventory drift normalization.
+    """
+
+    current: dict[tuple[str, str], tuple[str, str]] = {}
+    for server_id, channels, categories in safe_inventories:
+        for channel in channels:
+            key = _canonical_key(server_id, channel.get("stream_id", ""))
+            if key in current:
+                raise AutoMatchError(
+                    "Provider inventories contain a duplicate stream identity."
+                )
+            category_id = streaming.clean_identifier(
+                channel.get("category_id", ""), 120
+            )
+            current[key] = (
+                streaming.clean_identifier(channel.get("name", ""), 300),
+                streaming.clean_text(categories.get(category_id, ""), 200),
+            )
+
+    result: set[tuple[str, str]] = set()
+    for row in mapping_rows:
+        key = _canonical_key(row.get("server_id", ""), row.get("stream_id", ""))
+        provider_identity = current.get(key)
+        if provider_identity is None:
+            continue
+        sheet_identity = (
+            streaming.clean_identifier(row.get("channel_name", ""), 300),
+            streaming.clean_text(row.get("category_name", ""), 200),
+        )
+        if sheet_identity == provider_identity:
+            result.add(key)
+    return frozenset(result)
+
+
 def auto_match_and_spool(
     *,
     mapping_rows: Sequence[Mapping[str, Any]],
@@ -1332,6 +1385,10 @@ def auto_match_and_spool(
         server_id = _canonical_key(getattr(inventory, "server_id", ""), "probe")[0]
         channels, categories = _safe_matcher_inventory(inventory)
         safe_inventories.append((server_id, channels, categories))
+    current_unchanged_keys = _current_unchanged_mapping_keys(
+        mapping_rows=mapping_rows,
+        safe_inventories=safe_inventories,
+    )
 
     proposals: dict[tuple[str, str], Any] = {}
     runtime_box: list[MatcherRuntime] = []
@@ -1456,6 +1513,7 @@ def auto_match_and_spool(
             mapping_rows=mapping_rows,
             corroborated_real_candidates=corroborated_real_candidates,
             quarantined_keys=canonical_quarantined_keys,
+            current_unchanged_keys=current_unchanged_keys,
         )
         all_route_ambiguity = (
             _all_route_ambiguity_labels(runtime)
@@ -1725,6 +1783,18 @@ def auto_match_and_spool(
     recheck_approved_count = sum(
         1 for key in review_keys if patched_by_key[key].get("enabled") == "TRUE"
     )
+    matcher_catalog = matcher_catalog_box[0]
+    verified_placeholder_keys = frozenset(
+        key
+        for key, proposal in proposals.items()
+        if key in review_keys
+        and proposal.matcher_action == "AUTO_DUMMY"
+        and proposal.match_method in DUMMY_REVIEW_METHODS
+        and bool(proposal.target_epg_id)
+        and matcher_catalog.contains_unambiguous_exact(proposal.target_epg_id)
+        and matcher_catalog.target_kinds(proposal.target_epg_id)
+        == frozenset({"dummy"})
+    )
     return AutoMatchOutcome(
         rows=tuple(patched_rows),
         considered_rows=len(proposals),
@@ -1778,6 +1848,7 @@ def auto_match_and_spool(
         ai_review_attempted_rows=staged_shortlists_box[0].attempted_rows,
         ai_review_comparisons=staged_shortlists_box[0].comparisons,
         ai_review_shortlists=finalized_shortlists_box[0],
+        verified_placeholder_keys=verified_placeholder_keys,
     )
 
 

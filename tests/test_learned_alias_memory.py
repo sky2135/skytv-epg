@@ -64,6 +64,10 @@ def _candidate(epg_id: str, *, region: str = "US") -> dict[str, str]:
     }
 
 
+def _mapping_keys(rows) -> frozenset[tuple[str, str]]:
+    return frozenset((row["server_id"], row["stream_id"]) for row in rows)
+
+
 class LearnedAliasMemoryTests(unittest.TestCase):
     def test_registers_only_repeated_human_approved_target(self) -> None:
         resolver = _Resolver()
@@ -81,6 +85,7 @@ class LearnedAliasMemoryTests(unittest.TestCase):
             mapping_rows=rows,
             corroborated_real_candidates=[_candidate("Acme.News.us2")],
             quarantined_keys=frozenset(),
+            current_unchanged_keys=_mapping_keys(rows),
         )
 
         self.assertEqual(result.evidence_rows, 2)
@@ -97,14 +102,16 @@ class LearnedAliasMemoryTests(unittest.TestCase):
 
     def test_quarantine_prevents_two_server_support(self) -> None:
         resolver = _Resolver()
+        rows = [
+            _mapping("server_1", "1", "Acme.News.us2"),
+            _mapping("server_2", "2", "Acme.News.us2"),
+        ]
         result = integration._learn_cross_server_approved_aliases(
             resolver=resolver,
-            mapping_rows=[
-                _mapping("server_1", "1", "Acme.News.us2"),
-                _mapping("server_2", "2", "Acme.News.us2"),
-            ],
+            mapping_rows=rows,
             corroborated_real_candidates=[_candidate("Acme.News.us2")],
             quarantined_keys=frozenset({("server_2", "2")}),
+            current_unchanged_keys=_mapping_keys(rows),
         )
 
         self.assertEqual(result.evidence_rows, 1)
@@ -112,16 +119,55 @@ class LearnedAliasMemoryTests(unittest.TestCase):
         self.assertEqual(result.rejected_groups, 1)
         self.assertEqual(resolver.registered, [])
 
-    def test_one_server_alone_cannot_create_global_memory(self) -> None:
+    def test_missing_or_changed_provider_identity_cannot_teach_alias_memory(self) -> None:
+        rows = [
+            _mapping("server_1", "1", "Acme.News.us2"),
+            _mapping("server_2", "2", "Acme.News.us2"),
+            _mapping("server_3", "3", "Acme.News.us2"),
+        ]
+        safe_inventories = [
+            (
+                "server_1",
+                [{"stream_id": "1", "name": "US: Acme News", "category_id": "cat"}],
+                {"cat": "US | News"},
+            ),
+            (
+                "server_2",
+                [{"stream_id": "2", "name": "US: Renamed News", "category_id": "cat"}],
+                {"cat": "US | News"},
+            ),
+            ("server_3", [], {"cat": "US | News"}),
+        ]
+        current = integration._current_unchanged_mapping_keys(
+            mapping_rows=rows,
+            safe_inventories=safe_inventories,
+        )
+        self.assertEqual(current, frozenset({("server_1", "1")}))
+
         resolver = _Resolver()
         result = integration._learn_cross_server_approved_aliases(
             resolver=resolver,
-            mapping_rows=[
-                _mapping("server_1", "1", "Acme.News.us2"),
-                _mapping("server_1", "2", "Acme.News.us2"),
-            ],
+            mapping_rows=rows,
             corroborated_real_candidates=[_candidate("Acme.News.us2")],
             quarantined_keys=frozenset(),
+            current_unchanged_keys=current,
+        )
+        self.assertEqual(result.evidence_rows, 1)
+        self.assertEqual(result.registered_aliases, 0)
+        self.assertEqual(resolver.registered, [])
+
+    def test_one_server_alone_cannot_create_global_memory(self) -> None:
+        resolver = _Resolver()
+        rows = [
+            _mapping("server_1", "1", "Acme.News.us2"),
+            _mapping("server_1", "2", "Acme.News.us2"),
+        ]
+        result = integration._learn_cross_server_approved_aliases(
+            resolver=resolver,
+            mapping_rows=rows,
+            corroborated_real_candidates=[_candidate("Acme.News.us2")],
+            quarantined_keys=frozenset(),
+            current_unchanged_keys=_mapping_keys(rows),
         )
 
         self.assertEqual(result.evidence_rows, 2)
@@ -131,17 +177,19 @@ class LearnedAliasMemoryTests(unittest.TestCase):
 
     def test_conflicting_targets_and_static_alias_conflicts_are_rejected(self) -> None:
         conflicting = _Resolver()
+        conflict_rows = [
+            _mapping("server_1", "1", "Acme.News.us2"),
+            _mapping("server_2", "2", "Other.News.us2"),
+        ]
         result = integration._learn_cross_server_approved_aliases(
             resolver=conflicting,
-            mapping_rows=[
-                _mapping("server_1", "1", "Acme.News.us2"),
-                _mapping("server_2", "2", "Other.News.us2"),
-            ],
+            mapping_rows=conflict_rows,
             corroborated_real_candidates=[
                 _candidate("Acme.News.us2"),
                 _candidate("Other.News.us2"),
             ],
             quarantined_keys=frozenset(),
+            current_unchanged_keys=_mapping_keys(conflict_rows),
         )
         self.assertEqual(result.registered_aliases, 0)
         self.assertEqual(result.rejected_groups, 1)
@@ -156,14 +204,16 @@ class LearnedAliasMemoryTests(unittest.TestCase):
                 }
             ]
         )
+        static_rows = [
+            _mapping("server_1", "1", "Acme.News.us2"),
+            _mapping("server_2", "2", "Acme.News.us2"),
+        ]
         result = integration._learn_cross_server_approved_aliases(
             resolver=static_same,
-            mapping_rows=[
-                _mapping("server_1", "1", "Acme.News.us2"),
-                _mapping("server_2", "2", "Acme.News.us2"),
-            ],
+            mapping_rows=static_rows,
             corroborated_real_candidates=[_candidate("Acme.News.us2")],
             quarantined_keys=frozenset(),
+            current_unchanged_keys=_mapping_keys(static_rows),
         )
         self.assertEqual(result.registered_aliases, 0)
         self.assertEqual(result.static_reused_groups, 1)
@@ -184,12 +234,10 @@ class LearnedAliasMemoryTests(unittest.TestCase):
         )
         result = integration._learn_cross_server_approved_aliases(
             resolver=static_conflict,
-            mapping_rows=[
-                _mapping("server_1", "1", "Acme.News.us2"),
-                _mapping("server_2", "2", "Acme.News.us2"),
-            ],
+            mapping_rows=static_rows,
             corroborated_real_candidates=[_candidate("Acme.News.us2")],
             quarantined_keys=frozenset(),
+            current_unchanged_keys=_mapping_keys(static_rows),
         )
         self.assertEqual(result.registered_aliases, 0)
         self.assertEqual(result.rejected_groups, 1)
@@ -207,6 +255,7 @@ class LearnedAliasMemoryTests(unittest.TestCase):
                 _candidate("Acme.News.us2", region="ALL")
             ],
             quarantined_keys=frozenset(),
+            current_unchanged_keys=_mapping_keys(rows),
         )
         self.assertEqual(global_result.evidence_rows, 0)
 
@@ -218,6 +267,7 @@ class LearnedAliasMemoryTests(unittest.TestCase):
                 _candidate("acme.news.us2"),
             ],
             quarantined_keys=frozenset(),
+            current_unchanged_keys=_mapping_keys(rows),
         )
         self.assertEqual(ambiguous_result.evidence_rows, 0)
         self.assertEqual(resolver.registered, [])
@@ -310,18 +360,25 @@ class LearnedAliasMemoryTests(unittest.TestCase):
             "category_name": "US | News",
             "notes": "",
         }
-        inventory = SimpleNamespace(
-            server_id="server_3",
-            categories=[{"category_id": "cat", "category_name": "US | News"}],
-            channels=[
-                {
-                    "stream_id": "3",
-                    "category_id": "cat",
-                    "category_name": "US | News",
-                    "name": "US: Odd Label",
-                }
-            ],
-        )
+        inventories = [
+            SimpleNamespace(
+                server_id=server_id,
+                categories=[{"category_id": "cat", "category_name": "US | News"}],
+                channels=[
+                    {
+                        "stream_id": stream_id,
+                        "category_id": "cat",
+                        "category_name": "US | News",
+                        "name": "US: Odd Label",
+                    }
+                ],
+            )
+            for server_id, stream_id in (
+                ("server_1", "1"),
+                ("server_2", "2"),
+                ("server_3", "3"),
+            )
+        ]
         xml = (
             '<?xml version="1.0"?><tv>'
             '<channel id="Good.Channel.us2"><display-name>Good</display-name></channel>'
@@ -343,7 +400,7 @@ class LearnedAliasMemoryTests(unittest.TestCase):
             catalog.write_bytes(text_catalog)
             outcome = integration.auto_match_and_spool(
                 mapping_rows=[*approved_rows, review],
-                inventories=[inventory],
+                inventories=inventories,
                 new_rows=[],
                 review_rows=[review],
                 all_source_file=source,

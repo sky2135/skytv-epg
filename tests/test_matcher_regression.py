@@ -23,6 +23,10 @@ RUNNER_PATH = REPO_ROOT / "scripts" / "build_all_servers.py"
 STREAMING_RUNNER_PATH = REPO_ROOT / "scripts" / "build_epg_streaming.py"
 AUTO_MATCH_ADAPTER_PATH = REPO_ROOT / "src" / "skytv_epg_auto_match_v1.py"
 AUTO_MATCH_INTEGRATION_PATH = REPO_ROOT / "scripts" / "auto_match_inventory.py"
+BACKLOG_ANALYZER_PATH = REPO_ROOT / "scripts" / "analyze_review_backlog.py"
+BACKLOG_ANALYZER_WORKFLOW_PATH = (
+    REPO_ROOT / ".github" / "workflows" / "backlog_analyzer.yml"
+)
 AI_REVIEW_PATH = REPO_ROOT / "scripts" / "ai_review_gemini.py"
 EPG_CATALOG_STREAM_PATH = REPO_ROOT / "scripts" / "epg_catalog_stream.py"
 EPG_SELECTION_SPOOL_PATH = REPO_ROOT / "scripts" / "epg_selection_spool.py"
@@ -154,7 +158,7 @@ def catalog_for_all_self_tests(engine):
 class MatcherIntegrityTests(unittest.TestCase):
     def test_integrity_manifest_hashes(self) -> None:
         manifest = json.loads((REPO_ROOT / "MATCHER_INTEGRITY.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["schemaVersion"], 6)
+        self.assertEqual(manifest["schemaVersion"], 7)
         self.assertEqual(manifest["matcherVersion"], "8.4")
         self.assertEqual(manifest["builderVersion"], "7.1")
         self.assertEqual(manifest["streamingPipelineVersion"], "1.0")
@@ -180,7 +184,14 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertIn("disabled REVIEW", decision_boundary)
         self.assertIn("Gemini", decision_boundary)
         self.assertIn("two different servers", decision_boundary)
+        self.assertIn("present and unchanged", decision_boundary)
+        self.assertIn("provider drift", decision_boundary)
         self.assertIn("programme gate", decision_boundary)
+        self.assertIn("backlog analyzer", decision_boundary)
+        self.assertIn("read-only token", decision_boundary)
+        self.assertIn("aggregate counts", decision_boundary)
+        self.assertIn("server-local review clusters", decision_boundary)
+        self.assertIn("two-server human-approved alias memory", decision_boundary)
         self.assertNotIn("published Google Sheet CSV", decision_boundary)
         self.assertEqual(manifest["legacyEngineSha256"], hashlib.sha256(ENGINE_PATH.read_bytes()).hexdigest())
         self.assertEqual(manifest["contextualV8Sha256"], hashlib.sha256(V8_PATH.read_bytes()).hexdigest())
@@ -202,6 +213,14 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertEqual(
             manifest["autoMatchIntegrationSha256"],
             hashlib.sha256(AUTO_MATCH_INTEGRATION_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["backlogAnalyzerSha256"],
+            hashlib.sha256(BACKLOG_ANALYZER_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["backlogAnalyzerWorkflowSha256"],
+            hashlib.sha256(BACKLOG_ANALYZER_WORKFLOW_PATH.read_bytes()).hexdigest(),
         )
         self.assertEqual(
             manifest["geminiReviewSha256"],
