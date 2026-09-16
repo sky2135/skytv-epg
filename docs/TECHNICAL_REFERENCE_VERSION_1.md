@@ -14,13 +14,22 @@ branch. It does not need a second repository or a `gh-pages` branch.
 2. `scripts/sync_channel_inventory.py` reads each provider's authenticated live
    channel inventory.
 3. Exact `(server_id, stream_id)` identities are compared with `Mappings`.
-4. Previously unseen identities are appended with `enabled=FALSE` and
-   `action=REVIEW`. Existing mapping rows are not edited or deleted.
+4. The complete EPGShare channel catalog is frozen during one bounded XMLTV
+   stream and checked against EPGShare's sectioned companion ID catalog. The
+   pinned matcher may propose an EPG for previously unseen
+   identities only; a proposal is activated only after exact-ID, route, and
+   current/future programme-gate verification from that same open source file.
+   The compressed SHA-256, safety scan, catalog, and programmes are bound to
+   one verified file descriptor rather than separate pathname reads.
+   Uncertain rows remain disabled in `REVIEW`. Existing mapping rows are not
+   edited or deleted.
 5. Possible stream-ID reuse is recorded in the private `Sync Alerts` tab and
    quarantined in the temporary build snapshot.
-6. `scripts/build_epg_streaming.py` reads that snapshot, downloads the combined
-   EPGShare source once, downloads only explicitly required Server 2/3 panel
-   guides, and stages selected schedules in SQLite.
+6. The synchronizer seals selected EPGShare channels/programmes in a temporary
+   SQLite spool. `scripts/build_epg_streaming.py` verifies its source binding,
+   schema, request history, content limits, freshness, and logical integrity,
+   then reuses it without a second XML parse. It downloads only explicitly
+   required Server 2/3 panel guides.
 7. Validated XMLTV, app JSON, personalization metadata, indexes, and reports
    are deployed as a GitHub Pages artifact.
 
@@ -170,19 +179,33 @@ disabled and review-state even when the stored mapping had been active.
 
 ### Newly discovered rows
 
-Every new channel is appended with `enabled=FALSE`, `action=REVIEW`,
-conservative metadata, and `metadata_status=review`. It remains only in the
-private Sheet and inventory counts; it cannot enter any public schedule or
-metadata output until reviewed, approved, and explicitly changed to
-`enabled=TRUE`. Changing the action alone does not publish the row.
+Only previously unseen exact `(server_id, stream_id)` keys enter automatic
+matching. Existing rows—including prior `REVIEW` rows and manual edits—are not
+rematched or rewritten.
 
-- Server 1 receives `source=epgshare01`, `epg_feed=ALL_SOURCES1`, and a blank
-  `epg_id` pending an exact EPGShare review.
-- Server 2 or Server 3 may receive the provider's native EPG ID as a candidate,
-  but `enabled=FALSE` and `action=REVIEW` prevent unattended activation.
-- Fuzzy channel-name similarity never activates a mapping.
-- Provider icon URLs are discarded because their paths may contain account
-  credentials.
+A new row is activated as `AUTO_EPGSHARE` only when all of these independent
+checks succeed:
+
+- the frozen matcher and legacy engine hashes/build IDs match their manifest;
+- the complete combined-source catalog passes its minimum-size and XML safety
+  checks and exactly agrees with the official sectioned ID catalog;
+- the method is an allowlisted deterministic identity method, never fuzzy or
+  broad containment;
+- exactly one case-sensitive, real, non-dummy EPG ID is selected;
+- the channel has an explicit unambiguous market and the catalog route agrees;
+- the identity is not adult or a generic numbered placeholder; and
+- the same source snapshot has at least two distinct informative programme
+  time intervals, its first useful interval starts within six hours, and its
+  final useful interval reaches at least six hours beyond the check time.
+
+Every other result is appended with `enabled=FALSE` and `action=REVIEW`.
+Server 1 panel identifiers are stripped before matching and can never be
+activated. Provider icon URLs are discarded because their paths may contain
+account credentials.
+
+Automatic EPG approval changes only schedule-control fields. New rows retain
+`metadata_status=review`; personalization language, region, genre, sport, and
+religion are not promoted to human-approved status.
 
 After confirming the channel identity, exact EPG source/ID, and personalization
 metadata, the owner sets `action=APPROVED` and `enabled=TRUE`. Approval without
@@ -194,10 +217,12 @@ new and append it again.
 
 ## Append-only synchronization
 
-The Google Sheets writer uses append requests in retry-safe chunks and rereads
-the Sheet afterward. Before appending, it compares exact mapping keys again so
-a rerun does not intentionally duplicate already accepted rows. It never sends
-an update or delete request for an existing `Mappings` row.
+The Google Sheets writer uses row-inserting value appends in retry-safe chunks
+and rereads every appended cell afterward. This path also supports Google
+native tables created when the supplied XLSX is imported; their table range is
+expanded after the values exist. Before appending, it compares exact mapping
+keys again so a rerun does not intentionally duplicate already accepted rows.
+It never sends an update or delete request for an existing `Mappings` row.
 
 The following conditions block a mass append:
 
@@ -266,6 +291,9 @@ python -u scripts/sync_channel_inventory.py \
   --sheet-tab Mappings \
   --output-dir .build/channel-sync \
   --snapshot-out .build/channel-sync/effective_mapping.csv \
+  --all-source-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
+  --all-source-catalog-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt" \
+  --epgshare-spool-out "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3" \
   --minimum-server-channels \
     server_1=4000 server_2=10500 server_3=9400 \
   --write-to-sheet
@@ -283,6 +311,9 @@ python -u scripts/sync_channel_inventory.py \
   --sheet-tab Mappings \
   --output-dir .build/channel-sync \
   --snapshot-out .build/channel-sync/effective_mapping.csv \
+  --all-source-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
+  --all-source-catalog-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt" \
+  --epgshare-spool-out "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3" \
   --write-to-sheet
 ```
 
@@ -331,8 +362,8 @@ The production workflow runs the equivalent of:
 ```bash
 python -u scripts/build_epg_streaming.py \
   --mapping-file .build/channel-sync/effective_mapping.csv \
-  --all-source-url \
-    https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz \
+  --all-source-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
+  --epgshare-spool-file "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3" \
   --public-dir public \
   --work-dir .build/work \
   --servers server_1 server_2 server_3 \
@@ -345,7 +376,11 @@ python -u scripts/build_epg_streaming.py \
   --minimum-coverage "${EPG_MINIMUM_COVERAGE:-80}"
 ```
 
-Local fixtures may use `--all-source-file` and repeated
+The workflow downloads the combined guide and its small official sectioned ID
+catalog once. The synchronizer requires their exact channel-ID sets to agree,
+parses the guide once, and creates the temporary spool used by the builder.
+The companion catalog prevents an incomplete source or an unknown dummy section
+from becoming an automatic real-channel match. Local fixtures may use repeated
 `--panel-file server_2=/path/guide.xml.gz` arguments. A Server 1 panel file is
 always rejected.
 
@@ -490,6 +525,8 @@ the custom app's preference screens or client-side filtering implementation.
   Provider base URLs and high-risk Google service-account values are searched
   globally.
 - EPG source: at most 1 GiB compressed and 4 GiB expanded.
+- Automatic matching requires at least 25,000 unique IDs and exact agreement
+  between the XML channel set and the sectioned companion catalog.
 - XMLTV parse: at most 20 million elements and 10,000 child elements in one
   record; DTD/entity declarations are rejected.
 - SQLite ingestion batch: 2,000 programme rows.
@@ -515,8 +552,10 @@ hashes are checked before deployment.
   disabled rows in `REVIEW`. Those 171 rows are excluded from schedules, public
   metadata, and personalization until reviewed, approved, and enabled; an
   inventory row and a real programme schedule are not the same guarantee.
-- New rows are discovered automatically but require human approval for an exact
-  EPG mapping. Version 1 intentionally does not auto-approve fuzzy matches.
+- New rows are discovered automatically. Exact, single-candidate,
+  region-consistent EPGShare identities with a strong same-snapshot programme
+  guide are activated automatically. All fuzzy, ambiguous, adult, dummy,
+  generic-numbered, or weak-guide matches require human review.
 - Missing and ordinary drift rows are reported but not deleted or rewritten.
 - Only possible stream-ID reuse is persisted in `Sync Alerts`; ordinary drift
   and missing counts are not a historical inventory database.

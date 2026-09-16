@@ -26,6 +26,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,11 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from lxml import etree
+
+if __package__:
+    from .epg_selection_spool import SpoolError, copy_and_open_verified_spool
+else:
+    from epg_selection_spool import SpoolError, copy_and_open_verified_spool
 
 
 PIPELINE_VERSION = "1.0"
@@ -338,10 +344,13 @@ class SourceStats:
 class LimitedReader:
     """Count expanded bytes and stop unexpected decompression growth."""
 
-    def __init__(self, raw: BinaryIO, maximum: int):
+    def __init__(
+        self, raw: BinaryIO, maximum: int, *, close_raw: bool = True
+    ) -> None:
         self.raw = raw
         self.maximum = int(maximum)
         self.count = 0
+        self.close_raw = bool(close_raw)
 
     def read(self, size: int = -1) -> bytes:
         data = self.raw.read(size)
@@ -353,7 +362,8 @@ class LimitedReader:
         return data
 
     def close(self) -> None:
-        self.raw.close()
+        if self.close_raw:
+            self.raw.close()
 
     def __enter__(self) -> "LimitedReader":
         return self
@@ -415,6 +425,25 @@ def sha256_file(path: Path) -> str:
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_open_file(handle: BinaryIO) -> str:
+    """Hash one already-open regular file without changing its position.
+
+    Callers which must bind provenance to later reads should keep ``handle``
+    open and pass that same handle to :func:`open_limited_xml_handle`.  Hashing
+    a path and opening the path again leaves an atomic-replacement race between
+    those two operations.
+    """
+    position = handle.tell()
+    digest = hashlib.sha256()
+    try:
+        handle.seek(0)
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    finally:
+        handle.seek(position)
     return digest.hexdigest()
 
 
@@ -591,8 +620,63 @@ def infer_language(text: str) -> tuple[str, list[str], float]:
     return (found[0] if len(found) == 1 else "mul"), found, 0.82
 
 
+# Deliberately narrow parental-safety skeleton.  It is not used for channel
+# identity or general metadata normalization.  Keys are lowercase because the
+# security normalizer casefolds before translating, covering capitals too.
+_ADULT_CONFUSABLE_SKELETON = str.maketrans(
+    {
+        "α": "a",  # Greek alpha
+        "а": "a",  # Cyrillic a (for example: Аdult)
+        "ϲ": "c",  # Greek lunate sigma
+        "σ": "c",  # NFKC/casefold result of Greek lunate sigma
+        "с": "c",  # Cyrillic es (for example: erotiс)
+        "ԁ": "d",  # Cyrillic Komi de (for example: Aԁult)
+        "ε": "e",  # Greek epsilon
+        "е": "e",  # Cyrillic ie (for example: еrotic)
+        "ι": "i",  # Greek iota
+        "і": "i",  # Ukrainian i (for example: erotіc)
+        "ӏ": "l",  # Cyrillic palochka (for example: aduӏt)
+        "ο": "o",  # Greek omicron (for example: Pοrn)
+        "о": "o",  # Cyrillic o (for example: Pоrn)
+        "ρ": "p",  # Greek rho
+        "р": "p",  # Cyrillic er (for example: рorn)
+        "ѕ": "s",  # Cyrillic dze
+        "τ": "t",  # Greek tau
+        "т": "t",  # Cyrillic te
+        "υ": "u",  # Greek upsilon (for example: adυlt)
+        "χ": "x",  # Greek chi (for example: ΧΧΧ)
+        "х": "x",  # Cyrillic ha (for example: ххх)
+        "×": "x",  # multiplication sign (for example: ×××)
+        "у": "y",  # Cyrillic u (for example: plaуboy)
+    }
+)
+
+
+def _security_normalize_text(value: object) -> str:
+    """Fold Unicode disguises before applying parental-safety rules."""
+
+    normalized = unicodedata.normalize(
+        "NFKD", unicodedata.normalize("NFKC", str(value or ""))
+    )
+    characters: list[str] = []
+    for character in normalized:
+        category = unicodedata.category(character)
+        if unicodedata.combining(character) or category in {"Cf", "Cs"}:
+            continue
+        if category == "Cc":
+            # Newlines delimit the independently supplied evidence fields.
+            # Preserve that boundary while dropping all other controls.
+            if character.isspace():
+                characters.append(" ")
+            continue
+        characters.append(character)
+    folded = "".join(characters).casefold()
+    return re.sub(r"\s+", " ", folded).strip()
+
+
 def infer_genre(text: str) -> tuple[str, list[str], float]:
-    folded = text.casefold()
+    folded = _security_normalize_text(text)
+    adult_folded = folded.translate(_ADULT_CONFUSABLE_SKELETON)
     # Adult content must win before movie/lifestyle keywords so parental
     # exclusion cannot be bypassed by a label such as "PORNO MOVIES". Adult
     # Swim and the "adult contemporary" music format are explicit non-adult
@@ -607,8 +691,10 @@ def infer_genre(text: str) -> tuple[str, list[str], float]:
         r"\badult[\s._-]+(?:swim|contemporary|alternative|education)\b|"
         r"\b(?:pop|music)[\s._-]+adult\b"
     )
-    bare_adult_evidence = re.sub(safe_adult_phrases, " ", folded, flags=re.I)
-    if re.search(strong_adult_pattern, folded, re.I) or re.search(
+    bare_adult_evidence = re.sub(
+        safe_adult_phrases, " ", adult_folded, flags=re.I
+    )
+    if re.search(strong_adult_pattern, adult_folded, re.I) or re.search(
         r"\badults?\b", bare_adult_evidence, re.I
     ):
         return "adult", [], 0.97
@@ -1152,6 +1238,38 @@ def public_url_without_query(value: object) -> str:
     return parsed._replace(query="", fragment="").geturl()
 
 
+def declared_epgshare_file_origin(value: object) -> tuple[str, str]:
+    """Validate a caller-declared origin without claiming we fetched it.
+
+    ``--all-source-file`` deliberately bypasses this builder's downloader.  A
+    workflow may still tell us where it downloaded that file, but that claim is
+    weaker than the final response URL observed by :func:`safe_download`.  Keep
+    the accepted declaration narrowly scoped to the same EPGShare HTTPS host
+    boundary and return the public URL plus its *declared* host.
+    """
+
+    text = str(value or "").strip()
+    parsed = urlparse(text)
+    host = (parsed.hostname or "").casefold()
+    allowed = host == "epgshare01.online" or host.endswith(
+        ".epgshare01.online"
+    )
+    if (
+        parsed.scheme != "https"
+        or not host
+        or not allowed
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise BuildError(
+            "--all-source-file-origin-url must be a public EPGShare HTTPS URL "
+            "without credentials, a query, or a fragment."
+        )
+    return parsed.geturl(), host
+
+
 def safe_download(
     url: str,
     destination: Path,
@@ -1406,15 +1524,60 @@ def parse_xmltv_time(value: str | None) -> int | None:
 
 def open_limited_xml(path: Path, maximum_expanded: int) -> LimitedReader:
     raw = Path(path).open("rb")
-    magic = raw.read(2)
-    source: BinaryIO
-    if magic == b"\x1f\x8b":
+    try:
+        return open_limited_xml_handle(
+            raw, maximum_expanded, close_raw_file=True
+        )
+    except Exception:
         raw.close()
-        source = gzip.open(path, "rb")
-    else:
-        raw.seek(0)
-        source = raw
-    return LimitedReader(source, maximum_expanded)
+        raise
+
+
+def open_limited_xml_handle(
+    raw: BinaryIO,
+    maximum_expanded: int,
+    *,
+    close_raw_file: bool = False,
+) -> LimitedReader:
+    """Open XML/gzip data through an already-open, seekable file handle.
+
+    The gzip signature, decompression, and XML reads all use ``raw``.  Keeping
+    the default ``close_raw_file=False`` lets a provenance-sensitive caller
+    retain and re-check the same descriptor after parsing.
+    """
+    raw.seek(0)
+    magic = raw.read(2)
+    raw.seek(0)
+    if magic == b"\x1f\x8b":
+        source: BinaryIO = gzip.GzipFile(fileobj=raw, mode="rb")
+        # GzipFile does not close a caller-supplied file object.  Wrap its
+        # close method when ownership of the underlying regular file belongs
+        # to this helper's caller.
+        if close_raw_file:
+            source = _CloseWithRaw(source, raw)
+        return LimitedReader(source, maximum_expanded)
+    return LimitedReader(
+        raw,
+        maximum_expanded,
+        close_raw=close_raw_file,
+    )
+
+
+class _CloseWithRaw:
+    """Close a transform and its caller-owned backing file together."""
+
+    def __init__(self, source: BinaryIO, raw: BinaryIO) -> None:
+        self.source = source
+        self.raw = raw
+
+    def read(self, size: int = -1) -> bytes:
+        return self.source.read(size)
+
+    def close(self) -> None:
+        try:
+            self.source.close()
+        finally:
+            self.raw.close()
 
 
 def release_top_level(element: etree._Element) -> None:
@@ -1431,6 +1594,20 @@ def reject_unsafe_xml_prefix(path: Path) -> None:
             prefix = source.read(64 * 1024).lower()
     except (gzip.BadGzipFile, EOFError, OSError) as exc:
         raise BuildError("XMLTV input is malformed or truncated.") from exc
+    if b"<!doctype" in prefix or b"<!entity" in prefix:
+        raise BuildError("XML source contains a forbidden DTD or entity declaration.")
+
+
+def reject_unsafe_xml_prefix_handle(raw: BinaryIO) -> None:
+    """Apply the prefix safety check to one already-open source descriptor."""
+    position = raw.tell()
+    try:
+        with open_limited_xml_handle(raw, 2 * 1024 * 1024) as source:
+            prefix = source.read(64 * 1024).lower()
+    except (gzip.BadGzipFile, EOFError, OSError) as exc:
+        raise BuildError("XMLTV input is malformed or truncated.") from exc
+    finally:
+        raw.seek(position)
     if b"<!doctype" in prefix or b"<!entity" in prefix:
         raise BuildError("XML source contains a forbidden DTD or entity declaration.")
 
@@ -3241,6 +3418,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--all-source-url", default=DEFAULT_ALL_SOURCE_URL)
     source.add_argument("--all-source-file", type=Path)
+    parser.add_argument(
+        "--all-source-file-origin-url",
+        default="",
+        help=(
+            "Caller-declared download origin for --all-source-file. The "
+            "builder records this as declared, not as a host it observed."
+        ),
+    )
+    parser.add_argument(
+        "--epgshare-spool-file",
+        type=Path,
+        help=(
+            "Reuse a sealed one-pass EPGShare selection spool. This requires "
+            "--all-source-file so the source SHA-256 can be verified."
+        ),
+    )
     parser.add_argument("--public-dir", type=Path, default=Path("public"))
     parser.add_argument("--work-dir", type=Path, default=Path(".build/work"))
     parser.add_argument("--servers", nargs="+", default=list(DEFAULT_SERVERS))
@@ -3299,6 +3492,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise BuildError("Guide windows must be non-negative and future hours positive.")
     if not 0.0 <= args.minimum_coverage <= 100.0:
         raise BuildError("--minimum-coverage must be between 0 and 100.")
+    if args.epgshare_spool_file and not args.all_source_file:
+        raise BuildError(
+            "--epgshare-spool-file requires --all-source-file for provenance "
+            "verification."
+        )
+    if args.all_source_file_origin_url and not args.all_source_file:
+        raise BuildError(
+            "--all-source-file-origin-url requires --all-source-file."
+        )
 
     validate_build_paths(
         work_dir=args.work_dir,
@@ -3369,14 +3571,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             all_source_path = Path(args.all_source_file).resolve()
             if not all_source_path.is_file():
                 raise BuildError("--all-source-file does not exist.")
-            source_url = ""
+            declared_origin_url = ""
+            declared_origin_host = ""
+            if args.all_source_file_origin_url:
+                declared_origin_url, declared_origin_host = (
+                    declared_epgshare_file_origin(
+                        args.all_source_file_origin_url
+                    )
+                )
+            source_url = declared_origin_url
+            # A declared origin is provenance only.  Do not let an unobserved
+            # URL change how relative data inside the provided file is used.
             source_icon_base_url = ""
             source_details = {
                 "sha256": sha256_file(all_source_path),
                 "bytes": all_source_path.stat().st_size,
                 "etag": "",
                 "lastModified": "",
-                "finalHost": "local-fixture",
+                # This builder did not perform the HTTP exchange, so it cannot
+                # truthfully name a final redirect host.  The source bytes are
+                # still bound to the spool by the SHA-256 above.
+                "finalHost": "",
+                "finalHostObservedByBuilder": False,
+                "inputMode": (
+                    "pre-downloaded-file"
+                    if declared_origin_url
+                    else "local-fixture"
+                ),
+                "originEvidence": (
+                    "caller-declared"
+                    if declared_origin_url
+                    else "none"
+                ),
+                "declaredOriginHost": declared_origin_host,
             }
         else:
             source_url = str(args.all_source_url or DEFAULT_ALL_SOURCE_URL).strip()
@@ -3388,24 +3615,92 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_gzip=True,
                 allowed_host_suffixes=("epgshare01.online",),
             )
-        print(
-            f"Parsing ALL_SOURCES1 once for {len(wanted_epgshare):,} unique IDs.",
-            flush=True,
-        )
-        all_stats = ingest_xmltv_source(
-            connection=connection,
-            path=all_source_path,
-            source_key="epgshare01",
-            wanted_ids=wanted_epgshare,
-            window_start=xml_window_start,
-            source_base_url=source_icon_base_url,
-            maximum_expanded_bytes=args.max_expanded_bytes,
-        )
+            source_details.update(
+                {
+                    "finalHostObservedByBuilder": True,
+                    "inputMode": "builder-download",
+                    "originEvidence": "builder-observed",
+                    "declaredOriginHost": "",
+                }
+            )
+        spool_manifest: Mapping[str, str] = {}
+        if args.epgshare_spool_file:
+            print(
+                "Validating and reusing the one-pass ALL_SOURCES1 selection spool "
+                f"for {len(wanted_epgshare):,} unique IDs.",
+                flush=True,
+            )
+            connection.close()
+            try:
+                verified_spool = copy_and_open_verified_spool(
+                    source=Path(args.epgshare_spool_file).resolve(),
+                    destination=database_path,
+                    expected_source_sha256=str(source_details["sha256"]),
+                    expected_source_bytes=int(source_details["bytes"]),
+                    required_ids=wanted_epgshare,
+                    required_window_start=xml_window_start,
+                    maximum_expanded_bytes=args.max_expanded_bytes,
+                    consumer_epoch=generated_at,
+                )
+            except SpoolError as exc:
+                raise BuildError(str(exc)) from exc
+            connection = verified_spool.connection
+            spool_manifest = verified_spool.manifest
+            spool_stats = verified_spool.stats
+            selected_programmes = int(spool_stats.get("selected_programmes", 0))
+            stored_programmes = int(spool_stats.get("stored_programmes", 0))
+            all_stats = SourceStats(
+                source_key="epgshare01",
+                compressed_bytes=int(source_details["bytes"]),
+                expanded_bytes=int(spool_stats.get("expanded_bytes", 0)),
+                total_elements=int(spool_stats.get("total_elements", 0)),
+                channel_elements=int(spool_stats.get("channel_elements", 0)),
+                unique_channel_ids=int(spool_stats.get("unique_channel_ids", 0)),
+                duplicate_channel_ids=int(spool_stats.get("duplicate_channel_ids", 0)),
+                programme_elements=int(spool_stats.get("programme_elements", 0)),
+                selected_channels=int(spool_stats.get("stored_channels", 0)),
+                selected_programmes=selected_programmes,
+                duplicate_programmes=max(0, selected_programmes - stored_programmes),
+                invalid_start=int(spool_stats.get("invalid_start", 0)),
+                synthesized_stop=int(spool_stats.get("synthesized_stop", 0)),
+                blank_title=int(spool_stats.get("blank_title", 0)),
+                outside_window=int(spool_stats.get("outside_window", 0)),
+            )
+        else:
+            print(
+                f"Parsing ALL_SOURCES1 once for {len(wanted_epgshare):,} unique IDs.",
+                flush=True,
+            )
+            all_stats = ingest_xmltv_source(
+                connection=connection,
+                path=all_source_path,
+                source_key="epgshare01",
+                wanted_ids=wanted_epgshare,
+                window_start=xml_window_start,
+                source_base_url=source_icon_base_url,
+                maximum_expanded_bytes=args.max_expanded_bytes,
+            )
         source_stats["epgshare01"] = all_stats
         source_provenance["epgshare01"] = {
             **source_details,
             **all_stats.public_dict(),
             "url": public_url_without_query(source_url) or "local-fixture",
+            "selectionSpoolReused": bool(args.epgshare_spool_file),
+            **(
+                {
+                    "selectionSpoolSchemaVersion": spool_manifest[
+                        "schema_version"
+                    ],
+                    "selectionSpoolCatalogSha256": spool_manifest[
+                        "catalog_sha256"
+                    ],
+                    "selectionSpoolLogicalSha256": spool_manifest[
+                        "logical_sha256"
+                    ],
+                }
+                if spool_manifest
+                else {}
+            ),
         }
 
         panel_files = parse_panel_files(args.panel_file)

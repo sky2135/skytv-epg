@@ -17,7 +17,8 @@ This is the final Version 1 decision record. The setup steps are in
 
 ## Implemented efficiency and safety controls
 
-- The combined EPGShare gzip is downloaded once and decompressed as a stream.
+- The combined EPGShare gzip and its small official ID catalog are each
+  downloaded once; the guide is decompressed as a stream.
 - XML is parsed once with `lxml.etree.iterparse`; completed elements are cleared.
 - Only selected channels and programmes are staged in disk-backed SQLite.
 - XMLTV, app JSON, and personalization metadata are written as streams.

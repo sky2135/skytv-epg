@@ -3,9 +3,10 @@
 
 This inventory phase runs before the EPG build. It reads the complete live-
 channel inventory for each configured Xtream server, compares exact
-``(server_id, stream_id)`` identities with the private Google Sheet, and appends
-only previously unseen channels as ``REVIEW`` rows. Existing Sheet rows are
-never edited or deleted.
+``(server_id, stream_id)`` identities with the private Google Sheet, and applies
+the fail-closed Version 1 matcher only to previously unseen channels. Exact
+matches with a strong guide are enabled; every uncertain result stays disabled
+as ``REVIEW``. Existing Sheet rows are never edited or deleted.
 
 Severe stream-ID reuse warnings are appended to the private ``Sync Alerts``
 tab. An ``OPEN`` alert keeps that stream quarantined from effective builds until
@@ -43,6 +44,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import build_epg_streaming as streaming  # noqa: E402
+import auto_match_inventory as automatch  # noqa: E402
 
 
 SYNC_VERSION = "1.0"
@@ -56,6 +58,26 @@ MAX_SYNC_ALERT_ROWS = 10_000
 MAX_SYNC_ALERT_BYTES = 8 * 1024 * 1024
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+GOOGLE_CANONICAL_ERROR_STATUSES = frozenset(
+    {
+        "ABORTED",
+        "ALREADY_EXISTS",
+        "CANCELLED",
+        "DATA_LOSS",
+        "DEADLINE_EXCEEDED",
+        "FAILED_PRECONDITION",
+        "INTERNAL",
+        "INVALID_ARGUMENT",
+        "NOT_FOUND",
+        "OUT_OF_RANGE",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED",
+        "UNAUTHENTICATED",
+        "UNAVAILABLE",
+        "UNIMPLEMENTED",
+        "UNKNOWN",
+    }
+)
 ALERT_COLUMNS = (
     "detected_at",
     "server_id",
@@ -76,7 +98,7 @@ class SyncError(RuntimeError):
 
 
 class SheetWriteError(SyncError):
-    """A retry-safe Google Sheet append failure."""
+    """A Google Sheet write failure with conservative committed-row accounting."""
 
     def __init__(self, message: str, appended_count: int = 0):
         super().__init__(message)
@@ -140,6 +162,9 @@ class GoogleSheetLayout:
     title: str
     table_id: str | None
     table_end_row: int | None
+    grid_row_count: int | None
+    grid_column_count: int | None
+    table_has_footer: bool
     basic_filter: dict[str, Any] | None
 
 
@@ -1689,6 +1714,49 @@ def verify_pending_alerts_are_open(
         )
 
 
+def verify_appended_mapping_rows(
+    expected_rows: Sequence[Mapping[str, str]],
+    authoritative_table: MappingTable,
+) -> None:
+    """Require every appended Version 1 cell to survive the authoritative read."""
+    by_key = {
+        (
+            streaming.normalize_server_id(row.get("server_id", "")),
+            streaming.clean_identifier(row.get("stream_id", ""), 120),
+        ): row
+        for row in authoritative_table.rows
+    }
+    for expected_source in expected_rows:
+        expected = {
+            header: streaming.unescape_spreadsheet_text(
+                str(expected_source.get(header, ""))
+            )
+            for header in streaming.SHEET_COLUMNS
+        }
+        try:
+            expected["server_id"] = streaming.normalize_server_id(
+                expected.get("server_id", "")
+            )
+        except streaming.BuildError as exc:
+            raise SyncError("An appended mapping has an invalid server ID.") from exc
+        expected["stream_id"] = streaming.clean_identifier(
+            expected.get("stream_id", ""), 120
+        )
+        expected["channel_name"] = streaming.clean_identifier(
+            expected.get("channel_name", ""), 300
+        )
+        key = (expected["server_id"], expected["stream_id"])
+        actual = by_key.get(key)
+        if actual is None or any(
+            str(actual.get(header, "")) != expected[header]
+            for header in streaming.SHEET_COLUMNS
+        ):
+            raise SyncError(
+                "Google Sheets did not durably store every cell of every newly "
+                "appended mapping; the build snapshot was blocked."
+            )
+
+
 def inventory_overlap_issues(
     table: MappingTable, inventories: Sequence[PanelInventory]
 ) -> list[str]:
@@ -2062,8 +2130,9 @@ def google_sheet_layout(
             url,
             params={
                 "fields": (
-                    "sheets(properties(sheetId,title),"
-                    "tables(tableId,name,range),basicFilter)"
+                    "sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)),"
+                    "tables(tableId,name,range,rowsProperties(footerColorStyle)),"
+                    "basicFilter)"
                 )
             },
             timeout=(20, 180),
@@ -2081,13 +2150,33 @@ def google_sheet_layout(
     finally:
         if response is not None:
             close_response(response)
-    for sheet in payload.get("sheets", []) if isinstance(payload, dict) else []:
-        properties = sheet.get("properties", {}) if isinstance(sheet, dict) else {}
+    raw_sheets = payload.get("sheets", []) if isinstance(payload, dict) else []
+    if not isinstance(raw_sheets, list):
+        raise SyncError("Google Sheets returned invalid spreadsheet metadata.")
+    for sheet in raw_sheets:
+        if not isinstance(sheet, Mapping):
+            raise SyncError("Google Sheets returned invalid spreadsheet metadata.")
+        properties = sheet.get("properties", {})
+        if not isinstance(properties, Mapping):
+            raise SyncError("Google Sheets returned invalid sheet properties.")
         if str(properties.get("title", "")) == tab_name:
             try:
                 numeric_sheet_id = int(properties["sheetId"])
             except (KeyError, TypeError, ValueError):
                 break
+            grid_properties = properties.get("gridProperties")
+            grid_row_count: int | None = None
+            grid_column_count: int | None = None
+            if grid_properties is not None:
+                if not isinstance(grid_properties, Mapping):
+                    raise SyncError("Google Sheets returned invalid grid metadata.")
+                try:
+                    grid_row_count = int(grid_properties["rowCount"])
+                    grid_column_count = int(grid_properties["columnCount"])
+                except (KeyError, TypeError, ValueError):
+                    raise SyncError("Google Sheets returned invalid grid metadata.") from None
+                if grid_row_count < 1 or grid_column_count < column_count:
+                    raise SyncError("The Google Sheet grid is smaller than its data model.")
             raw_tables = sheet.get("tables", [])
             if raw_tables is None:
                 raw_tables = []
@@ -2116,10 +2205,6 @@ def google_sheet_layout(
                     and end_row >= 1
                     and start_column == 0
                     and end_column == column_count
-                    and (
-                        expected_used_rows is None
-                        or end_row == int(expected_used_rows)
-                    )
                 ):
                     matching_tables.append(table)
             if raw_tables and len(matching_tables) != 1:
@@ -2130,12 +2215,17 @@ def google_sheet_layout(
                 )
             table_id: str | None = None
             table_end_row: int | None = None
+            table_has_footer = False
             if matching_tables:
                 raw_table_id = matching_tables[0].get("tableId")
                 if not isinstance(raw_table_id, str) or not raw_table_id.strip():
                     raise SyncError("Google Sheets returned a table without a tableId.")
                 table_id = raw_table_id
                 table_end_row = int(matching_tables[0]["range"]["endRowIndex"])
+                rows_properties = matching_tables[0].get("rowsProperties", {})
+                if not isinstance(rows_properties, Mapping):
+                    raise SyncError("Google Sheets returned invalid table row metadata.")
+                table_has_footer = "footerColorStyle" in rows_properties
             raw_filter = sheet.get("basicFilter")
             if raw_filter is not None and not isinstance(raw_filter, dict):
                 raise SyncError("Google Sheets returned invalid filter metadata.")
@@ -2197,6 +2287,9 @@ def google_sheet_layout(
                 title=tab_name,
                 table_id=table_id,
                 table_end_row=table_end_row,
+                grid_row_count=grid_row_count,
+                grid_column_count=grid_column_count,
+                table_has_footer=table_has_footer,
                 basic_filter=dict(raw_filter) if raw_filter is not None else None,
             )
     raise SyncError(
@@ -2230,7 +2323,7 @@ def parsed_updated_range(
     start = int(match.group(4))
     end_column = match.group(5)
     end = int(match.group(6))
-    if start < 2 or end < start:
+    if start < 1 or end < start:
         return None
     return tab_name, start_column, start, end_column, end
 
@@ -2291,14 +2384,50 @@ def a1_column_label(column_count: int) -> str:
     return result
 
 
-def google_string_row_data(values: Sequence[object]) -> dict[str, Any]:
-    """Build literal string cells; formula-like channel names stay plain text."""
-    return {
-        "values": [
-            {"userEnteredValue": {"stringValue": str(value)}}
-            for value in values
-        ]
-    }
+def google_write_rejection_message(
+    failure_label: str,
+    *,
+    status: int,
+    response_content: bytes,
+    operation: str,
+) -> str:
+    """Describe a Google write failure without reflecting its response body."""
+    canonical_status = ""
+    try:
+        payload = json.loads((response_content or b"{}").decode("utf-8"))
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        candidate = error.get("status", "") if isinstance(error, dict) else ""
+        if candidate in GOOGLE_CANONICAL_ERROR_STATUSES:
+            canonical_status = candidate
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        canonical_status = ""
+
+    if status == 400:
+        category = "the request or Google table layout was rejected"
+    elif status == 401:
+        category = "Google authentication was rejected"
+    elif status == 403:
+        category = (
+            "the service account lacks edit access, a protected range blocked the "
+            "write, or a Google policy denied it"
+        )
+    elif status == 404:
+        category = "the spreadsheet, tab, or table was not found"
+    elif status == 409:
+        category = "the spreadsheet changed concurrently"
+    elif status == 429:
+        category = "the Google Sheets write quota was exceeded"
+    elif 500 <= status <= 599:
+        category = "Google Sheets had a temporary server failure"
+    else:
+        category = "Google Sheets returned an unexpected failure"
+    status_label = f"HTTP {status}"
+    if canonical_status:
+        status_label += f" {canonical_status}"
+    return (
+        f"Google Sheets rejected the {failure_label} {operation} "
+        f"({status_label}: {category})."
+    )
 
 
 def build_basic_filter_request(
@@ -2353,7 +2482,8 @@ def post_google_batch_update(
     # Copy/format/filter updates are idempotent, unlike row appends. Retry only
     # this finalization batch so a transient quota/server fault cannot strand
     # newly appended rows outside the filter.
-    for attempt in range(3):
+    # Three range writes at most, plus one final read-only confirmation pass.
+    for attempt in range(4):
         response = None
         retryable = False
         try:
@@ -2392,43 +2522,301 @@ def post_google_batch_update(
 def append_modern_table_rows(
     session: Any,
     sheet_id: str,
+    tab_name: str,
     layout: GoogleSheetLayout,
     values: Sequence[Sequence[object]],
     *,
+    existing_data_rows: int,
     chunk_size: int,
     failure_label: str,
 ) -> int:
-    """Append literal cells to a Google table so its range/filter expands itself."""
-    if layout.table_id is None:
-        raise SyncError("A modern Google table append requires a tableId.")
-    appended = 0
-    size = max(1, int(chunk_size))
-    for offset in range(0, len(values), size):
-        chunk = values[offset : offset + size]
-        request = {
-            "appendCells": {
-                "tableId": layout.table_id,
-                "rows": [google_string_row_data(row) for row in chunk],
-                "fields": "userEnteredValue",
-            }
+    """Append without fixed row addresses, then make the native table cover them.
+
+    ``values.append`` with ``INSERT_ROWS`` is deliberate: Google chooses the
+    first free logical row atomically, so an editor or another API caller
+    cannot make this process overwrite a row by changing the tab after its
+    metadata read.  Imported/header-only native tables do not consistently
+    accept ``AppendCellsRequest(tableId=...)``, which is why the generic
+    values endpoint is used here as the compatibility path.
+    """
+    if layout.table_id is None or layout.table_end_row is None:
+        raise SyncError("A modern Google table write requires table metadata.")
+    if layout.table_has_footer:
+        raise SyncError(
+            f"The {failure_label} native table has a footer. Remove the footer "
+            "before running Version 1 sync so rows cannot be placed after it."
+        )
+    column_count = len(values[0]) if values else 0
+    if column_count < 1 or any(len(row) != column_count for row in values):
+        raise SyncError("A Google table write has inconsistent columns.")
+    if (
+        layout.grid_column_count is not None
+        and column_count > layout.grid_column_count
+    ):
+        raise SyncError("The Google Sheet grid is narrower than the table write.")
+
+    appended, appended_ranges = append_raw_sheet_rows(
+        session,
+        sheet_id,
+        tab_name,
+        values,
+        existing_data_rows=existing_data_rows,
+        column_count=column_count,
+        chunk_size=chunk_size,
+        failure_label=failure_label,
+    )
+    required_end_row = max(last_row for _first_row, last_row in appended_ranges)
+    maximum_data_rows = (
+        MAX_GOOGLE_MAPPING_ROWS
+        if column_count == len(streaming.SHEET_COLUMNS)
+        else MAX_SYNC_ALERT_ROWS
+    )
+    finalize_modern_table_range(
+        session,
+        sheet_id,
+        tab_name,
+        layout,
+        required_end_row=required_end_row,
+        column_count=column_count,
+        maximum_data_rows=maximum_data_rows,
+        failure_label=failure_label,
+        appended_count=appended,
+    )
+    return appended
+
+
+def google_column_a_used_rows(
+    session: Any,
+    sheet_id: str,
+    tab_name: str,
+    *,
+    maximum_data_rows: int,
+) -> int:
+    """Return the last definitely used row from the mandatory first column."""
+    upper_row = int(maximum_data_rows) + 2
+    range_value = quoted_a1(tab_name, f"A1:A{upper_row}")
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_value}"
+    response = None
+    try:
+        response = session.get(
+            url,
+            params={"majorDimension": "ROWS", "valueRenderOption": "UNFORMATTED_VALUE"},
+            timeout=(20, 180),
+            stream=True,
+        )
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status != 200:
+            raise SyncError("Google Sheets could not confirm the tab's used rows.")
+        content = response_body_limited(response, 4 * 1024 * 1024)
+        payload = json.loads(content.decode("utf-8"))
+    except SyncError:
+        raise
+    except Exception:
+        raise SyncError("Google Sheets could not confirm the tab's used rows.") from None
+    finally:
+        if response is not None:
+            close_response(response)
+    values = payload.get("values", []) if isinstance(payload, dict) else None
+    if not isinstance(values, list) or not values:
+        raise SyncError("Google Sheets returned invalid used-row values.")
+    if len(values) > int(maximum_data_rows) + 1:
+        raise SyncError("The Google Sheet exceeds its configured row limit.")
+    if not isinstance(values[0], list) or not values[0] or not str(values[0][0]).strip():
+        raise SyncError("The Google Sheet first-column header is missing.")
+    for row in values[1:]:
+        if not isinstance(row, list) or not row or not str(row[0]).strip():
+            raise SyncError("The Google Sheet has a blank first-column identity cell.")
+    return len(values)
+
+
+def finalize_modern_table_range(
+    session: Any,
+    sheet_id: str,
+    tab_name: str,
+    original_layout: GoogleSheetLayout,
+    *,
+    required_end_row: int,
+    column_count: int,
+    maximum_data_rows: int,
+    failure_label: str,
+    appended_count: int,
+) -> None:
+    """Make a native table cover all used rows without persisting a stale shrink."""
+    maximum_update_attempts = 3
+    last_problem = (
+        f"Google Sheets stored the {failure_label} rows, but could not confirm "
+        "the native-table range; rerun is safe."
+    )
+    # Each of the first three rounds may issue one update.  The fourth round is
+    # deliberately verification-only: a successful third update must be
+    # observed authoritatively, but it must never lead to a fourth write.
+    for verification_round in range(maximum_update_attempts + 1):
+        try:
+            latest = google_sheet_layout(
+                session,
+                sheet_id,
+                tab_name,
+                column_count=column_count,
+                expected_used_rows=None,
+            )
+            used_end_row = google_column_a_used_rows(
+                session,
+                sheet_id,
+                tab_name,
+                maximum_data_rows=maximum_data_rows,
+            )
+        except SyncError:
+            if verification_round < maximum_update_attempts:
+                time.sleep(2**verification_round)
+                continue
+            raise SheetWriteError(last_problem, appended_count) from None
+        if (
+            latest.table_id != original_layout.table_id
+            or latest.table_end_row is None
+            or latest.table_has_footer
+        ):
+            raise SheetWriteError(
+                f"Google Sheets changed the {failure_label} native table while "
+                "rows were being appended; rerun is safe.",
+                appended_count,
+            )
+        target_end_row = max(
+            int(latest.table_end_row), int(required_end_row), int(used_end_row)
+        )
+        if latest.table_end_row >= target_end_row:
+            return
+        if (
+            latest.grid_row_count is not None
+            and target_end_row > latest.grid_row_count
+        ):
+            raise SheetWriteError(
+                f"Google Sheets stored the {failure_label} rows outside the "
+                "reported grid; rerun is safe.",
+                appended_count,
+            )
+        if verification_round == maximum_update_attempts:
+            raise SheetWriteError(last_problem, appended_count)
+
+        # This target never shrinks either the freshly observed table or the
+        # freshly observed data. If another writer wins the race, the next
+        # iteration re-reads both high-water marks before doing anything else.
+        request_payload = {
+            "requests": [
+                {
+                    "updateTable": {
+                        "table": {
+                            "tableId": latest.table_id,
+                            "range": {
+                                "sheetId": latest.numeric_sheet_id,
+                                "startRowIndex": 0,
+                                "endRowIndex": target_end_row,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": column_count,
+                            },
+                        },
+                        "fields": "range",
+                    }
+                }
+            ]
         }
         url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}:batchUpdate"
         response = None
         response_content = b""
         try:
+            response = session.post(url, json=request_payload, timeout=(20, 180))
+            status = int(getattr(response, "status_code", 0) or 0)
+            response_content = response_body_limited(response, 2 * 1024 * 1024)
+        except Exception:
+            last_problem = (
+                f"Google Sheets stored the {failure_label} rows, but native-table "
+                "range finalization had an uncertain result; rerun is safe."
+            )
+            if verification_round < maximum_update_attempts:
+                time.sleep(2**verification_round)
+                continue
+            raise SheetWriteError(last_problem, appended_count) from None
+        finally:
+            if response is not None:
+                close_response(response)
+        if status not in {200, 201}:
+            last_problem = google_write_rejection_message(
+                failure_label,
+                status=status,
+                response_content=response_content,
+                operation="table-range finalization",
+            )
+            if (
+                status == 429 or 500 <= status <= 599
+            ) and verification_round < maximum_update_attempts:
+                time.sleep(2**verification_round)
+                continue
+            raise SheetWriteError(last_problem, appended_count)
+        try:
+            payload = json.loads((response_content or b"{}").decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+        if not (
+            isinstance(payload, dict)
+            and str(payload.get("spreadsheetId", "")) == sheet_id
+            and isinstance(payload.get("replies"), list)
+            and len(payload["replies"]) == 1
+            and isinstance(payload["replies"][0], dict)
+        ):
+            last_problem = (
+                f"Google Sheets stored the {failure_label} rows, but returned an "
+                "invalid table-range response; rerun is safe."
+            )
+            if verification_round < maximum_update_attempts:
+                continue
+            raise SheetWriteError(last_problem, appended_count)
+    raise SheetWriteError(last_problem, appended_count)
+
+
+def append_raw_sheet_rows(
+    session: Any,
+    sheet_id: str,
+    tab_name: str,
+    values: Sequence[Sequence[object]],
+    *,
+    existing_data_rows: int,
+    column_count: int,
+    chunk_size: int,
+    failure_label: str,
+) -> tuple[int, list[tuple[int, int]]]:
+    """Append RAW rows using Google's logical-table allocator.
+
+    Returned row ranges may begin after the caller's expected row when another
+    editor appended first.  They may never begin before it, overlap one of our
+    earlier chunks, or report a partial write.
+    """
+    end_column = a1_column_label(column_count)
+    range_value = quoted_a1(tab_name, f"A:{end_column}")
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/"
+        f"{range_value}:append"
+    )
+    appended = 0
+    appended_ranges: list[tuple[int, int]] = []
+    size = max(1, int(chunk_size))
+    minimum_next_row = int(existing_data_rows) + 2
+    for offset in range(0, len(values), size):
+        chunk = values[offset : offset + size]
+        if not chunk or any(len(row) != column_count for row in chunk):
+            raise SyncError("A Google Sheet append chunk has inconsistent columns.")
+        response = None
+        response_content = b""
+        try:
             response = session.post(
                 url,
-                json={"requests": [request]},
+                params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
+                json={"majorDimension": "ROWS", "values": [list(row) for row in chunk]},
                 timeout=(20, 180),
             )
             status = int(getattr(response, "status_code", 0) or 0)
             response_content = response_body_limited(response, 2 * 1024 * 1024)
         except Exception:
-            # A transport failure can happen after Google committed the atomic
-            # batch. Never retry this non-idempotent request in-process; the
-            # workflow's authoritative re-read makes the next run reconcile it.
             raise SheetWriteError(
-                f"Google Sheets {failure_label} table append had an uncertain "
+                f"Google Sheets {failure_label} append had an uncertain "
                 "result; rerun will reconcile the authoritative Sheet.",
                 appended + len(chunk),
             ) from None
@@ -2437,32 +2825,86 @@ def append_modern_table_rows(
                 close_response(response)
         if status not in {200, 201}:
             raise SheetWriteError(
-                f"Google Sheets rejected the {failure_label} table append; "
-                "check Editor sharing and API quota.",
+                google_write_rejection_message(
+                    failure_label,
+                    status=status,
+                    response_content=response_content,
+                    operation="append",
+                ),
                 appended,
             )
         try:
             payload = json.loads((response_content or b"{}").decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
-            payload = None
-        valid_success = (
-            isinstance(payload, dict)
-            and str(payload.get("spreadsheetId", "")) == sheet_id
-            and isinstance(payload.get("replies"), list)
-            and len(payload["replies"]) == 1
-            and isinstance(payload["replies"][0], dict)
+            payload = {}
+        updates = payload.get("updates", {}) if isinstance(payload, dict) else None
+        parsed_range = (
+            parsed_updated_range(updates.get("updatedRange", ""))
+            if isinstance(updates, Mapping)
+            else None
         )
-        if not valid_success:
-            # HTTP success means the append may already be committed even when
-            # an intermediary damaged the response. Count it as uncertain and
-            # rely on the required authoritative re-read/deduplication path.
+        parsed_table_range = (
+            parsed_updated_range(payload.get("tableRange", ""))
+            if isinstance(payload, Mapping)
+            else None
+        )
+        row_range = (
+            (parsed_range[2], parsed_range[4])
+            if parsed_range is not None
+            else None
+        )
+        try:
+            updated_rows = (
+                int(updates.get("updatedRows", 0))
+                if isinstance(updates, Mapping)
+                else 0
+            )
+            updated_columns = (
+                int(updates.get("updatedColumns", 0))
+                if isinstance(updates, Mapping)
+                else 0
+            )
+            updated_cells = (
+                int(updates.get("updatedCells", 0))
+                if isinstance(updates, Mapping)
+                else 0
+            )
+        except (TypeError, ValueError):
+            updated_rows = 0
+            updated_columns = 0
+            updated_cells = 0
+        range_rows = row_range[1] - row_range[0] + 1 if row_range else 0
+        if (
+            not isinstance(payload, dict)
+            or str(payload.get("spreadsheetId", "")) != sheet_id
+            or not isinstance(updates, dict)
+            or str(updates.get("spreadsheetId", "")) != sheet_id
+            or parsed_range is None
+            or parsed_range[0] != tab_name
+            or parsed_range[1] != "A"
+            or parsed_range[3] != end_column
+            or row_range is None
+            or parsed_table_range is None
+            or parsed_table_range[0] != tab_name
+            or parsed_table_range[1] != "A"
+            or parsed_table_range[2] != 1
+            or parsed_table_range[3] != end_column
+            or parsed_table_range[4] != row_range[0] - 1
+            or updated_rows != len(chunk)
+            or updated_columns != column_count
+            or updated_cells != len(chunk) * column_count
+            or range_rows != len(chunk)
+            or row_range[0] < minimum_next_row
+        ):
             raise SheetWriteError(
-                f"Google Sheets returned an invalid {failure_label} table append "
-                "response; rerun will reconcile the authoritative Sheet.",
+                f"Google Sheets reported an unexpected or partial {failure_label} "
+                "append range; rerun will reconcile the authoritative Sheet.",
                 appended + len(chunk),
             )
+        appended_ranges.append(row_range)
         appended += len(chunk)
-    return appended
+        minimum_next_row = row_range[1] + 1
+    return appended, appended_ranges
 
 
 def append_classic_sheet_rows(
@@ -2479,92 +2921,22 @@ def append_classic_sheet_rows(
     failure_label: str,
 ) -> int:
     """Append to a classic tab, then reliably expand/create its basic filter."""
-    end_column = a1_column_label(column_count)
-    range_value = quoted_a1(tab_name, f"A:{end_column}")
-    url = (
-        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/"
-        f"{range_value}:append"
+    appended, appended_ranges = append_raw_sheet_rows(
+        session,
+        sheet_id,
+        tab_name,
+        values,
+        existing_data_rows=existing_data_rows,
+        column_count=column_count,
+        chunk_size=chunk_size,
+        failure_label=failure_label,
     )
-    appended = 0
-    appended_ranges: list[tuple[int, int]] = []
-    size = max(1, int(chunk_size))
-    expected_next_row = int(existing_data_rows) + 2
-    for offset in range(0, len(values), size):
-        chunk = values[offset : offset + size]
-        response = None
-        response_content = b""
-        try:
-            response = session.post(
-                url,
-                params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
-                json={"majorDimension": "ROWS", "values": [list(row) for row in chunk]},
-                timeout=(20, 180),
-            )
-            status = int(getattr(response, "status_code", 0) or 0)
-            response_content = response_body_limited(response, 2 * 1024 * 1024)
-        except Exception:
-            raise SheetWriteError(
-                f"Google Sheets {failure_label} append failed; rerun will reconcile "
-                "the authoritative Sheet.",
-                appended + len(chunk),
-            ) from None
-        finally:
-            if response is not None:
-                close_response(response)
-        if status not in {200, 201}:
-            raise SheetWriteError(
-                f"Google Sheets rejected the {failure_label} append; check Editor "
-                "sharing and API quota.",
-                appended,
-            )
-        try:
-            payload = json.loads((response_content or b"{}").decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            payload = {}
-        updates = payload.get("updates", {}) if isinstance(payload, dict) else {}
-        parsed_range = parsed_updated_range(updates.get("updatedRange", ""))
-        row_range = (
-            (parsed_range[2], parsed_range[4])
-            if parsed_range is not None
-            else None
-        )
-        try:
-            updated_rows = int(updates.get("updatedRows", 0))
-            updated_columns = int(updates.get("updatedColumns", 0))
-            updated_cells = int(updates.get("updatedCells", 0))
-        except (TypeError, ValueError):
-            updated_rows = 0
-            updated_columns = 0
-            updated_cells = 0
-        range_rows = (
-            row_range[1] - row_range[0] + 1 if row_range is not None else 0
-        )
-        if (
-            not isinstance(payload, dict)
-            or str(payload.get("spreadsheetId", "")) != sheet_id
-            or not isinstance(updates, dict)
-            or str(updates.get("spreadsheetId", "")) != sheet_id
-            or parsed_range is None
-            or parsed_range[0] != tab_name
-            or parsed_range[1] != "A"
-            or parsed_range[3] != end_column
-            or row_range is None
-            or updated_rows != len(chunk)
-            or updated_columns != column_count
-            or updated_cells != len(chunk) * column_count
-            or range_rows != len(chunk)
-            or row_range[0] != expected_next_row
-        ):
-            raise SheetWriteError(
-                f"Google Sheets reported an unexpected or partial {failure_label} "
-                "append range; rerun will reconcile the authoritative Sheet.",
-                appended + len(chunk),
-            )
-        appended_ranges.append(row_range)
-        appended += len(chunk)
-        expected_next_row = row_range[1] + 1
 
-    final_used_row = max(1, int(existing_data_rows) + 1 + appended)
+    final_used_row = max(
+        1,
+        int(existing_data_rows) + 1 + appended,
+        max((last_row for _first_row, last_row in appended_ranges), default=1),
+    )
     requests_body: list[dict[str, Any]] = []
     if copy_format_validation and appended_ranges:
         requests_body.extend(
@@ -2629,8 +3001,10 @@ def append_google_sheet_rows(
         return append_modern_table_rows(
             session,
             sheet_id,
+            tab_name,
             layout,
             values,
+            existing_data_rows=len(table.rows),
             chunk_size=chunk_size,
             failure_label="Mappings",
         )
@@ -2676,8 +3050,10 @@ def append_sync_alert_rows(
         return append_modern_table_rows(
             session,
             sheet_id,
+            tab_name,
             layout,
             values,
+            existing_data_rows=len(existing_alerts),
             chunk_size=chunk_size,
             failure_label="Sync Alerts",
         )
@@ -2774,6 +3150,9 @@ def run_sync(
     alerts_tab: str = "Sync Alerts",
     provider_failures: Mapping[str, str] | None = None,
     server_configs: Sequence[ServerConfig] = (),
+    all_source_file: Path | None = None,
+    all_source_catalog_file: Path | None = None,
+    epgshare_spool_out: Path | None = None,
 ) -> dict[str, Any]:
     authoritative_table = table
     existing_alerts: list[dict[str, str]] = []
@@ -2810,6 +3189,47 @@ def run_sync(
         authoritative_table, inventories, discovered_at=generated_at
     )
     overlap_issues = inventory_overlap_issues(authoritative_table, inventories)
+    auto_match_summary: dict[str, Any] = {
+        "auto_match_considered_rows": 0,
+        "auto_match_provisional_rows": 0,
+        "auto_matched_rows": 0,
+        "auto_match_review_rows": len(new_rows),
+        "auto_match_rejected_programme_gates": 0,
+    }
+    auto_match_inputs = (
+        bool(all_source_file),
+        bool(all_source_catalog_file),
+        bool(epgshare_spool_out),
+    )
+    if any(auto_match_inputs) and not all(auto_match_inputs):
+        raise SyncError(
+            "ALL_SOURCES1 matching requires its XML file, official text catalog, "
+            "and spool output together."
+        )
+    if (
+        all_source_file is not None
+        and all_source_catalog_file is not None
+        and epgshare_spool_out is not None
+    ):
+        if overlap_issues:
+            # A provider overlap is already a hard failure. Do not spend time
+            # parsing the multi-gigabyte guide for a failed run.
+            pass
+        else:
+            try:
+                outcome = automatch.auto_match_and_spool(
+                    mapping_rows=authoritative_table.rows,
+                    inventories=inventories,
+                    new_rows=new_rows,
+                    all_source_file=Path(all_source_file),
+                    all_source_catalog_file=Path(all_source_catalog_file),
+                    spool_out=Path(epgshare_spool_out),
+                    generated_at=generated_at,
+                )
+            except automatch.AutoMatchError as exc:
+                raise SyncError(str(exc)) from exc
+            new_rows = list(outcome.rows)
+            auto_match_summary = outcome.summary_fields()
     projected_sheet_bytes = validate_projected_sheet_size(
         authoritative_table, new_rows
     )
@@ -2858,6 +3278,7 @@ def run_sync(
             }
             for inventory in inventories
         },
+        **auto_match_summary,
     }
     write_reports(
         output_dir,
@@ -2996,19 +3417,11 @@ def run_sync(
                 summary=summary,
             )
             raise
-        final_keys = final_table.keys
-        missing_after_append = [
-            row
-            for row in new_rows
-            if (
-                streaming.normalize_server_id(row.get("server_id", "")),
-                streaming.clean_identifier(row.get("stream_id", ""), 120),
-            )
-            not in final_keys
-        ]
-        if missing_after_append:
+        try:
+            verify_appended_mapping_rows(new_rows, final_table)
+        except SyncError:
             summary["post_append_validation_error"] = (
-                "Some appended identities were absent from the authoritative re-read."
+                "Some appended mapping cells differed from the authoritative re-read."
             )
             write_reports(
                 output_dir,
@@ -3018,9 +3431,7 @@ def run_sync(
                 missing_rows=missing_rows,
                 summary=summary,
             )
-            raise SyncError(
-                "Google Sheets did not contain all newly appended channel identities."
-            )
+            raise
         write_mapping_snapshot(
             Path(snapshot_out),
             final_table,
@@ -3061,6 +3472,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--write-to-sheet", action="store_true")
     parser.add_argument(
+        "--all-source-file",
+        type=Path,
+        help="Downloaded EPGShare ALL_SOURCES1 XML or XML.GZ used for exact matching.",
+    )
+    parser.add_argument(
+        "--all-source-catalog-file",
+        type=Path,
+        help="Official EPGShare ALL_SOURCES1 text catalog used to corroborate the XML.",
+    )
+    parser.add_argument(
+        "--epgshare-spool-out",
+        type=Path,
+        help="Ephemeral sealed SQLite hand-off for the production EPG builder.",
+    )
+    parser.add_argument(
         "--minimum-server-channels",
         nargs="*",
         default=[],
@@ -3081,6 +3507,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     generated_at = generated_timestamp(args.now_utc)
     output_dir = Path(args.output_dir).resolve()
     snapshot_out = Path(args.snapshot_out).resolve()
+    auto_match_args = (
+        bool(args.all_source_file),
+        bool(args.all_source_catalog_file),
+        bool(args.epgshare_spool_out),
+    )
+    if any(auto_match_args) and not all(auto_match_args):
+        raise SyncError(
+            "Use --all-source-file, --all-source-catalog-file, and "
+            "--epgshare-spool-out together."
+        )
+    if args.write_to_sheet and not args.all_source_file:
+        raise SyncError(
+            "Sheet writes require the downloaded ALL_SOURCES1 file so new channels "
+            "can be checked safely before they are appended."
+        )
+    all_source_file = (
+        Path(args.all_source_file).resolve() if args.all_source_file else None
+    )
+    all_source_catalog_file = (
+        Path(args.all_source_catalog_file).resolve()
+        if args.all_source_catalog_file
+        else None
+    )
+    epgshare_spool_out = (
+        Path(args.epgshare_spool_out).resolve()
+        if args.epgshare_spool_out
+        else None
+    )
+    if (
+        all_source_file is not None
+        and all_source_catalog_file is not None
+        and epgshare_spool_out is not None
+        and len({all_source_file, all_source_catalog_file, epgshare_spool_out}) != 3
+    ):
+        raise SyncError("The ALL_SOURCES1 inputs and spool output must be different files.")
     selected_servers = [streaming.normalize_server_id(value) for value in args.servers]
     if len(selected_servers) != len(set(selected_servers)):
         raise SyncError("Server selections must be unique.")
@@ -3176,6 +3637,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             alerts_tab=args.alerts_tab,
             provider_failures=provider_failures,
             server_configs=configs,
+            all_source_file=all_source_file,
+            all_source_catalog_file=all_source_catalog_file,
+            epgshare_spool_out=epgshare_spool_out,
         )
         if bootstrap_error:
             raise SyncError(bootstrap_error)
@@ -3188,6 +3652,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "Inventory sync complete: "
         f"{summary['inventory_rows']:,} live channels, "
         f"{summary['new_rows']:,} new, "
+        f"{summary['auto_matched_rows']:,} auto-matched, "
         f"{summary['appended_rows']:,} appended, "
         f"{summary['changed_rows']:,} changed-name reports, "
         f"{summary['missing_rows']:,} missing reports.",

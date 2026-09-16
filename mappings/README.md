@@ -9,10 +9,10 @@ frozen regression fixtures:
 - `server_3_final_mapping.csv`
 
 The Sheet synchronizer and production EPG builder do not edit these files. New
-provider channels are appended to the private Google Sheet with `enabled=FALSE`
-and `action=REVIEW`; they are not committed to this folder or any Git branch.
-An operator must verify the row, approve its action, and explicitly set
-`enabled=TRUE` before it can enter any public output.
+provider channels are appended only to the private Google Sheet; they are not
+committed to this folder or any Git branch. A single exact EPGShare match with
+a verified useful programme guide may be enabled automatically. Every uncertain
+row uses `enabled=FALSE` and `action=REVIEW` until an operator verifies it.
 
 Optional category-coverage reports may also be placed here:
 

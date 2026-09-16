@@ -510,6 +510,59 @@ class MappingContractTests(unittest.TestCase):
         self.assertEqual(adult.content_rating, "adult")
         self.assertGreaterEqual(adult.confidence, 0.95)
 
+        for disguised_adult in (
+            "IN | ＡＤＵＬＴ",
+            "ＰＯＲＮ Movies",
+            "P\u200born Movies",
+            "Pörn Movies",
+            "Pоrn Movies",
+            "PОrn Movies",
+            "Pοrn Movies",
+            "PΟrn Movies",
+            "Аdult Movies",
+            "аdult Movies",
+            "Aԁult Movies",
+            "AԀult Movies",
+            "ΧΧΧ Movies",
+            "χχχ Movies",
+            "рorn Movies",
+            "РORN Movies",
+            "aduӏt Movies",
+            "ADUӀT Movies",
+            "ххх Movies",
+            "ХХХ Movies",
+            "××× Movies",
+            "еrotic Movies",
+            "ЕROTIC Movies",
+            "erotіc Movies",
+            "EROTІC Movies",
+            "erotiс Movies",
+            "EROTIС Movies",
+            "аdult swim рorn",
+            "αdυӏτ Movies",
+            "ΑDΥӀΤ Movies",
+            "ρorn Movies",
+            "ΡORN Movies",
+            "εroτιϲ Movies",
+            "ΕROΤΙϹ Movies",
+            "ѕeχτreme Movies",
+            "ЅEΧΤREME Movies",
+            "plaуboy Movies",
+            "PLAУBOY Movies",
+            "Ροrn Movies",
+            "αdult Movies",
+            "adυlt Movies",
+            "adulτ Movies",
+            "εrotic Movies",
+            "erotιc Movies",
+            "erotiϲ Movies",
+            "ѕextreme Movies",
+        ):
+            with self.subTest(disguised_adult=disguised_adult):
+                genre, _subgenres, confidence = runner.infer_genre(disguised_adult)
+                self.assertEqual(genre, "adult")
+                self.assertGreaterEqual(confidence, 0.95)
+
         adult_swim = runner.build_metadata(
             {
                 "channel_name": "CA - ADULT SWIM HD",
@@ -521,6 +574,9 @@ class MappingContractTests(unittest.TestCase):
         )
         self.assertEqual(adult_swim.genre, "kids")
         self.assertEqual(adult_swim.content_rating, "general")
+        self.assertNotEqual(runner.infer_genre("Аdult Swim")[0], "adult")
+        self.assertNotEqual(runner.infer_genre("αdυӏτ Swim")[0], "adult")
+        self.assertNotEqual(runner.infer_genre("Spоrts Channel")[0], "sports")
 
         for channel_name in (
             "Sex and the City 24/7",

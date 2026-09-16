@@ -144,9 +144,11 @@ updates and never receives future channels. Do not upload it to GitHub and do
 not use it instead of the workbook during this setup.
 
 The private Google Sheet becomes the live mapping after Sections 11 and 12.
-The inventory run in Section 12 adds channels that are not already present.
-After that successful run, `Mappings` contains every valid, unique live stream
-returned by the configured API or M3U for each server during that run.
+The inventory run in Section 12 adds channels that are not already present and
+tries to assign their EPG automatically. After that successful run, `Mappings`
+contains every valid, unique live stream returned by the configured API or M3U
+for each server during that run. Safe exact matches are enabled; uncertain rows
+remain disabled for review.
 
 The 25,170 starter rows are historical schedule mappings, not a completely
 human-reviewed personalization catalog. They include 11,939 approved
@@ -371,11 +373,16 @@ object storage and a CDN.
     with `skytv-channel-sync-summary-`. It contains only `summary.json` and is
     kept for seven days.
 
-This first run is a safety check. It does not write to Google Sheets.
+This first run is a safety check. It does not write to Google Sheets. It still
+downloads and streams the large combined EPG file and checks its official ID
+list so that the automatic-match result shown in the report is the same
+decision the write-enabled run will use.
 
 ## 12. Run the inventory again and add newly returned channels
 
 Only continue after Section 11 finishes successfully for all three servers.
+Do not edit `Mappings` or `Sync Alerts` while either Version 1 workflow is
+queued or running.
 
 1. Return to **Actions** → **1 - Sync channels to Google Sheet**.
 2. Click **Run workflow**.
@@ -383,18 +390,40 @@ Only continue after Section 11 finishes successfully for all three servers.
 4. Turn on **Add missing channels to Google Sheet** for this second run.
 5. Click **Run workflow**.
 6. Wait for the green check mark.
-7. Open the run summary and note the numbers of rows added and open alerts.
+7. Open the run summary and note:
+   - **New channels safely matched automatically**;
+   - **New channels left for review**;
+   - **Rows added to Google Sheet**; and
+   - **Open alerts awaiting review**.
 8. Return to the Google Sheet and reload the page.
 9. Open the `Mappings` tab.
-10. Scroll to the bottom or filter the `action` column for `REVIEW`. Newly
-    discovered channels are appended there with `enabled=FALSE`.
+10. Filter `action` for `AUTO_EPGSHARE` to see safe exact matches that were
+    enabled automatically. Filter `action` for `REVIEW` to see uncertain new
+    channels that remain disabled.
 11. Open `Sync Alerts` and filter the `status` column for `OPEN`.
+
+If the workflow says that the automatic-approval batch exceeded its Version 1
+safety limit, do not bypass the limit. No Sheet write has occurred. Copy the
+exact error and provide it for a one-time review of the unusually large batch.
 
 The sync never edits or deletes an existing mapping row. It appends only a
 previously unseen `(server_id, stream_id)` pair. A channel that disappears from
 a provider is counted in the workflow summary but is not automatically removed.
 
-## 13. Review newly discovered channels in Google Sheets
+For a new channel, automatic EPG approval requires all of the following in the
+same run:
+
+- one exact real EPGShare ID, with no second candidate;
+- an explicit matching country/market;
+- at least two different useful current/future programme time slots; and
+- the first useful programme starts within six hours and the guide extends at
+  least six hours ahead.
+
+Fuzzy, dummy, generic-numbered, adult, ambiguous, or weak-guide results remain
+disabled in `REVIEW`. Server 1 is always matched only to EPGShare; its native
+EPG ID is never used.
+
+## 13. Review only the channels that automation could not safely decide
 
 1. Open the `Mappings` tab.
 2. Use the filter on the `action` column and select only `REVIEW`.
@@ -414,12 +443,14 @@ a provider is counted in the workflow summary but is not automatically removed.
    `IGNORE`. Do not delete the row, because the next inventory run would find
    and add it again.
 
-Every new row starts with `enabled=FALSE`, `action=REVIEW`, and
-`metadata_status=review`, so its provider-supplied text cannot enter any public
-guide or metadata file before you approve and enable it. A Server 2 or Server 3
-row may show the provider's native `epg_channel_id` as an
-unapproved candidate. Verify both its source and ID before changing `action` to
-`APPROVED`.
+Rows that did not meet every automatic safety rule start with `enabled=FALSE`
+and `action=REVIEW`, so they cannot enter any public guide. A provisional exact
+EPGShare ID may be shown to help you review it, but the row stays disabled.
+
+Rows that did meet every rule use `action=AUTO_EPGSHARE` and `enabled=TRUE`.
+You do not need to choose their schedule manually. Their personalization
+metadata still uses `metadata_status=review`; schedule matching does not guess
+or approve language, religion, sport, or other app-group metadata.
 
 For Server 1, always use `epgshare01`; native Server 1 EPG is blocked. Servers 2
 and 3 can use native panel EPG when deliberately configured, but EPGShare is the
@@ -519,8 +550,9 @@ Repeat these steps and do not force the channel into the guide.
 7. Open the run summary and confirm it says the streaming EPG build succeeded.
 8. If needed, download the artifact beginning with `skytv-epg-diagnostics-`.
 
-The first build can take much longer than the inventory check because it
-downloads and streams the combined EPG file.
+Both workflows download and stream the combined EPG file. The build can take
+longer because it also writes, validates, and packages every XML and JSON
+output.
 
 ## 15. Verify the live files
 
@@ -584,8 +616,9 @@ or setup package.
 After the first setup, the system runs automatically:
 
 1. Every day at 04:37 Toronto time, the main workflow checks all three servers.
-2. New streams are appended to `Mappings` with `enabled=FALSE` and
-   `action=REVIEW`. They stay private and excluded from every published file.
+2. New streams with one safe exact EPGShare match and a verified programme
+   guide are enabled automatically. Uncertain streams are appended with
+   `enabled=FALSE` and `action=REVIEW`.
 3. Existing mapping rows and your manual classifications are never overwritten.
 4. The same run reads a temporary local snapshot of the private Sheet, builds
    and validates the guide, and deploys the XML and JSON outputs.
@@ -601,8 +634,8 @@ Your regular task is:
 
 1. Open the Google Sheet.
 2. Filter `action` to `REVIEW`.
-3. For each row you can verify, complete every approval check in Section 13 and
-   set `enabled=TRUE` last. Leave uncertain rows disabled and in review.
+3. Manually decide only those uncertain rows. Leave anything you cannot verify
+   disabled and in review.
 4. Gradually review the unknown personalization metadata described in Section
    13, starting with the languages and interests your users select.
 5. Open `Sync Alerts`, filter `status` to `OPEN`, and follow the alert-resolution
@@ -641,7 +674,21 @@ Your regular task is:
    - **HTTP is blocked:** first ask the provider for HTTPS; only then set
      `ALLOW_INSECURE_PANEL_HTTP=true` if no HTTPS endpoint exists.
    - **Google 403 / permission denied:** confirm the Google Sheets API is
-     enabled and the service-account email has Editor access to the Sheet.
+     enabled; confirm the exact `client_email` from the JSON key has Editor
+     access; then use **Data** → **Protect sheets and ranges** and permit that
+     same account on both tabs.
+   - **Google HTTP 400 table/layout rejection:** the repaired Version 1 supports
+     the table created by importing the supplied workbook. If Google still
+     rejects `Sync Alerts`, click a cell there, open the dropdown beside
+     `SyncAlertsTable`, and choose **Revert to unformatted data**. Wait for
+     **Saved to Drive**, then rerun with the update option off and then on. Only
+     revert `MappingsTable` if a later HTTP 400 error specifically names
+     `Mappings`. If the choice is absent, that tab is already a classic range.
+     Reverting retains cell data but removes native-table styling and features.
+     Never choose **Delete table** because it removes the table data; never
+     delete a tab, clear formatting, or reimport the workbook.
+   - **Google 429 or HTTP 500–599:** wait a few minutes and safely rerun; do not
+     change the Sheet layout.
    - **Wrong spreadsheet or tab:** check `GOOGLE_SHEET_ID` and confirm the tab
      names are exactly `Mappings` and `Sync Alerts`.
    - **Open Sync Alerts / quarantined channels:** fix and verify the matching
@@ -657,11 +704,15 @@ Your regular task is:
 3. If the error says the Sheet cannot be read, confirm the Google Sheets API is
    enabled, `GOOGLE_SHEET_ID` is correct, and the service-account email still
    has Editor access.
-4. If a recent Sheet edit caused the problem, open the Sheet and use
+4. If the error says **runnable-row truncation guard**, do not lower the stated
+   minimum. Open `Sync Alerts`, filter to that server's `OPEN` rows, and resolve
+   enough verified mappings using Section 13; alternatively provide the exact
+   error for review. Then rerun Workflow 2.
+5. If a recent Sheet edit caused the problem, open the Sheet and use
    **File** → **Version history** → **See version history** to restore the last
    working version.
-5. Wait until the Sheet says **Saved to Drive**.
-6. Manually run **2 - Build and publish EPG** again.
+6. Wait until the Sheet says **Saved to Drive**.
+7. Manually run **2 - Build and publish EPG** again.
 
 ### If the service-account JSON key is exposed
 
@@ -727,8 +778,8 @@ the inventory see it as new and add it again. Instead:
 - [ ] GitHub Pages source set to **GitHub Actions**
 - [ ] Inventory report-only run completed successfully
 - [ ] Inventory write run completed successfully
-- [ ] New `REVIEW` rows checked; approved rows set to `enabled=TRUE`, and
-      uncertain rows left disabled
+- [ ] Automatic EPG matches reviewed by count; remaining `REVIEW` rows checked
+      and uncertain rows left disabled
 - [ ] Important language, region, genre, sport, and religion metadata reviewed;
       uncertain values deliberately left unknown
 - [ ] `OPEN` Sync Alerts reviewed and resolved, or deliberately left quarantined

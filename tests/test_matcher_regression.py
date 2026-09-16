@@ -21,6 +21,10 @@ OPT_PATH = REPO_ROOT / "src" / "skytv_epg_optimizations.py"
 ICON_PATH = REPO_ROOT / "src" / "skytv_epg_icons.py"
 RUNNER_PATH = REPO_ROOT / "scripts" / "build_all_servers.py"
 STREAMING_RUNNER_PATH = REPO_ROOT / "scripts" / "build_epg_streaming.py"
+AUTO_MATCH_ADAPTER_PATH = REPO_ROOT / "src" / "skytv_epg_auto_match_v1.py"
+AUTO_MATCH_INTEGRATION_PATH = REPO_ROOT / "scripts" / "auto_match_inventory.py"
+EPG_CATALOG_STREAM_PATH = REPO_ROOT / "scripts" / "epg_catalog_stream.py"
+EPG_SELECTION_SPOOL_PATH = REPO_ROOT / "scripts" / "epg_selection_spool.py"
 CHANNEL_INVENTORY_RUNNER_PATH = (
     REPO_ROOT / "scripts" / "sync_channel_inventory.py"
 )
@@ -32,6 +36,10 @@ CHANNEL_INVENTORY_WORKFLOW_PATH = (
     REPO_ROOT / ".github" / "workflows" / "channel_inventory_sync.yml"
 )
 CHANNEL_INVENTORY_REQUIREMENTS_PATH = REPO_ROOT / "requirements-sync.txt"
+APPROVED_ALIASES_PATH = REPO_ROOT / "knowledge" / "approved_channel_aliases.csv"
+SCHEDULE_EQUIVALENCES_PATH = (
+    REPO_ROOT / "knowledge" / "schedule_equivalence_groups.json"
+)
 NOTEBOOK_PATH = REPO_ROOT / "SKYTV_EPG_v8_4_Colab_Only.ipynb"
 SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
@@ -145,7 +153,7 @@ def catalog_for_all_self_tests(engine):
 class MatcherIntegrityTests(unittest.TestCase):
     def test_integrity_manifest_hashes(self) -> None:
         manifest = json.loads((REPO_ROOT / "MATCHER_INTEGRITY.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["schemaVersion"], 5)
+        self.assertEqual(manifest["schemaVersion"], 6)
         self.assertEqual(manifest["matcherVersion"], "8.4")
         self.assertEqual(manifest["builderVersion"], "7.1")
         self.assertEqual(manifest["streamingPipelineVersion"], "1.0")
@@ -156,17 +164,19 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertEqual(manifest["githubRelease"], "1.0-private-google-sheets")
         self.assertEqual(
             manifest["architecture"],
-            "contextual_v8_matcher_frozen_with_private_google_sheets_epg_v1_"
-            "and_separate_exact_icon_layer",
+            "contextual_v8_matcher_frozen_with_strict_auto_match_boundary_"
+            "private_google_sheets_epg_v1_and_separate_exact_icon_layer",
         )
         self.assertEqual(
             manifest["productionArchitecture"],
-            "single_epgshare_all_iterparse_sqlite_spool_private_google_sheets_"
-            "api_mapping_and_inventory_sync_server1_epgshare_only",
+            "single_epgshare_all_iterparse_corroborated_catalog_sealed_sqlite_"
+            "spool_private_google_sheets_api_inventory_server1_epgshare_only",
         )
         decision_boundary = " ".join(manifest["decisionBoundary"])
         self.assertIn("private Google Sheet", decision_boundary)
         self.assertIn("Sync Alerts", decision_boundary)
+        self.assertIn("previously unseen", decision_boundary)
+        self.assertIn("programme gate", decision_boundary)
         self.assertNotIn("published Google Sheet CSV", decision_boundary)
         self.assertEqual(manifest["legacyEngineSha256"], hashlib.sha256(ENGINE_PATH.read_bytes()).hexdigest())
         self.assertEqual(manifest["contextualV8Sha256"], hashlib.sha256(V8_PATH.read_bytes()).hexdigest())
@@ -180,6 +190,22 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertEqual(
             manifest["streamingRunnerSha256"],
             hashlib.sha256(STREAMING_RUNNER_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["autoMatchAdapterSha256"],
+            hashlib.sha256(AUTO_MATCH_ADAPTER_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["autoMatchIntegrationSha256"],
+            hashlib.sha256(AUTO_MATCH_INTEGRATION_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["epgCatalogStreamSha256"],
+            hashlib.sha256(EPG_CATALOG_STREAM_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["epgSelectionSpoolSha256"],
+            hashlib.sha256(EPG_SELECTION_SPOOL_PATH.read_bytes()).hexdigest(),
         )
         self.assertEqual(
             manifest["sheetSeedExporterSha256"],
@@ -197,6 +223,14 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertEqual(
             manifest["channelInventoryRequirementsSha256"],
             hashlib.sha256(CHANNEL_INVENTORY_REQUIREMENTS_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["approvedAliasesSha256"],
+            hashlib.sha256(APPROVED_ALIASES_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["scheduleEquivalencesSha256"],
+            hashlib.sha256(SCHEDULE_EQUIVALENCES_PATH.read_bytes()).hexdigest(),
         )
         self.assertEqual(manifest["notebookSha256"], hashlib.sha256(NOTEBOOK_PATH.read_bytes()).hexdigest())
 

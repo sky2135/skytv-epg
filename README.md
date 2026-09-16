@@ -6,6 +6,10 @@ Start with [docs/START_HERE_VERSION_1.md](docs/START_HERE_VERSION_1.md). It is
 written as a beginning-to-end checklist and assumes no GitHub or Google Cloud
 experience.
 
+If an existing run failed while writing `Sync Alerts`, use
+[docs/REPAIR_CURRENT_SETUP_VERSION_1.md](docs/REPAIR_CURRENT_SETUP_VERSION_1.md)
+to repair it without replacing the Sheet or creating another repository.
+
 ## Version 1 setup
 
 - Keep this existing repository and its `main` branch.
@@ -19,11 +23,14 @@ experience.
 
 The daily workflow asks all three configured providers for their live-channel
 inventories. Every valid unique stream returned by the API or playlist fallback
-is compared by `(server_id, stream_id)`; unseen pairs are appended to the
-`Mappings` tab as disabled `REVIEW` rows. Existing Sheet rows are never deleted
-or silently remapped. The same run then streams the combined EPGShare source,
-builds the TiviMate XMLTV and app JSON outputs, validates them, and deploys them
-through GitHub Pages.
+is compared by `(server_id, stream_id)`. For an unseen pair, Version 1 tries the
+frozen Smart Rules matcher against the complete EPGShare catalog. It enables a
+row only when there is one exact, region-consistent real channel ID and that
+same downloaded guide contains a useful current/future schedule. All uncertain
+rows are appended disabled for review. Existing Sheet rows are never deleted
+or silently remapped. The same single EPGShare parse is reused to build the
+TiviMate XMLTV and app JSON outputs, which are validated and deployed through
+GitHub Pages.
 
 Server 1 programme data is always sourced from EPGShare. Server 1 credentials
 are used only by the inventory step to discover its channel list; they are not
@@ -50,15 +57,15 @@ approved, and enabled. The files are migration starters, not proof of the
 providers' complete current lineups. The CSV seed is a frozen backup and never
 updates. The imported private Google Sheet becomes the live mapping authority.
 The first successful strict inventory sync asks each server for its live list
-and appends every missing valid, uniquely identified row returned in that run
-with `enabled=FALSE` and `action=REVIEW`. Later runs repeat that exact-key
-comparison automatically.
+and appends every missing valid, uniquely identified row returned in that run.
+Safe exact EPGShare matches with a verified programme guide are enabled
+automatically; the rest use `enabled=FALSE` and `action=REVIEW`. Later runs
+repeat that exact-key comparison automatically.
 
-New rows contain conservative metadata suggestions for sorting and review. They
-do not enter any public output, receive a trusted schedule, or become eligible
-for personalized groups until reviewed, approved, and explicitly changed to
-`enabled=TRUE`. Changing `action` alone is not enough. A fuzzy name match is
-never approved unattended.
+New rows contain conservative metadata suggestions for sorting and review.
+Automatic schedule approval does **not** approve personalization metadata:
+`metadata_status=review` remains until a person checks language, region, genre,
+sport, and religion. A fuzzy name match is never approved unattended.
 Possible stream-ID reuse is recorded in the private `Sync Alerts` tab and stays
 quarantined from builds while the alert status is `OPEN`.
 
@@ -93,7 +100,10 @@ reports are generated automatically.
 ## Implementation safety
 
 - The roughly 2 GB expanded EPGShare document is parsed once with
-  `lxml.etree.iterparse`.
+  `lxml.etree.iterparse`; the selected SQLite spool is verified and reused by
+  the output builder instead of parsing the XML a second time.
+- Its exact channel-ID set is checked against EPGShare's small sectioned
+  companion catalog before automatic matching, including real/dummy provenance.
 - Selected schedules are staged in disk-backed SQLite.
 - XML and JSON outputs are written as deterministic gzip streams.
 - Untrusted downloads, XML structure, compressed/expanded sizes, Sheet rows,

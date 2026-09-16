@@ -969,6 +969,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     [original.get(column, "") for column in streaming.SHEET_COLUMNS],
                 ]
                 self.alert_values = [list(sync.ALERT_COLUMNS)]
+                self.alert_table_end = 1
                 self.posts = []
 
             def get(self, url, **_kwargs):
@@ -990,6 +991,10 @@ class ReportsAndSheetsTests(unittest.TestCase):
                                 "properties": {
                                     "sheetId": 43,
                                     "title": "Sync Alerts",
+                                    "gridProperties": {
+                                        "rowCount": 10_000,
+                                        "columnCount": 11,
+                                    },
                                 },
                                 "tables": [
                                     {
@@ -998,7 +1003,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                                         "range": {
                                             "sheetId": 43,
                                             "startRowIndex": 0,
-                                            "endRowIndex": len(self.alert_values),
+                                            "endRowIndex": self.alert_table_end,
                                             "startColumnIndex": 0,
                                             "endColumnIndex": 11,
                                         },
@@ -1011,30 +1016,45 @@ class ReportsAndSheetsTests(unittest.TestCase):
 
             def post(self, url, **kwargs):
                 self.posts.append((url, kwargs))
+                if not url.endswith(":batchUpdate"):
+                    rows = kwargs["json"]["values"]
+                    first_row = len(self.alert_values) + 1
+                    last_row = first_row + len(rows) - 1
+                    if self.commit_alert:
+                        self.alert_values.extend([list(row) for row in rows])
+                    # Simulate Google's native table growing even when the
+                    # values read is deliberately stale in the negative case.
+                    self.alert_table_end = max(self.alert_table_end, last_row)
+                    payload = (
+                        {
+                            "spreadsheetId": "a" * 30,
+                            "tableRange": (
+                                f"'Sync Alerts'!A1:K{first_row - 1}"
+                            ),
+                            "updates": {
+                                "spreadsheetId": "a" * 30,
+                                "updatedRange": (
+                                    f"'Sync Alerts'!A{first_row}:K{last_row}"
+                                ),
+                                "updatedRows": len(rows),
+                                "updatedColumns": 11,
+                                "updatedCells": len(rows) * 11,
+                            },
+                        }
+                        if self.valid_response
+                        else {"updates": {}}
+                    )
+                    return FakeResponse(200, payload)
                 requests = kwargs["json"]["requests"]
-                append_cells = requests[0].get("appendCells", {})
-                if (
-                    self.commit_alert
-                    and append_cells.get("tableId") == "table-alerts-v1"
-                ):
-                    for row in append_cells["rows"]:
-                        self.alert_values.append(
-                            [
-                                cell["userEnteredValue"]["stringValue"]
-                                for cell in row["values"]
-                            ]
-                        )
-                payload = (
+                return FakeResponse(
+                    200,
                     {
                         "spreadsheetId": "a" * 30,
                         "replies": [{} for _request in requests],
-                    }
-                    if self.valid_response
-                    else {"replies": [{} for _request in requests]}
+                    },
                 )
-                return FakeResponse(200, payload)
 
-        # A syntactically valid AppendCells response is not enough: if the
+        # A syntactically valid values.append response is not enough: if the
         # authoritative re-read cannot see the OPEN row, stop before Mappings
         # or an effective snapshot can proceed.
         silent = AlertTableSession(commit_alert=False)
@@ -1167,6 +1187,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     200,
                     {
                         "spreadsheetId": "a" * 30,
+                        "tableRange": "'Sync Alerts'!A1:K1",
                         "updates": {
                             "spreadsheetId": "a" * 30,
                             "updatedRange": "'Sync Alerts'!A2:K2",
@@ -1351,7 +1372,14 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     {
                         "sheets": [
                             {
-                                "properties": {"sheetId": 42, "title": "Mappings"},
+                                "properties": {
+                                    "sheetId": 42,
+                                    "title": "Mappings",
+                                    "gridProperties": {
+                                        "rowCount": 100,
+                                        "columnCount": 33,
+                                    },
+                                },
                                 "basicFilter": {
                                     "range": {
                                         "sheetId": 42,
@@ -1386,6 +1414,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     200,
                     {
                         "spreadsheetId": "a" * 30,
+                        "tableRange": "'Mappings'!A1:AG2",
                         "updates": {
                             "spreadsheetId": "a" * 30,
                             "updatedRange": "'Mappings'!A3:AG3",
@@ -1401,7 +1430,10 @@ class ReportsAndSheetsTests(unittest.TestCase):
             session, "a" * 30, "Mappings", current, [new]
         )
         self.assertEqual(appended, 1)
-        self.assertIn("tables(tableId,name,range)", session.get_kwargs["params"]["fields"])
+        self.assertIn(
+            "tables(tableId,name,range,rowsProperties(footerColorStyle))",
+            session.get_kwargs["params"]["fields"],
+        )
         self.assertIn("basicFilter", session.get_kwargs["params"]["fields"])
         append_kwargs = session.posts[0][1]
         self.assertEqual(append_kwargs["params"]["valueInputOption"], "RAW")
@@ -1432,21 +1464,34 @@ class ReportsAndSheetsTests(unittest.TestCase):
             {"6": {"filterCriteria": {"hiddenValues": ["FALSE"]}}},
         )
 
-    def test_modern_mapping_table_uses_append_cells_with_literal_strings(self) -> None:
+    def test_modern_mapping_table_expands_then_writes_literal_strings(self) -> None:
         current = table([mapping_row("server_1", "1", "One")])
         new = mapping_row("server_1", "2", "=Formula", action="REVIEW", epg_id="")
 
         class ModernSession:
             def __init__(self):
                 self.posts = []
+                self.table_end = 2
 
-            def get(self, _url, **_kwargs):
+            def get(self, url, **_kwargs):
+                if "/values/" in url:
+                    return FakeResponse(
+                        200,
+                        {"values": [["server_id"], ["server_1"], ["server_1"]]},
+                    )
                 return FakeResponse(
                     200,
                     {
                         "sheets": [
                             {
-                                "properties": {"sheetId": 42, "title": "Mappings"},
+                                "properties": {
+                                    "sheetId": 42,
+                                    "title": "Mappings",
+                                    "gridProperties": {
+                                        "rowCount": 100,
+                                        "columnCount": 33,
+                                    },
+                                },
                                 "tables": [
                                     {
                                         "tableId": "table-mappings-v1",
@@ -1454,7 +1499,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                                         "range": {
                                             "sheetId": 42,
                                             "startRowIndex": 0,
-                                            "endRowIndex": 2,
+                                            "endRowIndex": self.table_end,
                                             "startColumnIndex": 0,
                                             "endColumnIndex": 33,
                                         },
@@ -1467,8 +1512,29 @@ class ReportsAndSheetsTests(unittest.TestCase):
 
             def post(self, url, **kwargs):
                 self.posts.append((url, kwargs))
+                if not url.endswith(":batchUpdate"):
+                    rows = kwargs["json"]["values"]
+                    self.table_end += len(rows)
+                    return FakeResponse(
+                        200,
+                        {
+                            "spreadsheetId": "a" * 30,
+                            "tableRange": "'Mappings'!A1:AG2",
+                            "updates": {
+                                "spreadsheetId": "a" * 30,
+                                "updatedRange": "'Mappings'!A3:AG3",
+                                "updatedRows": 1,
+                                "updatedColumns": 33,
+                                "updatedCells": 33,
+                            },
+                        },
+                    )
                 return FakeResponse(
-                    200, {"spreadsheetId": "a" * 30, "replies": [{}]}
+                    200,
+                    {
+                        "spreadsheetId": "a" * 30,
+                        "replies": [{} for _request in kwargs["json"]["requests"]],
+                    },
                 )
 
         session = ModernSession()
@@ -1480,14 +1546,11 @@ class ReportsAndSheetsTests(unittest.TestCase):
         )
         self.assertEqual(len(session.posts), 1)
         url, kwargs = session.posts[0]
-        self.assertTrue(url.endswith(":batchUpdate"))
-        append_cells = kwargs["json"]["requests"][0]["appendCells"]
-        self.assertEqual(append_cells["tableId"], "table-mappings-v1")
-        self.assertNotIn("sheetId", append_cells)
-        self.assertEqual(append_cells["fields"], "userEnteredValue")
+        self.assertIn("!A:AG:append", url)
+        self.assertEqual(kwargs["params"]["valueInputOption"], "RAW")
+        self.assertEqual(kwargs["params"]["insertDataOption"], "INSERT_ROWS")
         name_index = list(streaming.SHEET_COLUMNS).index("channel_name")
-        literal_name = append_cells["rows"][0]["values"][name_index]
-        self.assertEqual(literal_name, {"userEnteredValue": {"stringValue": "=Formula"}})
+        self.assertEqual(kwargs["json"]["values"][0][name_index], "=Formula")
 
     def test_modern_alert_table_uses_its_own_table_id_and_eleven_cells(self) -> None:
         alert = {column: "" for column in sync.ALERT_COLUMNS}
@@ -1505,8 +1568,17 @@ class ReportsAndSheetsTests(unittest.TestCase):
         class ModernAlertSession:
             def __init__(self):
                 self.posts = []
+                self.metadata_reads = 0
+                self.table_end = 1
+                self.grid_rows = 1
 
-            def get(self, _url, **_kwargs):
+            def get(self, url, **_kwargs):
+                if "/values/" in url:
+                    return FakeResponse(
+                        200,
+                        {"values": [["detected_at"], ["2026-09-15T00:00:00Z"]]},
+                    )
+                self.metadata_reads += 1
                 return FakeResponse(
                     200,
                     {
@@ -1515,6 +1587,10 @@ class ReportsAndSheetsTests(unittest.TestCase):
                                 "properties": {
                                     "sheetId": 43,
                                     "title": "Sync Alerts",
+                                    "gridProperties": {
+                                        "rowCount": self.grid_rows,
+                                        "columnCount": 11,
+                                    },
                                 },
                                 "tables": [
                                     {
@@ -1523,7 +1599,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                                         "range": {
                                             "sheetId": 43,
                                             "startRowIndex": 0,
-                                            "endRowIndex": 1,
+                                            "endRowIndex": self.table_end,
                                             "startColumnIndex": 0,
                                             "endColumnIndex": 11,
                                         },
@@ -1536,8 +1612,31 @@ class ReportsAndSheetsTests(unittest.TestCase):
 
             def post(self, url, **kwargs):
                 self.posts.append((url, kwargs))
+                if not url.endswith(":batchUpdate"):
+                    rows = kwargs["json"]["values"]
+                    self.grid_rows += len(rows)
+                    return FakeResponse(
+                        200,
+                        {
+                            "spreadsheetId": "a" * 30,
+                            "tableRange": "'Sync Alerts'!A1:K1",
+                            "updates": {
+                                "spreadsheetId": "a" * 30,
+                                "updatedRange": "'Sync Alerts'!A2:K2",
+                                "updatedRows": 1,
+                                "updatedColumns": 11,
+                                "updatedCells": 11,
+                            },
+                        },
+                    )
+                update = kwargs["json"]["requests"][0]["updateTable"]
+                self.table_end = update["table"]["range"]["endRowIndex"]
                 return FakeResponse(
-                    200, {"spreadsheetId": "a" * 30, "replies": [{}]}
+                    200,
+                    {
+                        "spreadsheetId": "a" * 30,
+                        "replies": [{} for _request in kwargs["json"]["requests"]],
+                    },
                 )
 
         session = ModernAlertSession()
@@ -1547,13 +1646,580 @@ class ReportsAndSheetsTests(unittest.TestCase):
             ),
             1,
         )
-        append_cells = session.posts[0][1]["json"]["requests"][0]["appendCells"]
-        self.assertEqual(append_cells["tableId"], "table-alerts-v1")
-        self.assertEqual(len(append_cells["rows"][0]["values"]), 11)
+        self.assertEqual(len(session.posts), 2)
+        append_url, append_kwargs = session.posts[0]
+        self.assertIn("!A:K:append", append_url)
+        self.assertEqual(append_kwargs["params"]["valueInputOption"], "RAW")
+        self.assertEqual(append_kwargs["params"]["insertDataOption"], "INSERT_ROWS")
+        self.assertEqual(len(append_kwargs["json"]["values"][0]), 11)
+        self.assertEqual(append_kwargs["json"]["values"][0][4], "+Literal")
+        requests = session.posts[1][1]["json"]["requests"]
         self.assertEqual(
-            append_cells["rows"][0]["values"][4],
-            {"userEnteredValue": {"stringValue": "+Literal"}},
+            requests[0]["updateTable"]["table"]["tableId"],
+            "table-alerts-v1",
         )
+        self.assertEqual(
+            requests[0]["updateTable"]["table"]["range"]["endRowIndex"],
+            2,
+        )
+
+    def test_modern_table_chunking_uses_non_overlapping_atomic_appends(self) -> None:
+        class ChunkSession:
+            def __init__(self):
+                self.posts = []
+                self.append_calls = 0
+
+            def get(self, url, **_kwargs):
+                if "/values/" in url:
+                    return FakeResponse(
+                        200,
+                        {"values": [["detected_at"], ["one"], ["two"], ["three"]]},
+                    )
+                return FakeResponse(
+                    200,
+                    {
+                        "sheets": [
+                            {
+                                "properties": {
+                                    "sheetId": 43,
+                                    "title": "Sync Alerts",
+                                    "gridProperties": {
+                                        "rowCount": 4,
+                                        "columnCount": 2,
+                                    },
+                                },
+                                "tables": [
+                                    {
+                                        "tableId": "table-alerts-v1",
+                                        "range": {
+                                            "sheetId": 43,
+                                            "startRowIndex": 0,
+                                            "endRowIndex": 4,
+                                            "startColumnIndex": 0,
+                                            "endColumnIndex": 2,
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                )
+
+            def post(self, url, **kwargs):
+                self.posts.append((url, kwargs))
+                self.append_calls += 1
+                first, last = ((2, 3) if self.append_calls == 1 else (4, 4))
+                row_count = last - first + 1
+                return FakeResponse(
+                    200,
+                    {
+                        "spreadsheetId": "a" * 30,
+                        "tableRange": f"'Sync Alerts'!A1:B{first - 1}",
+                        "updates": {
+                            "spreadsheetId": "a" * 30,
+                            "updatedRange": f"'Sync Alerts'!A{first}:B{last}",
+                            "updatedRows": row_count,
+                            "updatedColumns": 2,
+                            "updatedCells": row_count * 2,
+                        },
+                    },
+                )
+
+        layout = sync.GoogleSheetLayout(
+            numeric_sheet_id=43,
+            title="Sync Alerts",
+            table_id="table-alerts-v1",
+            table_end_row=1,
+            grid_row_count=3,
+            grid_column_count=2,
+            table_has_footer=False,
+            basic_filter=None,
+        )
+        session = ChunkSession()
+        appended = sync.append_modern_table_rows(
+            session,
+            "a" * 30,
+            "Sync Alerts",
+            layout,
+            [["one", "1"], ["two", "2"], ["three", "3"]],
+            existing_data_rows=0,
+            chunk_size=2,
+            failure_label="Sync Alerts",
+        )
+        self.assertEqual(appended, 3)
+        self.assertEqual(len(session.posts), 2)
+
+        self.assertTrue(all("/values/" in url for url, _kwargs in session.posts))
+        self.assertEqual(len(session.posts[0][1]["json"]["values"]), 2)
+        self.assertEqual(len(session.posts[1][1]["json"]["values"]), 1)
+
+    def test_raw_append_accepts_a_concurrent_row_before_our_rows(self) -> None:
+        class ConcurrentSession:
+            def post(self, _url, **kwargs):
+                self.params = kwargs["params"]
+                return FakeResponse(
+                    200,
+                    {
+                        "spreadsheetId": "a" * 30,
+                        "tableRange": "'Mappings'!A1:B3",
+                        "updates": {
+                            "spreadsheetId": "a" * 30,
+                            # Row 3 was expected. Another editor atomically
+                            # claimed it, so Google placed this write at row 4.
+                            "updatedRange": "'Mappings'!A4:B4",
+                            "updatedRows": 1,
+                            "updatedColumns": 2,
+                            "updatedCells": 2,
+                        },
+                    },
+                )
+
+        session = ConcurrentSession()
+        appended, ranges = sync.append_raw_sheet_rows(
+            session,
+            "a" * 30,
+            "Mappings",
+            [["server_1", "2"]],
+            existing_data_rows=1,
+            column_count=2,
+            chunk_size=500,
+            failure_label="Mappings",
+        )
+        self.assertEqual(appended, 1)
+        self.assertEqual(ranges, [(4, 4)])
+        self.assertEqual(session.params["valueInputOption"], "RAW")
+        self.assertEqual(session.params["insertDataOption"], "INSERT_ROWS")
+
+    def test_raw_append_wrong_typed_updates_is_reconcilable_write_error(self) -> None:
+        class NullUpdatesSession:
+            def post(self, _url, **_kwargs):
+                return FakeResponse(
+                    200,
+                    {
+                        "spreadsheetId": "a" * 30,
+                        "tableRange": "'Mappings'!A1:B1",
+                        "updates": None,
+                    },
+                )
+
+        with self.assertRaises(sync.SheetWriteError) as caught:
+            sync.append_raw_sheet_rows(
+                NullUpdatesSession(),
+                "a" * 30,
+                "Mappings",
+                [["server_1", "2"]],
+                existing_data_rows=0,
+                column_count=2,
+                chunk_size=500,
+                failure_label="Mappings",
+            )
+        self.assertEqual(caught.exception.appended_count, 1)
+
+    def test_raw_append_rejects_wrong_logical_table_range(self) -> None:
+        class WrongLogicalTableSession:
+            def post(self, _url, **_kwargs):
+                return FakeResponse(
+                    200,
+                    {
+                        "spreadsheetId": "a" * 30,
+                        "tableRange": "'Mappings'!A10:B10",
+                        "updates": {
+                            "spreadsheetId": "a" * 30,
+                            "updatedRange": "'Mappings'!A11:B11",
+                            "updatedRows": 1,
+                            "updatedColumns": 2,
+                            "updatedCells": 2,
+                        },
+                    },
+                )
+
+        with self.assertRaisesRegex(sync.SheetWriteError, "unexpected or partial"):
+            sync.append_raw_sheet_rows(
+                WrongLogicalTableSession(),
+                "a" * 30,
+                "Mappings",
+                [["server_1", "2"]],
+                existing_data_rows=0,
+                column_count=2,
+                chunk_size=500,
+                failure_label="Mappings",
+            )
+
+    def test_modern_range_finalizer_repairs_a_concurrent_high_water_mark(self) -> None:
+        class RacingSession:
+            def __init__(self):
+                self.table_end = 1
+                self.used_end = 2
+                self.targets = []
+                self.append_done = False
+
+            def get(self, url, **_kwargs):
+                if "/values/" in url:
+                    return FakeResponse(
+                        200,
+                        {"values": [["server_id"]] + [["server_1"]] * (self.used_end - 1)},
+                    )
+                return FakeResponse(
+                    200,
+                    {
+                        "sheets": [
+                            {
+                                "properties": {
+                                    "sheetId": 42,
+                                    "title": "Mappings",
+                                    "gridProperties": {
+                                        "rowCount": 100,
+                                        "columnCount": 2,
+                                    },
+                                },
+                                "tables": [
+                                    {
+                                        "tableId": "table-mappings-v1",
+                                        "range": {
+                                            "sheetId": 42,
+                                            "startRowIndex": 0,
+                                            "endRowIndex": self.table_end,
+                                            "startColumnIndex": 0,
+                                            "endColumnIndex": 2,
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                )
+
+            def post(self, url, **kwargs):
+                if not url.endswith(":batchUpdate"):
+                    self.append_done = True
+                    return FakeResponse(
+                        200,
+                        {
+                            "spreadsheetId": "a" * 30,
+                            "tableRange": "'Mappings'!A1:B1",
+                            "updates": {
+                                "spreadsheetId": "a" * 30,
+                                "updatedRange": "'Mappings'!A2:B2",
+                                "updatedRows": 1,
+                                "updatedColumns": 2,
+                                "updatedCells": 2,
+                            },
+                        },
+                    )
+                target = kwargs["json"]["requests"][0]["updateTable"]["table"][
+                    "range"
+                ]["endRowIndex"]
+                self.targets.append(target)
+                self.table_end = target
+                if len(self.targets) == 1:
+                    # A second writer committed a third row immediately after
+                    # this stale range request; the next read must repair it.
+                    self.used_end = 3
+                return FakeResponse(
+                    200,
+                    {"spreadsheetId": "a" * 30, "replies": [{}]},
+                )
+
+        layout = sync.GoogleSheetLayout(
+            numeric_sheet_id=42,
+            title="Mappings",
+            table_id="table-mappings-v1",
+            table_end_row=1,
+            grid_row_count=100,
+            grid_column_count=2,
+            table_has_footer=False,
+            basic_filter=None,
+        )
+        session = RacingSession()
+        self.assertEqual(
+            sync.append_modern_table_rows(
+                session,
+                "a" * 30,
+                "Mappings",
+                layout,
+                [["server_1", "2"]],
+                existing_data_rows=0,
+                chunk_size=500,
+                failure_label="Mappings",
+            ),
+            1,
+        )
+        self.assertEqual(session.targets, [2, 3])
+
+    def test_modern_range_finalizer_verifies_a_successful_third_update(self) -> None:
+        class DelayedThirdUpdateSession:
+            def __init__(self):
+                self.update_posts = 0
+                self.metadata_reads = 0
+
+            def get(self, url, **_kwargs):
+                if "/values/" in url:
+                    return FakeResponse(
+                        200,
+                        {"values": [["server_id"], ["server_1"]]},
+                    )
+                self.metadata_reads += 1
+                visible_end_row = 2 if self.update_posts == 3 else 1
+                return FakeResponse(
+                    200,
+                    {
+                        "sheets": [
+                            {
+                                "properties": {
+                                    "sheetId": 42,
+                                    "title": "Mappings",
+                                    "gridProperties": {
+                                        "rowCount": 100,
+                                        "columnCount": 2,
+                                    },
+                                },
+                                "tables": [
+                                    {
+                                        "tableId": "table-mappings-v1",
+                                        "range": {
+                                            "sheetId": 42,
+                                            "startRowIndex": 0,
+                                            "endRowIndex": visible_end_row,
+                                            "startColumnIndex": 0,
+                                            "endColumnIndex": 2,
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                )
+
+            def post(self, url, **_kwargs):
+                self.assert_batch_update(url)
+                self.update_posts += 1
+                if self.update_posts > 3:
+                    raise AssertionError("a fourth table-range write is forbidden")
+                return FakeResponse(
+                    200,
+                    {"spreadsheetId": "a" * 30, "replies": [{}]},
+                )
+
+            @staticmethod
+            def assert_batch_update(url):
+                if not url.endswith(":batchUpdate"):
+                    raise AssertionError("only table-range writes are expected")
+
+        layout = sync.GoogleSheetLayout(
+            numeric_sheet_id=42,
+            title="Mappings",
+            table_id="table-mappings-v1",
+            table_end_row=1,
+            grid_row_count=100,
+            grid_column_count=2,
+            table_has_footer=False,
+            basic_filter=None,
+        )
+        session = DelayedThirdUpdateSession()
+        sync.finalize_modern_table_range(
+            session,
+            "a" * 30,
+            "Mappings",
+            layout,
+            required_end_row=2,
+            column_count=2,
+            maximum_data_rows=100,
+            failure_label="Mappings",
+            appended_count=1,
+        )
+        self.assertEqual(session.update_posts, 3)
+        self.assertEqual(session.metadata_reads, 4)
+
+    def test_modern_range_finalizer_fails_closed_after_three_unseen_updates(self) -> None:
+        class NeverVisibleSession:
+            def __init__(self):
+                self.update_posts = 0
+                self.metadata_reads = 0
+
+            def get(self, url, **_kwargs):
+                if "/values/" in url:
+                    return FakeResponse(
+                        200,
+                        {"values": [["server_id"], ["server_1"]]},
+                    )
+                self.metadata_reads += 1
+                return FakeResponse(
+                    200,
+                    {
+                        "sheets": [
+                            {
+                                "properties": {
+                                    "sheetId": 42,
+                                    "title": "Mappings",
+                                    "gridProperties": {
+                                        "rowCount": 100,
+                                        "columnCount": 2,
+                                    },
+                                },
+                                "tables": [
+                                    {
+                                        "tableId": "table-mappings-v1",
+                                        "range": {
+                                            "sheetId": 42,
+                                            "startRowIndex": 0,
+                                            "endRowIndex": 1,
+                                            "startColumnIndex": 0,
+                                            "endColumnIndex": 2,
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                )
+
+            def post(self, url, **_kwargs):
+                if not url.endswith(":batchUpdate"):
+                    raise AssertionError("only table-range writes are expected")
+                self.update_posts += 1
+                if self.update_posts > 3:
+                    raise AssertionError("a fourth table-range write is forbidden")
+                return FakeResponse(
+                    200,
+                    {"spreadsheetId": "a" * 30, "replies": [{}]},
+                )
+
+        layout = sync.GoogleSheetLayout(
+            numeric_sheet_id=42,
+            title="Mappings",
+            table_id="table-mappings-v1",
+            table_end_row=1,
+            grid_row_count=100,
+            grid_column_count=2,
+            table_has_footer=False,
+            basic_filter=None,
+        )
+        session = NeverVisibleSession()
+        with self.assertRaises(sync.SheetWriteError) as caught:
+            sync.finalize_modern_table_range(
+                session,
+                "a" * 30,
+                "Mappings",
+                layout,
+                required_end_row=2,
+                column_count=2,
+                maximum_data_rows=100,
+                failure_label="Mappings",
+                appended_count=1,
+            )
+        self.assertEqual(caught.exception.appended_count, 1)
+        self.assertEqual(session.update_posts, 3)
+        self.assertEqual(session.metadata_reads, 4)
+
+    def test_modern_footer_is_rejected_before_any_write(self) -> None:
+        class NoCallsSession:
+            def get(self, *_args, **_kwargs):
+                raise AssertionError("footer must fail before a read")
+
+            def post(self, *_args, **_kwargs):
+                raise AssertionError("footer must fail before a write")
+
+        layout = sync.GoogleSheetLayout(
+            numeric_sheet_id=42,
+            title="Mappings",
+            table_id="table-mappings-v1",
+            table_end_row=2,
+            grid_row_count=100,
+            grid_column_count=2,
+            table_has_footer=True,
+            basic_filter=None,
+        )
+        with self.assertRaisesRegex(sync.SyncError, "has a footer"):
+            sync.append_modern_table_rows(
+                NoCallsSession(),
+                "a" * 30,
+                "Mappings",
+                layout,
+                [["server_1", "2"]],
+                existing_data_rows=1,
+                chunk_size=500,
+                failure_label="Mappings",
+            )
+
+    def test_post_append_metadata_failure_keeps_committed_row_accounting(self) -> None:
+        class MetadataFailureSession:
+            def post(self, _url, **_kwargs):
+                return FakeResponse(
+                    200,
+                    {
+                        "spreadsheetId": "a" * 30,
+                        "tableRange": "'Mappings'!A1:B1",
+                        "updates": {
+                            "spreadsheetId": "a" * 30,
+                            "updatedRange": "'Mappings'!A2:B2",
+                            "updatedRows": 1,
+                            "updatedColumns": 2,
+                            "updatedCells": 2,
+                        },
+                    },
+                )
+
+            def get(self, _url, **_kwargs):
+                return FakeResponse(503, {"error": {"status": "UNAVAILABLE"}})
+
+        layout = sync.GoogleSheetLayout(
+            numeric_sheet_id=42,
+            title="Mappings",
+            table_id="table-mappings-v1",
+            table_end_row=1,
+            grid_row_count=100,
+            grid_column_count=2,
+            table_has_footer=False,
+            basic_filter=None,
+        )
+        with mock.patch.object(sync.time, "sleep"):
+            with self.assertRaises(sync.SheetWriteError) as caught:
+                sync.append_modern_table_rows(
+                    MetadataFailureSession(),
+                    "a" * 30,
+                    "Mappings",
+                    layout,
+                    [["server_1", "2"]],
+                    existing_data_rows=0,
+                    chunk_size=500,
+                    failure_label="Mappings",
+                )
+        self.assertEqual(caught.exception.appended_count, 1)
+
+    def test_malformed_sheet_metadata_is_a_controlled_error(self) -> None:
+        for payload in ({"sheets": None}, {"sheets": [{"properties": []}]}):
+            with self.subTest(payload=payload):
+                class MalformedMetadataSession:
+                    def get(self, _url, **_kwargs):
+                        return FakeResponse(200, payload)
+
+                with self.assertRaises(sync.SyncError):
+                    sync.google_sheet_layout(
+                        MalformedMetadataSession(),
+                        "a" * 30,
+                        "Mappings",
+                        column_count=33,
+                    )
+
+    def test_google_write_error_does_not_reflect_untrusted_response_text(self) -> None:
+        response = json.dumps(
+            {
+                "error": {
+                    "status": "PRIVATE_VALUE_MUST_NOT_ESCAPE",
+                    "message": "private-value-must-not-escape",
+                }
+            }
+        ).encode("utf-8")
+        message = sync.google_write_rejection_message(
+            "Sync Alerts",
+            status=403,
+            response_content=response,
+            operation="table write",
+        )
+        self.assertIn("HTTP 403", message)
+        self.assertIn("lacks edit access", message)
+        self.assertNotIn("PRIVATE_VALUE_MUST_NOT_ESCAPE", message)
+        self.assertNotIn("private-value-must-not-escape", message)
 
     def test_incompatible_modern_table_fails_before_any_append(self) -> None:
         current = table([mapping_row("server_1", "1", "One")])
@@ -1569,7 +2235,14 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     {
                         "sheets": [
                             {
-                                "properties": {"sheetId": 42, "title": "Mappings"},
+                                "properties": {
+                                    "sheetId": 42,
+                                    "title": "Mappings",
+                                    "gridProperties": {
+                                        "rowCount": 100,
+                                        "columnCount": 33,
+                                    },
+                                },
                                 "tables": [
                                     {
                                         "tableId": "wrong",
@@ -1596,68 +2269,8 @@ class ReportsAndSheetsTests(unittest.TestCase):
             )
         self.assertEqual(session.posts, 0)
 
-    def test_modern_table_must_cover_exact_authoritative_row_count(self) -> None:
-        current = table([mapping_row("server_1", "1", "One")])
-        new = mapping_row("server_1", "2", "Two", action="REVIEW", epg_id="")
-
-        for wrong_end_row in (1, 3):
-            with self.subTest(end_row=wrong_end_row):
-                class WrongHeightSession:
-                    def __init__(self):
-                        self.posts = 0
-
-                    def get(self, _url, **_kwargs):
-                        return FakeResponse(
-                            200,
-                            {
-                                "sheets": [
-                                    {
-                                        "properties": {
-                                            "sheetId": 42,
-                                            "title": "Mappings",
-                                        },
-                                        "tables": [
-                                            {
-                                                "tableId": "table-mappings-v1",
-                                                "range": {
-                                                    "sheetId": 42,
-                                                    "startRowIndex": 0,
-                                                    "endRowIndex": wrong_end_row,
-                                                    "startColumnIndex": 0,
-                                                    "endColumnIndex": 33,
-                                                },
-                                            }
-                                        ],
-                                    }
-                                ]
-                            },
-                        )
-
-                    def post(self, *_args, **_kwargs):
-                        self.posts += 1
-                        raise AssertionError("Geometry failure must happen pre-append")
-
-                session = WrongHeightSession()
-                with self.assertRaisesRegex(sync.SyncError, "does not uniquely cover"):
-                    sync.append_google_sheet_rows(
-                        session, "a" * 30, "Mappings", current, [new]
-                    )
-                self.assertEqual(session.posts, 0)
-
-        alert = {column: "" for column in sync.ALERT_COLUMNS}
-        alert.update(
-            {
-                "server_id": "server_1",
-                "stream_id": "7",
-                "alert_type": "POSSIBLE_STREAM_ID_REUSE",
-                "status": "OPEN",
-            }
-        )
-
-        class WrongAlertHeightSession:
-            def __init__(self):
-                self.posts = 0
-
+    def test_modern_table_may_lag_authoritative_rows_for_safe_repair(self) -> None:
+        class LaggingTableSession:
             def get(self, _url, **_kwargs):
                 return FakeResponse(
                     200,
@@ -1665,18 +2278,18 @@ class ReportsAndSheetsTests(unittest.TestCase):
                         "sheets": [
                             {
                                 "properties": {
-                                    "sheetId": 43,
-                                    "title": "Sync Alerts",
+                                    "sheetId": 42,
+                                    "title": "Mappings",
                                 },
                                 "tables": [
                                     {
-                                        "tableId": "table-alerts-v1",
+                                        "tableId": "table-mappings-v1",
                                         "range": {
-                                            "sheetId": 43,
+                                            "sheetId": 42,
                                             "startRowIndex": 0,
-                                            "endRowIndex": 2,
+                                            "endRowIndex": 1,
                                             "startColumnIndex": 0,
-                                            "endColumnIndex": 11,
+                                            "endColumnIndex": 33,
                                         },
                                     }
                                 ],
@@ -1685,16 +2298,56 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     },
                 )
 
-            def post(self, *_args, **_kwargs):
-                self.posts += 1
-                raise AssertionError("Alert table geometry must fail pre-append")
+        layout = sync.google_sheet_layout(
+            LaggingTableSession(),
+            "a" * 30,
+            "Mappings",
+            column_count=33,
+            expected_used_rows=2,
+        )
+        self.assertEqual(layout.table_end_row, 1)
 
-        alert_session = WrongAlertHeightSession()
-        with self.assertRaisesRegex(sync.SyncError, "does not uniquely cover"):
-            sync.append_sync_alert_rows(
-                alert_session, "a" * 30, "Sync Alerts", [], [alert]
-            )
-        self.assertEqual(alert_session.posts, 0)
+    def test_modern_table_may_extend_beyond_authoritative_used_rows(self) -> None:
+        class TallerTableSession:
+            def get(self, _url, **_kwargs):
+                return FakeResponse(
+                    200,
+                    {
+                        "sheets": [
+                            {
+                                "properties": {
+                                    "sheetId": 42,
+                                    "title": "Mappings",
+                                    "gridProperties": {
+                                        "rowCount": 100,
+                                        "columnCount": 33,
+                                    },
+                                },
+                                "tables": [
+                                    {
+                                        "tableId": "table-mappings-v1",
+                                        "range": {
+                                            "sheetId": 42,
+                                            "startRowIndex": 0,
+                                            "endRowIndex": 3,
+                                            "startColumnIndex": 0,
+                                            "endColumnIndex": 33,
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                )
+
+        layout = sync.google_sheet_layout(
+            TallerTableSession(),
+            "a" * 30,
+            "Mappings",
+            column_count=33,
+            expected_used_rows=2,
+        )
+        self.assertEqual(layout.table_end_row, 3)
 
     def test_classic_append_rejects_unexpected_row_two_for_nonempty_sheet(self) -> None:
         current = table([mapping_row("server_1", "1", "One")])
@@ -1714,6 +2367,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     200,
                     {
                         "spreadsheetId": "a" * 30,
+                        "tableRange": "'Mappings'!A1:AG1",
                         "updates": {
                             "spreadsheetId": "a" * 30,
                             "updatedRange": "'Mappings'!A2:AG2",
@@ -1741,7 +2395,14 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     {
                         "sheets": [
                             {
-                                "properties": {"sheetId": 42, "title": "Mappings"},
+                                "properties": {
+                                    "sheetId": 42,
+                                    "title": "Mappings",
+                                    "gridProperties": {
+                                        "rowCount": 100,
+                                        "columnCount": 33,
+                                    },
+                                },
                                 "tables": [
                                     {
                                         "tableId": "table-mappings-v1",
@@ -1760,13 +2421,24 @@ class ReportsAndSheetsTests(unittest.TestCase):
                 )
 
             def post(self, _url, **_kwargs):
-                return FakeResponse(500, {"error": {"message": "redacted"}})
+                return FakeResponse(
+                    500,
+                    {
+                        "error": {
+                            "status": "INTERNAL",
+                            "message": "sensitive response details",
+                        }
+                    },
+                )
 
         with self.assertRaises(sync.SheetWriteError) as caught:
             sync.append_google_sheet_rows(
                 FailingModernSession(), "a" * 30, "Mappings", current, [new]
             )
         self.assertEqual(caught.exception.appended_count, 0)
+        self.assertIn("HTTP 500 INTERNAL", str(caught.exception))
+        self.assertIn("temporary server failure", str(caught.exception))
+        self.assertNotIn("sensitive response details", str(caught.exception))
 
     def test_modern_table_malformed_success_is_possibly_committed_and_not_retried(self) -> None:
         current = table([mapping_row("server_1", "1", "One")])
@@ -1782,7 +2454,14 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     {
                         "sheets": [
                             {
-                                "properties": {"sheetId": 42, "title": "Mappings"},
+                                "properties": {
+                                    "sheetId": 42,
+                                    "title": "Mappings",
+                                    "gridProperties": {
+                                        "rowCount": 100,
+                                        "columnCount": 33,
+                                    },
+                                },
                                 "tables": [
                                     {
                                         "tableId": "table-mappings-v1",
@@ -1803,7 +2482,9 @@ class ReportsAndSheetsTests(unittest.TestCase):
                 return FakeResponse(200, {"replies": [{}]})
 
         session = MalformedSuccessSession()
-        with self.assertRaisesRegex(sync.SheetWriteError, "invalid.*response") as caught:
+        with self.assertRaisesRegex(
+            sync.SheetWriteError, "unexpected or partial"
+        ) as caught:
             sync.append_google_sheet_rows(
                 session, "a" * 30, "Mappings", current, [new]
             )
@@ -1880,6 +2561,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     200,
                     {
                         "spreadsheetId": "a" * 30,
+                        "tableRange": "'Mappings'!A1:AG2",
                         "updates": {
                             "spreadsheetId": "a" * 30,
                             "updatedRange": "'Mappings'!A3:AG3",
@@ -1936,6 +2618,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     200,
                     {
                         "spreadsheetId": "a" * 30,
+                        "tableRange": "'Mappings'!A1:AG2",
                         "updates": {
                             "spreadsheetId": "a" * 30,
                             "updatedRange": "'Mappings'!A3:AG3",
@@ -2006,6 +2689,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     200,
                     {
                         "spreadsheetId": "a" * 30,
+                        "tableRange": "'Sync Alerts'!A1:K1",
                         "updates": {
                             "spreadsheetId": "a" * 30,
                             "updatedRange": "'Sync Alerts'!A2:K2",
@@ -2285,6 +2969,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
                     200,
                     {
                         "spreadsheetId": "a" * 30,
+                        "tableRange": f"'Mappings'!A1:AG{first_row - 1}",
                         "updates": {
                             "spreadsheetId": "a" * 30,
                             "updatedRange": f"'Mappings'!A{first_row}:AG{last_row}",
@@ -2312,6 +2997,24 @@ class ReportsAndSheetsTests(unittest.TestCase):
         self.assertEqual(summary["appended_rows"], 1)
         self.assertEqual(len(effective.rows), 2)
         self.assertEqual(effective.rows[1]["action"], "REVIEW")
+
+    def test_appended_mapping_verification_requires_all_thirty_three_cells(self) -> None:
+        expected = mapping_row(
+            "server_1", "22", "=Literal Name", action="REVIEW", epg_id=""
+        )
+        sync.verify_appended_mapping_rows([expected], table([dict(expected)]))
+
+        tampered = dict(expected)
+        tampered["reason"] = "A different value returned by the Sheet"
+        with self.assertRaisesRegex(sync.SyncError, "every cell"):
+            sync.verify_appended_mapping_rows([expected], table([tampered]))
+
+    def test_appended_mapping_verification_rejects_missing_identity(self) -> None:
+        expected = mapping_row(
+            "server_2", "22", "New Channel", action="REVIEW", epg_id=""
+        )
+        with self.assertRaisesRegex(sync.SyncError, "every cell"):
+            sync.verify_appended_mapping_rows([expected], table([]))
 
     def test_cli_contract_matches_workflows(self) -> None:
         args = sync.parse_args(
