@@ -1,18 +1,25 @@
 name: 1 - Sync channels to Google Sheet
-run-name: "Manual channel sync #${{ github.run_number }}"
+run-name: "Channel sync (${{ github.event_name }} #${{ github.run_number }})"
 
 on:
+  # Work through the REVIEW backlog before the daily 04:37 EPG build.  The
+  # shared concurrency group prevents this job and Workflow 2 from touching
+  # the private Sheet at the same time if a run takes longer than expected.
+  schedule:
+    - cron: "17 2 * * *"
+      timezone: "America/Toronto"
+
   workflow_dispatch:
     inputs:
       update_google_sheet:
         description: "Add missing channels to Google Sheet"
         required: true
-        default: false
+        default: true
         type: boolean
       recheck_existing_review:
         description: "Recheck channels already marked REVIEW"
         required: true
-        default: "off"
+        default: apply
         type: choice
         options:
           - "off"
@@ -21,7 +28,7 @@ on:
       recheck_server:
         description: "Server backlog to recheck"
         required: true
-        default: server_1
+        default: all
         type: choice
         options:
           - server_1
@@ -31,17 +38,19 @@ on:
       use_gemini_ai:
         description: "Ask Gemini about unresolved recheck candidates"
         required: true
-        default: false
+        default: true
         type: boolean
       ai_review_limit:
-        description: "Maximum unresolved channels sent to Gemini"
+        description: "Maximum unresolved rows considered by Gemini"
         required: true
-        default: "25"
+        default: "200"
         type: choice
         options:
           - "10"
           - "25"
           - "50"
+          - "100"
+          - "200"
 
 # This workflow never commits or pushes. Its only optional writes are
 # verified additions or bounded REVIEW-row updates in the Mappings tab, plus
@@ -64,12 +73,18 @@ env:
   GOOGLE_SHEET_TAB: ${{ vars.GOOGLE_SHEET_TAB || 'Mappings' }}
   ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
   # New-row appends and existing-REVIEW updates are independent controls.
-  REQUEST_SHEET_WRITE: ${{ inputs.update_google_sheet }}
-  REQUEST_REVIEW_UPDATE: ${{ inputs.recheck_existing_review == 'apply' }}
-  REVIEW_RECHECK_MODE: ${{ inputs.recheck_existing_review }}
-  REVIEW_RECHECK_SERVER: ${{ inputs.recheck_server }}
-  USE_GEMINI_AI: ${{ inputs.use_gemini_ai }}
-  AI_REVIEW_LIMIT: ${{ inputs.ai_review_limit }}
+  REQUEST_SHEET_WRITE: >-
+    ${{ github.event_name == 'schedule' && 'true' || inputs.update_google_sheet }}
+  REQUEST_REVIEW_UPDATE: >-
+    ${{ github.event_name == 'schedule' && 'true' || inputs.recheck_existing_review == 'apply' }}
+  REVIEW_RECHECK_MODE: >-
+    ${{ github.event_name == 'schedule' && 'apply' || inputs.recheck_existing_review }}
+  REVIEW_RECHECK_SERVER: >-
+    ${{ github.event_name == 'schedule' && 'all' || inputs.recheck_server }}
+  USE_GEMINI_AI: >-
+    ${{ github.event_name == 'schedule' && 'true' || inputs.use_gemini_ai }}
+  AI_REVIEW_LIMIT: >-
+    ${{ github.event_name == 'schedule' && '200' || inputs.ai_review_limit }}
   EPG_ALL_SOURCE_URL: >-
     https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz
   EPG_ALL_CATALOG_URL: >-
@@ -177,8 +192,10 @@ jobs:
               )
 
           ai_limit = required("AI_REVIEW_LIMIT")
-          if ai_limit not in {"10", "25", "50"}:
-              raise SystemExit("ai_review_limit must be 10, 25, or 50.")
+          if ai_limit not in {"10", "25", "50", "100", "200"}:
+              raise SystemExit(
+                  "ai_review_limit must be 10, 25, 50, 100, or 200."
+              )
           if use_gemini == "true":
               gemini_key = os.environ.get("GEMINI_API_KEY", "")
               if (
@@ -280,6 +297,7 @@ jobs:
             tests.test_epg_catalog_stream \
             tests.test_epg_spool_reuse \
             tests.test_ai_review_gemini \
+            tests.test_ai_review_policy \
             tests.test_native_epg_review \
             tests.test_matcher_regression \
             -v
@@ -842,13 +860,13 @@ jobs:
               )
               if mode == "dry-run":
                   handle.write(
-                      "- Total verified EPG matches found: "
+                      "- REVIEW rows safely processed: "
                       f"**{int(payload.get('review_recheck_safe_matches', 0)):,}** "
                       "(preview only)\n"
                   )
               elif mode == "apply":
                   handle.write(
-                      "- Total verified EPG matches enabled: "
+                      "- REVIEW rows safely updated: "
                       f"**{int(payload.get('review_recheck_safe_matches_persisted', 0)):,}**\n"
                   )
               else:
@@ -892,9 +910,9 @@ jobs:
                   saved = int(payload.get("ai_review_high_suggestions_persisted", 0))
                   unresolved = int(payload.get("ai_review_abstained_rows", 0))
                   handle.write(
-                      f"- Gemini: **{found:,}** suggestions found; "
-                      f"**{saved:,}** saved for approval; "
-                      f"**{unresolved:,}** unresolved\n"
+                      f"- Gemini: **{found:,}** HIGH responses; "
+                      f"**{saved:,}** verified channels enabled; "
+                      f"**{unresolved:,}** kept in review\n"
                   )
                   ai_errors = int(payload.get("ai_review_error_rows", 0))
                   if ai_errors:
