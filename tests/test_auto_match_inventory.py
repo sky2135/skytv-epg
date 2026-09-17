@@ -299,7 +299,61 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(summary["epgshare_xml_only_catalog_channels"], 0)
             self.assertEqual(summary["epgshare_text_only_catalog_channels"], 0)
             self.assertRegex(summary["epgshare_catalog_drift_sha256"], r"^[0-9a-f]{64}$")
+            self.assertNotIn("verification_evidence", summary)
+            evidence = outcome.verification_evidence
+            self.assertEqual(evidence.source_sha256, outcome.source_sha256)
+            self.assertEqual(
+                evidence.text_catalog_file_sha256,
+                outcome.text_catalog_file_sha256,
+            )
+            self.assertEqual(
+                evidence.text_catalog_fingerprint_sha256,
+                outcome.text_catalog_fingerprint_sha256,
+            )
+            self.assertEqual(
+                evidence.text_catalog_generated_token,
+                outcome.text_catalog_generated_token,
+            )
+            self.assertEqual(
+                evidence.checked_at_epoch,
+                integration._timestamp_epoch(GENERATED_AT),
+            )
+            self.assertEqual(
+                evidence.xml_catalog_ids,
+                frozenset({"Good.Channel.us2"}),
+            )
+            self.assertEqual(
+                evidence.text_catalog_ids,
+                frozenset({"Good.Channel.us2"}),
+            )
+            self.assertEqual(len(evidence.catalog_candidates), 1)
+            candidate = evidence.catalog_candidates[0]
+            self.assertEqual(candidate.epg_id, "Good.Channel.us2")
+            self.assertEqual(candidate.market, "US")
+            self.assertEqual(candidate.feed, "US2")
+            self.assertTrue(candidate.is_real)
+            self.assertEqual(
+                candidate.semantics,
+                integration.VerificationSemanticsEvidence(),
+            )
+            self.assertEqual(outcome.ai_review_shortlists, ())
             self.assertTrue(spool.is_file())
+
+    def test_text_catalog_generation_must_be_current(self) -> None:
+        now_epoch = integration._timestamp_epoch(GENERATED_AT)
+        self.assertEqual(
+            integration._validate_text_catalog_generation(
+                "20260915120000", now_epoch=now_epoch
+            ),
+            now_epoch,
+        )
+        for token in ("20260912115959", "20260915180001", "2026091512000"):
+            with self.subTest(token=token):
+                with self.assertRaises(AutoMatchError):
+                    integration._validate_text_catalog_generation(
+                        token,
+                        now_epoch=now_epoch,
+                    )
 
     def test_new_and_existing_review_rows_are_counted_separately(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -432,6 +486,17 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(row["epg_id"], "Good.Channel.us2")
             self.assertEqual(outcome.approved_rows, 0)
             self.assertEqual(outcome.rejected_programme_gates, 1)
+            gates = outcome.verification_evidence.programme_gates
+            self.assertEqual(len(gates), 1)
+            self.assertEqual(gates[0].channel_key, "Good.Channel.us2")
+            self.assertEqual(gates[0].distinct_informative_programmes, 1)
+            self.assertFalse(gates[0].passed)
+            self.assertEqual(
+                gates[0].checked_at_epoch,
+                outcome.verification_evidence.checked_at_epoch,
+            )
+            self.assertEqual(gates[0].source_sha256, outcome.source_sha256)
+            self.assertTrue(gates[0].reason)
             self.assertTrue(spool.is_file())
 
     def test_provisional_and_rejected_gate_summaries_count_rows_not_unique_ids(
@@ -884,6 +949,16 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(outcome.rows[0]["action"], "REVIEW")
             self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
             self.assertEqual(outcome.approved_rows, 0)
+            evidence = outcome.verification_evidence
+            self.assertIn(xml_target, evidence.xml_catalog_ids)
+            self.assertNotIn(xml_target, evidence.text_catalog_ids)
+            self.assertIn(text_target, evidence.text_catalog_ids)
+            self.assertNotIn(text_target, evidence.xml_catalog_ids)
+            self.assertEqual(xml_target.casefold(), text_target.casefold())
+            self.assertNotIn(
+                xml_target.casefold(),
+                {candidate.epg_id.casefold() for candidate in evidence.catalog_candidates},
+            )
 
     def test_xml_only_case_collision_family_cannot_create_false_uniqueness(
         self,
@@ -1166,6 +1241,39 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertIn("unscoped ALL-market", outcome.rows[0]["reason"])
             self.assertTrue(spool.is_file())
 
+    def test_shared_all_route_competitor_also_vetoes_ai_shortlist(self) -> None:
+        blocked_id = "KABC-DT.us_locals1"
+        safe_id = "Other.Channel.us2"
+
+        def shortlist(epg_id: str) -> integration.AiReviewShortlist:
+            return integration.AiReviewShortlist(
+                server_id="server_1",
+                stream_id=epg_id,
+                channel_name="US: KABC",
+                category_name="US | General",
+                market="US",
+                candidates=(),
+                smart_epg_id=epg_id,
+            )
+
+        staged = integration._AiReviewStaging(
+            shortlists=(shortlist(blocked_id), shortlist(safe_id)),
+            attempted_rows=2,
+            comparisons=4,
+        )
+        filtered = integration._apply_ai_shortlist_catalog_ambiguity_veto(
+            staged,
+            all_route_labels={blocked_id: frozenset({"strict"})},
+            same_market_ids=frozenset(),
+        )
+
+        self.assertEqual(
+            tuple(item.smart_epg_id for item in filtered.shortlists),
+            (safe_id,),
+        )
+        self.assertEqual(filtered.attempted_rows, staged.attempted_rows)
+        self.assertEqual(filtered.comparisons, staged.comparisons)
+
     def test_shared_all_route_approved_identity_competitor_blocks_approval(self) -> None:
         target_id = "PTC.CHAK.DE.in"
         all_route_competitor = "PTC Chak De"
@@ -1253,6 +1361,51 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
             self.assertEqual(outcome.approved_rows, 0)
             self.assertIn("unscoped ALL-market", outcome.rows[0]["reason"])
+
+    def test_same_market_coarse_station_family_blocks_structural_match(self) -> None:
+        target_id = "History.ca2"
+        same_market_competitor = "History.Television.HD.(Canada).ca2"
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(
+                source,
+                custom_xml_bytes(
+                    (target_id, same_market_competitor), programme_id=target_id
+                ),
+            )
+            text_catalog.write_text(
+                "20260915120000\n"
+                "-- epg_ripper_CA2 --\n"
+                f"{target_id}\n"
+                f"{same_market_competitor}\n",
+                encoding="utf-8",
+            )
+
+            outcome = auto_match_and_spool(
+                mapping_rows=[],
+                inventories=[inventory(name="CA History Channel")],
+                new_rows=[
+                    mapping_row(
+                        server_id="server_1",
+                        stream_id="new-1",
+                        channel_name="CA History Channel",
+                    )
+                ],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                minimum_unique_channels=1,
+                enable_ai_review=True,
+            )
+            self.assertEqual(outcome.rows[0]["action"], "REVIEW")
+            self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
+            self.assertEqual(outcome.approved_rows, 0)
+            self.assertIn("same-market EPG identity", outcome.rows[0]["reason"])
+            self.assertEqual(outcome.ai_review_shortlists, ())
 
     def test_catalog_drift_fraction_and_absolute_boundaries_are_exact(self) -> None:
         ratio_boundary_common = {
@@ -1371,7 +1524,7 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
             self.assertEqual(outcome.approved_rows, 0)
 
-    def test_current_exact_dummy_review_proposal_is_exposed_only_in_memory(self) -> None:
+    def test_unverified_dummy_review_proposal_is_not_exposed_as_safe(self) -> None:
         dummy_id = "Synthetic.Placeholder.us2"
         xml = (
             "<?xml version=\"1.0\"?><tv>"
@@ -1424,7 +1577,7 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(outcome.rows[0]["enabled"], "FALSE")
             self.assertEqual(
                 outcome.verified_placeholder_keys,
-                frozenset({("server_1", "review-1")}),
+                frozenset(),
             )
             self.assertNotIn("verified_placeholder", outcome.summary_fields())
 

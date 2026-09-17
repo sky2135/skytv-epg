@@ -23,6 +23,7 @@ import base64
 import csv
 import gzip
 import hashlib
+import html
 import io
 import json
 import math
@@ -49,6 +50,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import build_epg_streaming as streaming  # noqa: E402
 import auto_match_inventory as automatch  # noqa: E402
 import ai_review_gemini as gemini_review  # noqa: E402
+import ai_review_policy as ai_policy  # noqa: E402
 
 try:  # Optional unless the explicit native REVIEW lane is enabled.
     import native_epg_review as native_review  # type: ignore[import-not-found]  # noqa: E402
@@ -69,17 +71,23 @@ MAX_SYNC_ALERT_BYTES = 8 * 1024 * 1024
 # hard memory/CPU bound while allowing the workflow's explicit ``all`` scope
 # to analyze that backlog in one pass.
 MAX_RECHECK_CANDIDATES = 30_000
-# One atomic Google batch can safely carry roughly one thousand normal REVIEW
-# patches under the independent 2 MiB encoded-request ceiling. This keeps a
-# large verified backlog automated without removing the hard payload guard.
-MAX_RECHECK_APPLIES_PER_RUN = 1_000
-MAX_AI_REVIEW_ROWS = 50
+# Deterministic approvals are resumable, so one run may drain a substantial
+# verified backlog without relying on repeated manual workflow dispatches.
+# Google mutations remain independently bounded below: no request may carry
+# more than 500 rows or exceed the encoded 2 MiB ceiling.
+MAX_RECHECK_APPLIES_PER_RUN = 5_000
+MAX_RECHECK_UPDATE_ROWS_PER_BATCH = 500
+MAX_AI_REVIEW_ROWS = 200
 MAX_RECHECK_TOTAL_UPDATES = MAX_RECHECK_APPLIES_PER_RUN + MAX_AI_REVIEW_ROWS
 MAX_RECHECK_UPDATE_REQUEST_BYTES = 2 * 1024 * 1024
-# Reserve ample space for up to 50 advisory AI patches and for the real Sheet
-# and row indexes. Selection estimates each deterministic patch with worst-case
-# index widths; the writer still enforces the exact 2 MiB serialized ceiling.
-MAX_RECHECK_DETERMINISTIC_REQUEST_BYTES = 1_500_000
+# Retained as a public compatibility name for tests/integrations which inspect
+# the conservative request ceiling. The limit now applies to every batch, not
+# cumulatively to the entire run.
+MAX_RECHECK_DETERMINISTIC_REQUEST_BYTES = MAX_RECHECK_UPDATE_REQUEST_BYTES
+MAX_PROVIDER_TEXT_INPUT_CHARS = 4_096
+MAX_PROVIDER_TEXT_VARIANT_CHARS = 16_384
+MAX_PROVIDER_PERCENT_DECODE_ROUNDS = 4
+MAX_PROVIDER_TEXT_VARIANTS = 128
 REVIEW_QUEUE_ACTIONS = frozenset({"REVIEW", "UNMATCHED", "NO_EPG", "UNRESOLVED"})
 RECHECK_PATCH_COLUMNS = (
     "enabled",
@@ -738,18 +746,161 @@ def m3u_category_id(group_title: str) -> str:
 
 
 def provider_text_variants(value: object) -> frozenset[str]:
-    """Return raw/URL-rendered forms used only for in-memory comparisons."""
+    """Return bounded raw, recursively decoded, and URL-rendered forms.
+
+    Provider payloads have been observed to percent-encode credentials more
+    than once, and HTML entities are another transport spelling which can hide
+    the same private value. Decode RFC percent escapes, form-style ``+``
+    escapes, and HTML entities as one bounded closure so mixed encodings (for
+    example, a percent-encoded ``&amp;``) cannot bypass persistence guards.
+    Fail closed if another layer remains. The fixed input, variant, and
+    per-value character ceilings prevent a hostile provider field from turning
+    this safety check into unbounded work.
+    """
     text = str(value or "")
     if not text:
         return frozenset()
-    variants = {
-        text,
-        unquote(text),
-        unquote_plus(text),
-        quote(text, safe=""),
-        quote_plus(text, safe=""),
-    }
+    if len(text) > MAX_PROVIDER_TEXT_INPUT_CHARS:
+        raise SyncError(
+            "A provider credential, URL, or returned field exceeds the "
+            "fixed safety-scan size limit."
+        )
+
+    decoded_forms: set[str] = {text}
+    frontier: set[str] = {text}
+    def decode_html(current: str) -> str:
+        decoded = html.unescape(current)
+        # ``html.unescape`` deliberately substitutes U+FFFD for invalid
+        # numeric references such as an out-of-range Unicode code point. Such
+        # malformed transport data is not safe evidence to persist.
+        if decoded != current and (
+            decoded.count("\ufffd") > current.count("\ufffd")
+            or "\x00" in decoded
+        ):
+            raise SyncError(
+                "A provider credential, URL, or returned field contains a "
+                "malformed HTML entity."
+            )
+        return decoded
+
+    def decode_percent(current: str) -> str:
+        return unquote(current, encoding="utf-8", errors="strict")
+
+    def decode_form(current: str) -> str:
+        return unquote_plus(current, encoding="utf-8", errors="strict")
+
+    decoders = (decode_percent, decode_form, decode_html)
+    for _round in range(MAX_PROVIDER_PERCENT_DECODE_ROUNDS):
+        next_frontier: set[str] = set()
+        for current in sorted(frontier):
+            for decoder in decoders:
+                try:
+                    decoded = decoder(current)
+                except (UnicodeDecodeError, ValueError):
+                    raise SyncError(
+                        "A provider credential, URL, or returned field contains "
+                        "malformed percent-encoded text."
+                    ) from None
+                if decoded == current or decoded in decoded_forms:
+                    continue
+                if len(decoded) > MAX_PROVIDER_TEXT_VARIANT_CHARS:
+                    raise SyncError(
+                        "A provider text variant exceeds the fixed safety-scan "
+                        "size limit."
+                    )
+                decoded_forms.add(decoded)
+                next_frontier.add(decoded)
+                if len(decoded_forms) > MAX_PROVIDER_TEXT_VARIANTS:
+                    raise SyncError(
+                        "A provider field exceeds the fixed safety-scan variant "
+                        "limit."
+                    )
+        if not next_frontier:
+            frontier = set()
+            break
+        frontier = next_frontier
+
+    # More layers than the bounded decoder accepts must stop the run rather
+    # than becoming a credential-reflection bypass.
+    for current in sorted(frontier):
+        for decoder in decoders:
+            try:
+                decoded = decoder(current)
+            except (UnicodeDecodeError, ValueError):
+                raise SyncError(
+                    "A provider credential, URL, or returned field contains "
+                    "malformed percent-encoded text."
+                ) from None
+            if decoded != current and decoded not in decoded_forms:
+                raise SyncError(
+                    "A provider field exceeds the transport-decoding safety limit."
+                )
+
+    variants = set(decoded_forms)
+    for decoded in tuple(decoded_forms):
+        for rendered in (quote(decoded, safe=""), quote_plus(decoded, safe="")):
+            if len(rendered) > MAX_PROVIDER_TEXT_VARIANT_CHARS:
+                raise SyncError(
+                    "A provider text variant exceeds the fixed safety-scan size "
+                    "limit."
+                )
+            variants.add(rendered)
+            if len(variants) > MAX_PROVIDER_TEXT_VARIANTS:
+                raise SyncError(
+                    "A provider field exceeds the fixed safety-scan variant limit."
+                )
     return frozenset(variant.casefold() for variant in variants if variant)
+
+
+def gemini_provider_sensitive_values(
+    server_configs: Sequence[ServerConfig],
+) -> tuple[str, ...]:
+    """Return bounded exact provider values for Gemini's final wire guard."""
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for config in server_configs:
+        for raw_value in (config.username, config.password, config.base_url):
+            value = str(raw_value or "")
+            if not value or value in seen:
+                continue
+            if len(value) > gemini_review.MAX_SENSITIVE_VALUE_CHARS:
+                raise SyncError(
+                    "A configured provider value exceeds the Gemini safety-guard "
+                    "size limit."
+                )
+            seen.add(value)
+            values.append(value)
+            if len(values) > gemini_review.MAX_SENSITIVE_VALUES:
+                raise SyncError(
+                    "Too many configured provider values were supplied to the "
+                    "Gemini safety guard."
+                )
+    return tuple(values)
+
+
+def _base64_provider_variants(value: str) -> frozenset[str]:
+    """Return bounded nested base64 spellings for provider-reflection scans."""
+
+    raw = str(value or "")
+    if not raw:
+        return frozenset()
+    result: set[str] = set()
+    frontier = {raw}
+    for _round in range(MAX_PROVIDER_PERCENT_DECODE_ROUNDS):
+        next_frontier: set[str] = set()
+        for current in frontier:
+            encoded = current.encode("utf-8")
+            for rendered in (
+                base64.b64encode(encoded).decode("ascii"),
+                base64.urlsafe_b64encode(encoded).decode("ascii"),
+            ):
+                for variant in (rendered, rendered.rstrip("=")):
+                    if variant and variant not in result:
+                        result.add(variant)
+                        next_frontier.add(variant)
+        frontier = next_frontier
+    return frozenset(result)
 
 
 def distinctive_provider_value(value: str) -> bool:
@@ -796,15 +947,33 @@ def provider_reflection_needles(
         )
 
     global_values: set[str] = set(provider_text_variants(password))
+    global_values.update(
+        variant.casefold() for variant in _base64_provider_variants(password)
+    )
     username_values = provider_text_variants(username)
     if distinctive_provider_value(username):
         global_values.update(username_values)
+    # Even a common username is highly distinctive once encoded.  Scan only its
+    # base64 forms globally; retain the existing structured check for its raw
+    # spelling so ordinary channel names such as "News" are not rejected.
+    global_values.update(
+        variant.casefold() for variant in _base64_provider_variants(username)
+    )
     for base in service_bases:
         normalized_base = str(base or "").rstrip("/")
         global_values.update(provider_text_variants(normalized_base))
+        global_values.update(
+            variant.casefold()
+            for variant in _base64_provider_variants(normalized_base)
+        )
         parsed = urlparse(normalized_base)
         global_values.update(provider_text_variants(parsed.netloc))
         global_values.update(provider_text_variants(parsed.hostname or ""))
+        global_values.update(
+            variant.casefold()
+            for component in (parsed.netloc, parsed.hostname or "")
+            for variant in _base64_provider_variants(component)
+        )
 
     username_alternative = "(?:" + "|".join(
         re.escape(value)
@@ -856,11 +1025,16 @@ def validate_provider_inventory_secret_safe(
         for row in collection:
             for value in row.values():
                 text = str(value if value is not None else "")
-                folded = text.casefold()
-                if folded and (
-                    any(needle in folded for needle in policy.global_needles)
+                folded_variants = provider_text_variants(text)
+                if folded_variants and (
+                    any(
+                        needle in variant
+                        for variant in folded_variants
+                        for needle in policy.global_needles
+                    )
                     or any(
-                        pattern.search(text)
+                        pattern.search(variant)
+                        for variant in folded_variants
                         for pattern in policy.structured_username_patterns
                     )
                 ):
@@ -1702,6 +1876,8 @@ def revalidate_native_review_updates(
     updates: Sequence[Mapping[str, str]],
     proposal_inventories: Sequence[PanelInventory],
     server_configs: Sequence[ServerConfig],
+    *,
+    allow_insecure_http: bool | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Refetch exact native target identities immediately before a Sheet write."""
 
@@ -1737,10 +1913,11 @@ def revalidate_native_review_updates(
         updates_by_server[key[0]].append(row)
 
     configs = {config.server_id: config for config in server_configs}
-    allow_insecure_http = (
-        str(os.environ.get("ALLOW_INSECURE_PANEL_HTTP", "")).strip().casefold()
-        in streaming.TRUE_VALUES
-    )
+    if allow_insecure_http is None:
+        allow_insecure_http = (
+            str(os.environ.get("ALLOW_INSECURE_PANEL_HTTP", "")).strip().casefold()
+            in streaming.TRUE_VALUES
+        )
     session = requests.Session()
     session.headers.update(
         {
@@ -1808,6 +1985,8 @@ def revalidate_native_review_updates(
                     expected_tuple != current_tuple
                     or current_tuple[3]
                     != streaming.clean_identifier(row.get("epg_id", ""), 300)
+                    or exact_inventory_name_key(row.get("channel_name", ""))
+                    != exact_inventory_name_key(current.get("name", ""))
                     or current.get("_native_epg_id_conflict") is True
                     or current.get("_native_epg_id_exact", True) is not True
                 ):
@@ -1822,6 +2001,289 @@ def revalidate_native_review_updates(
         )
     )
     return verified, stats
+
+
+def revalidate_provider_identity_updates(
+    updates: Sequence[Mapping[str, str]],
+    proposal_inventories: Sequence[PanelInventory],
+    server_configs: Sequence[ServerConfig],
+    *,
+    allow_insecure_http: bool = False,
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Refetch exact provider identities adjacent to a REVIEW write batch.
+
+    This is deliberately independent of the selected EPG source.  A real,
+    dummy, ignored, native, or AI-assisted decision is stale if the provider
+    reused the stream ID after proposal generation.  Returning only unchanged
+    rows lets the caller fail closed before the mutating request.
+    """
+
+    stats = {
+        "provider_batch_revalidation_checked": len(updates),
+        "provider_batch_revalidation_rejected": 0,
+        "provider_batch_revalidation_unavailable": 0,
+    }
+    if not updates:
+        return [], stats
+    expected: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for inventory in proposal_inventories:
+        server_id = streaming.normalize_server_id(inventory.server_id)
+        for channel in inventory.channels:
+            key = (
+                server_id,
+                streaming.clean_identifier(channel.get("stream_id", ""), 120),
+            )
+            if key in expected:
+                raise SyncError(
+                    "Provider inventories contain a duplicate stream identity."
+                )
+            expected[key] = channel
+
+    rows_by_server: dict[str, list[dict[str, str]]] = {
+        server_id: [] for server_id in DEFAULT_SERVERS
+    }
+    for raw in updates:
+        row = {
+            column: str(raw.get(column, ""))
+            for column in streaming.SHEET_COLUMNS
+        }
+        key = _row_identity(row)
+        if key not in expected:
+            stats["provider_batch_revalidation_rejected"] += 1
+            continue
+        rows_by_server[key[0]].append(row)
+
+    configs = {config.server_id: config for config in server_configs}
+    verified: list[dict[str, str]] = []
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": f"SKYTV-Channel-Inventory/{SYNC_VERSION}",
+            "Accept": "application/json,text/plain,application/x-mpegURL,*/*",
+        }
+    )
+    try:
+        for server_id in DEFAULT_SERVERS:
+            server_rows = rows_by_server[server_id]
+            if not server_rows:
+                continue
+            config = configs.get(server_id)
+            if config is None:
+                stats["provider_batch_revalidation_unavailable"] += len(
+                    server_rows
+                )
+                continue
+            try:
+                current_inventory = fetch_panel_inventory(
+                    session,
+                    config,
+                    allow_insecure_http=bool(allow_insecure_http),
+                )
+            except SyncError:
+                stats["provider_batch_revalidation_unavailable"] += len(
+                    server_rows
+                )
+                continue
+            current_by_key = {
+                (
+                    server_id,
+                    streaming.clean_identifier(
+                        channel.get("stream_id", ""), 120
+                    ),
+                ): channel
+                for channel in current_inventory.channels
+            }
+            for row in server_rows:
+                key = _row_identity(row)
+                old = expected[key]
+                current = current_by_key.get(key)
+                if current is None:
+                    stats["provider_batch_revalidation_rejected"] += 1
+                    continue
+                old_tuple = (
+                    streaming.clean_identifier(old.get("name", ""), 300),
+                    streaming.clean_identifier(old.get("category_id", ""), 120),
+                    streaming.clean_text(old.get("category_name", ""), 200),
+                )
+                current_tuple = (
+                    streaming.clean_identifier(current.get("name", ""), 300),
+                    streaming.clean_identifier(
+                        current.get("category_id", ""), 120
+                    ),
+                    streaming.clean_text(
+                        current.get("category_name", ""), 200
+                    ),
+                )
+                if (
+                    old_tuple != current_tuple
+                    or exact_inventory_name_key(row.get("channel_name", ""))
+                    != exact_inventory_name_key(current.get("name", ""))
+                ):
+                    stats["provider_batch_revalidation_rejected"] += 1
+                    continue
+                verified.append(row)
+    finally:
+        session.close()
+    verified.sort(
+        key=lambda row: (
+            row["server_id"], streaming.stream_sort_key(row["stream_id"])
+        )
+    )
+    return verified, stats
+
+
+def _deduplicate_provider_revalidation_rows(
+    *row_groups: Sequence[Mapping[str, str]],
+) -> list[dict[str, str]]:
+    """Return one exact provider-identity row per canonical stream key."""
+
+    by_key: dict[tuple[str, str], dict[str, str]] = {}
+    for group in row_groups:
+        for raw in group:
+            row = {
+                column: str(raw.get(column, ""))
+                for column in streaming.SHEET_COLUMNS
+            }
+            key = _row_identity(row)
+            prior = by_key.get(key)
+            if prior is not None:
+                prior_identity = (
+                    streaming.clean_identifier(
+                        prior.get("channel_name", ""), 300
+                    ),
+                    streaming.clean_identifier(
+                        prior.get("category_id", ""), 120
+                    ),
+                    streaming.clean_text(prior.get("category_name", ""), 200),
+                )
+                row_identity = (
+                    streaming.clean_identifier(row.get("channel_name", ""), 300),
+                    streaming.clean_identifier(row.get("category_id", ""), 120),
+                    streaming.clean_text(row.get("category_name", ""), 200),
+                )
+                if prior_identity != row_identity:
+                    raise SyncError(
+                        "Provider revalidation received conflicting identities "
+                        "for one stream key."
+                    )
+                continue
+            by_key[key] = row
+    return [
+        by_key[key]
+        for key in sorted(
+            by_key,
+            key=lambda item: (item[0], streaming.stream_sort_key(item[1])),
+        )
+    ]
+
+
+def _learned_alias_support_rows_from_outcome(
+    outcome: Any,
+) -> tuple[dict[str, str], ...]:
+    """Validate the private provider identities behind run-local alias memory."""
+
+    registered = getattr(outcome, "learned_alias_registered", 0)
+    if isinstance(registered, bool) or not isinstance(registered, int):
+        raise SyncError("Smart Rules returned invalid learned-alias metadata.")
+    raw_support = getattr(outcome, "learned_alias_support_rows", ())
+    if raw_support is None:
+        raw_rows: tuple[Mapping[str, str], ...] = ()
+    elif not isinstance(raw_support, (tuple, list)) or any(
+        not isinstance(row, Mapping) for row in raw_support
+    ):
+        raise SyncError("Smart Rules returned invalid learned-alias support rows.")
+    else:
+        raw_rows = tuple(raw_support)
+    if registered < 0 or (registered == 0 and raw_rows):
+        raise SyncError("Smart Rules returned inconsistent learned-alias metadata.")
+    if registered == 0:
+        return ()
+    if not raw_rows:
+        raise SyncError(
+            "Smart Rules registered learned aliases without their provider "
+            "support rows."
+        )
+    return tuple(_deduplicate_provider_revalidation_rows(raw_rows))
+
+
+def revalidate_auto_enabled_new_rows(
+    rows: Sequence[Mapping[str, str]],
+    proposal_inventories: Sequence[PanelInventory],
+    server_configs: Sequence[ServerConfig],
+    *,
+    allow_insecure_http: bool = False,
+    learned_alias_support_rows: Sequence[Mapping[str, str]] = (),
+) -> tuple[bool, dict[str, int]]:
+    """Reacquire provider identity for new approvals and their rule teachers.
+
+    Disabled REVIEW/IGNORE rows cannot publish a stale schedule, so this narrow
+    terminal gate normally checks only new rows which Smart Rules would make
+    output-eligible. If this run registered cross-server alias memory, its
+    exact teaching rows are also checked before any dependent append.
+    """
+
+    candidates: list[dict[str, str]] = []
+    for raw in rows:
+        action = streaming.clean_text(raw.get("action", ""), 40).upper()
+        if action not in {"AUTO_EPGSHARE", "AUTO_DUMMY"}:
+            continue
+        try:
+            enabled = streaming.parse_bool(
+                raw.get("enabled", ""),
+                default=False,
+                field_name="mapping enabled",
+            )
+        except streaming.BuildError as exc:
+            raise SyncError(
+                "A newly automatic mapping has an invalid enabled value."
+            ) from exc
+        if not enabled:
+            raise SyncError(
+                "A newly automatic mapping must be enabled before provider "
+                "revalidation."
+            )
+        candidates.append(
+            {
+                column: str(raw.get(column, ""))
+                for column in streaming.SHEET_COLUMNS
+            }
+        )
+
+    dependencies = _deduplicate_provider_revalidation_rows(
+        candidates,
+        learned_alias_support_rows,
+    )
+    stats = {
+        "new_auto_provider_revalidation_checked": len(dependencies),
+        "new_auto_provider_revalidation_rejected": 0,
+        "new_auto_provider_revalidation_unavailable": 0,
+    }
+    if not dependencies:
+        return True, stats
+
+    verified, provider_stats = revalidate_provider_identity_updates(
+        dependencies,
+        proposal_inventories,
+        server_configs,
+        allow_insecure_http=allow_insecure_http,
+    )
+    stats["new_auto_provider_revalidation_rejected"] = int(
+        provider_stats.get("provider_batch_revalidation_rejected", 0)
+    )
+    stats["new_auto_provider_revalidation_unavailable"] = int(
+        provider_stats.get("provider_batch_revalidation_unavailable", 0)
+    )
+    wanted_by_key = {_row_identity(row): row for row in dependencies}
+    verified_by_key = {_row_identity(row): row for row in verified}
+    exact = (
+        len(wanted_by_key) == len(dependencies)
+        and set(verified_by_key) == set(wanted_by_key)
+        and all(
+            verified_by_key[key] == wanted
+            for key, wanted in wanted_by_key.items()
+        )
+    )
+    return exact, stats
 
 
 NAME_NOISE_TOKENS = frozenset(
@@ -2001,11 +2463,11 @@ def select_review_recheck_rows(
         for inventory in inventories
         for channel in inventory.channels
     }
-    current_native_ids = {
+    current_native_channels = {
         (
             streaming.normalize_server_id(inventory.server_id),
             streaming.clean_identifier(channel.get("stream_id", ""), 120),
-        ): streaming.clean_identifier(channel.get("epg_channel_id", ""), 300)
+        ): channel
         for inventory in inventories
         for channel in inventory.channels
     }
@@ -2070,13 +2532,18 @@ def select_review_recheck_rows(
         feed = streaming.clean_text(row.get("epg_feed", ""), 80).casefold()
         provenance_known = "auto-map-v1" in notes or "ai-review-v1" in notes
         legacy_server1_panel = server_id == "server_1" and source == "panel"
+        current_native_channel = current_native_channels.get(key, {})
+        current_native_id = streaming.clean_identifier(
+            current_native_channel.get("epg_channel_id", ""), 300
+        )
         exact_current_native_id = (
             server_id in {"server_2", "server_3"}
-            and bool(current_native_ids.get(key))
-            and epg_id == current_native_ids[key]
+            and bool(current_native_id)
+            and epg_id == current_native_id
             and source == "panel"
             and feed in {"panel", "server xmltv.php"}
-            and has_exact_auto_discovery_provenance(row.get("notes", ""))
+            and exact_inventory_name_key(row.get("channel_name", ""))
+            == exact_inventory_name_key(current_native_channel.get("name", ""))
         )
         if (
             epg_id
@@ -2306,14 +2773,32 @@ def sync_alert_identity(row: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
+def sync_alert_dedup_key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+    """Return the stable incident key while leaving evidence fields intact."""
+
+    try:
+        server_id = streaming.normalize_server_id(row.get("server_id", ""))
+    except streaming.BuildError:
+        server_id = streaming.clean_text(row.get("server_id", ""), 40).casefold()
+    return (
+        server_id,
+        streaming.clean_identifier(row.get("stream_id", ""), 120),
+        streaming.clean_text(row.get("alert_type", ""), 80).upper(),
+    )
+
+
 def pending_sync_alert_rows(
     changed_rows: Sequence[Mapping[str, str]],
     existing_alerts: Sequence[Mapping[str, str]],
     *,
     detected_at: str,
 ) -> list[dict[str, str]]:
+    # One unresolved incident owns one OPEN row. Provider names/categories may
+    # continue to drift while that incident awaits review; those changes must
+    # not create an unbounded series of duplicate OPEN alerts. The first row
+    # still retains the complete evidence observed when it was opened.
     seen = {
-        sync_alert_identity(row)
+        sync_alert_dedup_key(row)
         for row in existing_alerts
         if streaming.clean_text(row.get("status", ""), 20).upper() == "OPEN"
     }
@@ -2346,7 +2831,7 @@ def pending_sync_alert_rows(
             "status": "OPEN",
             "review_notes": "",
         }
-        identity = sync_alert_identity(row)
+        identity = sync_alert_dedup_key(row)
         if identity in seen:
             continue
         seen.add(identity)
@@ -3357,15 +3842,28 @@ def post_google_batch_update(
         return
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}:batchUpdate"
     body = {"requests": list(requests_body)}
+    encoded_body = json.dumps(
+        body, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    if len(encoded_body) > MAX_RECHECK_UPDATE_REQUEST_BYTES:
+        raise SyncError("A Google batchUpdate finalization request is too large.")
     # Copy/format/filter updates are idempotent, unlike row appends. Retry only
     # this finalization batch so a transient quota/server fault cannot strand
     # newly appended rows outside the filter.
     # Three range writes at most, plus one final read-only confirmation pass.
-    for attempt in range(4):
+    for attempt in range(3):
         response = None
         retryable = False
         try:
-            response = session.post(url, json=body, timeout=(20, 180))
+            # Send the exact bytes that were measured above. ``json=body``
+            # would let requests reserialize Unicode/whitespace differently,
+            # invalidating the conservative 2 MiB on-wire ceiling.
+            response = session.post(
+                url,
+                data=encoded_body,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                timeout=(20, 180),
+            )
             status = int(getattr(response, "status_code", 0) or 0)
             content = response_body_limited(response, 2 * 1024 * 1024)
             retryable = status == 429 or 500 <= status <= 599
@@ -3937,6 +4435,9 @@ def _validate_review_update(
     verified_native_updates: Mapping[
         tuple[str, str], Mapping[str, str]
     ] | None = None,
+    verified_ai_updates: Mapping[
+        tuple[str, str], Mapping[str, str]
+    ] | None = None,
 ) -> None:
     changed = {
         header
@@ -3969,9 +4470,54 @@ def _validate_review_update(
         streaming.clean_identifier(before.get("stream_id", ""), 120),
     )
     is_verified_native = False
+    is_verified_ai = False
+    is_verified_placeholder = False
+    is_verified_ignore = False
     if after_action == "AUTO_EPGSHARE":
         if not after_enabled:
             raise SyncError("A verified Smart-Rules approval must be enabled.")
+        notes = streaming.clean_text(after.get("notes", ""), 2000).casefold()
+        if "ai-verified-v2" in notes:
+            expected_ai = (verified_ai_updates or {}).get(key)
+            if expected_ai is None or any(
+                str(expected_ai.get(header, "")) != str(after.get(header, ""))
+                for header in streaming.SHEET_COLUMNS
+            ):
+                raise SyncError(
+                    "An AI-assisted REVIEW approval lacks its exact verified "
+                    "policy allowlist entry."
+                )
+            is_verified_ai = True
+        elif "auto-map-v1" not in notes:
+            raise SyncError(
+                "A Smart-Rules REVIEW approval lacks exact matcher provenance."
+            )
+    elif after_action == "AUTO_DUMMY":
+        if (
+            not after_enabled
+            or source != "dummy"
+            or feed != "DUMMY_CHANNELS"
+            or not epg_id
+            or "auto-map-v1" not in streaming.clean_text(
+                after.get("notes", ""), 2000
+            ).casefold()
+        ):
+            raise SyncError(
+                "A verified no-schedule classification violates the dummy policy."
+            )
+        is_verified_placeholder = True
+    elif after_action == "IGNORE":
+        if (
+            after_enabled
+            or source != "dummy"
+            or "method=heading_placeholder" not in streaming.clean_text(
+                after.get("notes", ""), 2000
+            ).casefold()
+        ):
+            raise SyncError(
+                "An ignored heading lacks its exact Smart-Rules classification."
+            )
+        is_verified_ignore = True
     elif after_action == "KEEP_PANEL":
         expected_native = (verified_native_updates or {}).get(key)
         if expected_native is None or any(
@@ -3997,7 +4543,9 @@ def _validate_review_update(
         if after_enabled:
             raise SyncError("An AI suggestion must remain disabled in REVIEW.")
     else:
-        raise SyncError("A REVIEW recheck may only approve or retain REVIEW.")
+        raise SyncError(
+            "A REVIEW recheck may only approve, classify, ignore, or retain REVIEW."
+        )
     has_exact_ai_target = (
         source == "epgshare01" and feed == "ALL_SOURCES1" and bool(epg_id)
     )
@@ -4013,6 +4561,9 @@ def _validate_review_update(
     )
     if (
         not is_verified_native
+        and not is_verified_ai
+        and not is_verified_placeholder
+        and not is_verified_ignore
         and not has_exact_ai_target
         and not is_ai_abstention_marker
     ):
@@ -4069,17 +4620,16 @@ def _bounded_deterministic_review_updates(
     epgshare_updates: Sequence[dict[str, str]],
     native_updates: Sequence[dict[str, str]],
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """Select a count- and byte-bounded deterministic write prefix.
+    """Select a count-bounded deterministic write prefix.
 
     EPGShare keeps its established priority. Native updates use the remaining
-    capacity. A conservative per-row JSON estimate prevents a large set of
-    maximum-length notes from making the exact Google request permanently too
-    large to send.
+    run capacity. The writer splits this prefix into independently verified,
+    count- and byte-bounded Google batches so one large request is never
+    required and an interrupted run can resume from the remaining REVIEW rows.
     """
 
     selected_epgshare: list[dict[str, str]] = []
     selected_native: list[dict[str, str]] = []
-    estimated_bytes = 0
     for lane, rows in (("epgshare", epgshare_updates), ("native", native_updates)):
         for row in rows:
             if (
@@ -4087,6 +4637,8 @@ def _bounded_deterministic_review_updates(
                 >= MAX_RECHECK_APPLIES_PER_RUN
             ):
                 return selected_epgshare, selected_native
+            # Prove that even a single maximum-sized row can form a legal
+            # batch. Cumulative sizing happens later with real row locations.
             requests_for_row = _review_update_requests(
                 numeric_sheet_id=2_147_483_647,
                 row_number=MAX_GOOGLE_MAPPING_ROWS + 1,
@@ -4099,9 +4651,11 @@ def _bounded_deterministic_review_updates(
                     separators=(",", ":"),
                 ).encode("utf-8")
             )
-            if estimated_bytes + row_estimate > MAX_RECHECK_DETERMINISTIC_REQUEST_BYTES:
-                return selected_epgshare, selected_native
-            estimated_bytes += row_estimate
+            if row_estimate > MAX_RECHECK_DETERMINISTIC_REQUEST_BYTES:
+                raise SyncError(
+                    "A deterministic REVIEW update cannot fit in one "
+                    "conservative Google request."
+                )
             if lane == "epgshare":
                 selected_epgshare.append(row)
             else:
@@ -4137,6 +4691,40 @@ def _verify_review_update_result(
                 raise SyncError("Google Sheets did not durably store a complete REVIEW update.")
 
 
+def _review_update_targets_match(
+    before_table: MappingTable,
+    after_table: MappingTable,
+    updates: Mapping[tuple[str, str], Mapping[str, str]],
+) -> bool:
+    """Return whether every requested target is durably present.
+
+    This deliberately ignores unrelated rows.  It is used only to report an
+    accurate committed prefix after the stricter whole-table transition guard
+    has already failed; unrelated concurrent edits still stop the run.
+    """
+
+    before_by_key = _mapping_rows_by_key(before_table)
+    after_by_key = _mapping_rows_by_key(after_table)
+    for key, expected in updates.items():
+        before_entry = before_by_key.get(key)
+        after_entry = after_by_key.get(key)
+        if before_entry is None or after_entry is None:
+            return False
+        before_row_number, before = before_entry
+        after_row_number, after = after_entry
+        if before_row_number != after_row_number:
+            return False
+        for header in streaming.SHEET_COLUMNS:
+            wanted = (
+                str(expected.get(header, ""))
+                if header in RECHECK_PATCH_COLUMNS
+                else str(before.get(header, ""))
+            )
+            if str(after.get(header, "")) != wanted:
+                return False
+    return True
+
+
 def update_google_sheet_review_rows(
     session: Any,
     sheet_id: str,
@@ -4145,9 +4733,18 @@ def update_google_sheet_review_rows(
     rows: Sequence[Mapping[str, str]],
     *,
     pre_write_check: Callable[[], None] | None = None,
+    batch_pre_write_check: (
+        Callable[[Sequence[Mapping[str, str]]], None] | None
+    ) = None,
     verified_native_rows: Sequence[Mapping[str, str]] = (),
+    verified_ai_rows: Sequence[Mapping[str, str]] = (),
 ) -> tuple[int, MappingTable]:
-    """Atomically patch a bounded set of existing disabled REVIEW rows."""
+    """Patch REVIEW rows in verified, resumable Google batches.
+
+    Each batch has its own authoritative pre-read, OPEN-alert authority check,
+    mutating request, and authoritative post-read. Earlier confirmed batches
+    therefore remain a safe resume point if a later request is interrupted.
+    """
 
     if not rows:
         return 0, base_table
@@ -4155,6 +4752,7 @@ def update_google_sheet_review_rows(
         raise SyncError("The REVIEW update batch exceeds its conservative limit.")
     desired: dict[tuple[str, str], dict[str, str]] = {}
     verified_native_updates: dict[tuple[str, str], dict[str, str]] = {}
+    verified_ai_updates: dict[tuple[str, str], dict[str, str]] = {}
     for raw in verified_native_rows:
         key = (
             streaming.normalize_server_id(raw.get("server_id", "")),
@@ -4163,6 +4761,16 @@ def update_google_sheet_review_rows(
         if key in verified_native_updates:
             raise SyncError("The native REVIEW allowlist contains a duplicate identity.")
         verified_native_updates[key] = {
+            header: str(raw.get(header, "")) for header in streaming.SHEET_COLUMNS
+        }
+    for raw in verified_ai_rows:
+        key = (
+            streaming.normalize_server_id(raw.get("server_id", "")),
+            streaming.clean_identifier(raw.get("stream_id", ""), 120),
+        )
+        if key in verified_ai_updates:
+            raise SyncError("The AI REVIEW allowlist contains a duplicate identity.")
+        verified_ai_updates[key] = {
             header: str(raw.get(header, "")) for header in streaming.SHEET_COLUMNS
         }
     base_by_key = _mapping_rows_by_key(base_table)
@@ -4179,6 +4787,7 @@ def update_google_sheet_review_rows(
             before,
             after,
             verified_native_updates=verified_native_updates,
+            verified_ai_updates=verified_ai_updates,
         )
         desired[key] = after
     native_desired_keys = {
@@ -4191,111 +4800,209 @@ def update_google_sheet_review_rows(
         raise SyncError(
             "The native REVIEW allowlist does not exactly match native updates."
         )
-
-    # This authoritative pre-read detects edits, inserts and sorting which
-    # occurred after proposal generation. Users are instructed not to edit the
-    # tab during an apply run; Google Sheets does not expose a value-level CAS.
-    fresh = parse_table_values(
-        google_sheet_values(session, validate_sheet_id(sheet_id), tab_name),
-        maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
-    )
-    if mapping_table_fingerprint(fresh) != mapping_table_fingerprint(base_table):
+    ai_desired_keys = {
+        key
+        for key, row in desired.items()
+        if "ai-verified-v2"
+        in streaming.clean_text(row.get("notes", ""), 2000).casefold()
+    }
+    if set(verified_ai_updates) != ai_desired_keys:
         raise SyncError(
-            "The Mappings tab changed before REVIEW updates; no updates were sent."
+            "The AI REVIEW allowlist does not exactly match AI-assisted updates."
         )
+
     layout = google_sheet_layout(
         session,
         sheet_id,
         tab_name,
         column_count=len(streaming.SHEET_COLUMNS),
-        expected_used_rows=len(fresh.rows) + 1,
+        expected_used_rows=len(base_table.rows) + 1,
     )
-    fresh_by_key = _mapping_rows_by_key(fresh)
-    requests_body: list[dict[str, Any]] = []
-    for key in sorted(
-        desired, key=lambda item: (item[0], streaming.stream_sort_key(item[1]))
-    ):
-        row_number, before = fresh_by_key[key]
-        _validate_review_update(
-            before,
-            desired[key],
-            verified_native_updates=verified_native_updates,
+    base_locations = _mapping_rows_by_key(base_table)
+    ordered_keys = [
+        (
+            streaming.normalize_server_id(row.get("server_id", "")),
+            streaming.clean_identifier(row.get("stream_id", ""), 120),
         )
-        requests_body.extend(
-            _review_update_requests(
-                numeric_sheet_id=layout.numeric_sheet_id,
-                row_number=row_number,
-                row=desired[key],
+        for row in rows
+    ]
+    batches: list[
+        tuple[dict[tuple[str, str], dict[str, str]], list[dict[str, Any]]]
+    ] = []
+    batch_desired: dict[tuple[str, str], dict[str, str]] = {}
+    batch_requests: list[dict[str, Any]] = []
+    empty_body_bytes = len(b'{"requests":[]}')
+    batch_bytes = empty_body_bytes
+    for key in ordered_keys:
+        row_number, _before = base_locations[key]
+        row_requests = _review_update_requests(
+            numeric_sheet_id=layout.numeric_sheet_id,
+            row_number=row_number,
+            row=desired[key],
+        )
+        serialized_requests = [
+            len(
+                json.dumps(
+                    request,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
             )
+            for request in row_requests
+        ]
+        row_bytes = sum(serialized_requests) + len(row_requests) - (
+            1 if not batch_requests else 0
         )
-    body = {"requests": requests_body}
-    encoded_body = json.dumps(
-        body, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
-    if len(encoded_body) > MAX_RECHECK_UPDATE_REQUEST_BYTES:
-        raise SyncError("The REVIEW update request exceeds its conservative size limit.")
-    if pre_write_check is not None:
-        # Keep the Sync Alerts authority check adjacent to the only mutating
-        # request. This narrows (but cannot eliminate) Google's lack of a
-        # cross-tab compare-and-swap primitive.
-        pre_write_check()
+        if batch_desired and (
+            len(batch_desired) >= MAX_RECHECK_UPDATE_ROWS_PER_BATCH
+            or batch_bytes + row_bytes > MAX_RECHECK_UPDATE_REQUEST_BYTES
+        ):
+            batches.append((batch_desired, batch_requests))
+            batch_desired = {}
+            batch_requests = []
+            batch_bytes = empty_body_bytes
+            row_bytes = sum(serialized_requests) + len(row_requests) - 1
+        if batch_bytes + row_bytes > MAX_RECHECK_UPDATE_REQUEST_BYTES:
+            raise SyncError(
+                "A REVIEW update cannot fit in one conservative Google request."
+            )
+        batch_desired[key] = desired[key]
+        batch_requests.extend(row_requests)
+        batch_bytes += row_bytes
+    if batch_desired:
+        batches.append((batch_desired, batch_requests))
 
     url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}:batchUpdate"
-    response = None
-    response_content = b""
-    uncertain = False
-    rejection_message = ""
-    try:
-        response = session.post(url, json=body, timeout=(20, 180))
-        status = int(getattr(response, "status_code", 0) or 0)
-        response_content = response_body_limited(response, 2 * 1024 * 1024)
-        if status not in {200, 201}:
-            # A timeout, intermediary, or damaged response can hide a committed
-            # Sheets mutation. Reconcile against an authoritative read before
-            # deciding whether this request failed.
-            uncertain = True
-            rejection_message = google_write_rejection_message(
-                "Mappings REVIEW",
-                status=status,
-                response_content=response_content,
-                operation="atomic update",
+    current_table = base_table
+    committed_count = 0
+    for current_desired, requests_body in batches:
+        # Provider/native validation can require multiple network downloads.
+        # Run that slower check first, then make the authoritative Sheet and
+        # OPEN-alert reads the final preconditions immediately before POST.
+        try:
+            if batch_pre_write_check is not None:
+                batch_pre_write_check(tuple(current_desired.values()))
+            fresh = parse_table_values(
+                google_sheet_values(
+                    session, validate_sheet_id(sheet_id), tab_name
+                ),
+                maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
             )
-        else:
-            try:
-                payload = json.loads((response_content or b"{}").decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                payload = None
-            if not (
-                isinstance(payload, dict)
-                and str(payload.get("spreadsheetId", "")) == sheet_id
-                and isinstance(payload.get("replies"), list)
-                and len(payload["replies"]) == len(requests_body)
-                and all(isinstance(reply, dict) for reply in payload["replies"])
+            if mapping_table_fingerprint(fresh) != mapping_table_fingerprint(
+                current_table
             ):
-                uncertain = True
-    except Exception:
-        uncertain = True
-    finally:
-        if response is not None:
-            close_response(response)
-
-    try:
-        final_table = parse_table_values(
-            google_sheet_values(session, validate_sheet_id(sheet_id), tab_name),
-            maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
-        )
-        _verify_review_update_result(fresh, final_table, desired)
-    except SyncError:
-        if uncertain:
-            raise SheetWriteError(
-                rejection_message
-                or (
-                    "Google Sheets returned an uncertain REVIEW update result and "
-                    "the authoritative re-read did not confirm every target."
+                message = (
+                    "The Mappings tab changed before REVIEW updates; no further "
+                    "updates were sent."
                 )
-            ) from None
-        raise
-    return len(desired), final_table
+                if committed_count:
+                    raise SheetWriteError(message, committed_count)
+                raise SyncError(message)
+            fresh_by_key = _mapping_rows_by_key(fresh)
+            for key, wanted in current_desired.items():
+                _row_number, before = fresh_by_key[key]
+                _validate_review_update(
+                    before,
+                    wanted,
+                    verified_native_updates=verified_native_updates,
+                    verified_ai_updates=verified_ai_updates,
+                )
+            if pre_write_check is not None:
+                # Recheck Sync Alerts after provider validation and adjacent to
+                # every mutating request.
+                pre_write_check()
+        except SheetWriteError:
+            raise
+        except SyncError as exc:
+            if committed_count:
+                raise SheetWriteError(str(exc), committed_count) from None
+            raise
+
+        body = {"requests": requests_body}
+        encoded_body = json.dumps(
+            body, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        if len(current_desired) > MAX_RECHECK_UPDATE_ROWS_PER_BATCH:
+            raise SyncError("A REVIEW update batch exceeds its row limit.")
+        if len(encoded_body) > MAX_RECHECK_UPDATE_REQUEST_BYTES:
+            raise SyncError(
+                "A REVIEW update request exceeds its conservative size limit."
+            )
+
+        response = None
+        response_content = b""
+        uncertain = False
+        rejection_message = ""
+        try:
+            response = session.post(
+                url,
+                data=encoded_body,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                timeout=(20, 180),
+            )
+            status = int(getattr(response, "status_code", 0) or 0)
+            response_content = response_body_limited(response, 2 * 1024 * 1024)
+            if status not in {200, 201}:
+                uncertain = True
+                rejection_message = google_write_rejection_message(
+                    "Mappings REVIEW",
+                    status=status,
+                    response_content=response_content,
+                    operation="atomic update",
+                )
+            else:
+                try:
+                    payload = json.loads(
+                        (response_content or b"{}").decode("utf-8")
+                    )
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    payload = None
+                if not (
+                    isinstance(payload, dict)
+                    and str(payload.get("spreadsheetId", "")) == sheet_id
+                    and isinstance(payload.get("replies"), list)
+                    and len(payload["replies"]) == len(requests_body)
+                    and all(isinstance(reply, dict) for reply in payload["replies"])
+                ):
+                    uncertain = True
+        except Exception:
+            uncertain = True
+        finally:
+            if response is not None:
+                close_response(response)
+
+        observed_table: MappingTable | None = None
+        try:
+            observed_table = parse_table_values(
+                google_sheet_values(
+                    session, validate_sheet_id(sheet_id), tab_name
+                ),
+                maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
+            )
+            _verify_review_update_result(fresh, observed_table, current_desired)
+        except SyncError as exc:
+            committed_after_failure = committed_count
+            if (
+                observed_table is not None
+                and _review_update_targets_match(
+                    fresh, observed_table, current_desired
+                )
+            ):
+                committed_after_failure += len(current_desired)
+            if uncertain:
+                raise SheetWriteError(
+                    rejection_message
+                    or (
+                        "Google Sheets returned an uncertain REVIEW update result "
+                        "and the authoritative re-read did not confirm every target."
+                    ),
+                    committed_after_failure,
+                ) from None
+            raise SheetWriteError(str(exc), committed_after_failure) from None
+        committed_count += len(current_desired)
+        current_table = observed_table
+
+    return committed_count, current_table
 
 
 def append_sync_alert_rows(
@@ -4523,27 +5230,26 @@ def _build_verified_native_review_updates(
             continue
         source = streaming.clean_text(before.get("source", ""), 40).casefold()
         feed = streaming.clean_text(before.get("epg_feed", ""), 80).casefold()
-        notes = streaming.clean_text(before.get("notes", ""), 2000)
-        auto_discovered = has_exact_auto_discovery_provenance(notes)
         if stored_id and stored_id != current_id:
             summary["native_review_rejected_stored_conflict"] += 1
             continue
-        if not stored_id:
-            if (
-                not auto_discovered
-                or source != "epgshare01"
-                or feed != "all_sources1"
-            ):
-                summary["native_review_rejected_provenance"] += 1
-                continue
-        elif (
-            source != "panel"
-            or feed not in {"panel", "server xmltv.php"}
-            or not auto_discovered
+        # A populated historical ID remains operator-controlled unless it is
+        # already a native-panel candidate which exactly agrees with the fresh
+        # provider ID. Blank legacy/imported REVIEW rows need no generated-note
+        # provenance: every fact used below is independently reacquired now.
+        if stored_id and (
+            source != "panel" or feed not in {"panel", "server xmltv.php"}
         ):
             summary["native_review_rejected_provenance"] += 1
             continue
         provider_name = streaming.clean_identifier(channel.get("name", ""), 300)
+        if (
+            not provider_name
+            or exact_inventory_name_key(before.get("channel_name", ""))
+            != exact_inventory_name_key(provider_name)
+        ):
+            summary["native_review_rejected_identity"] += 1
+            continue
         candidate_row = {column: str(before.get(column, "")) for column in streaming.SHEET_COLUMNS}
         candidates[key[0]][key] = (candidate_row, current_id, provider_name)
 
@@ -4614,7 +5320,7 @@ def _build_verified_native_review_updates(
                     continue
                 marker = (
                     "native-review-v1; exact current provider EPG ID, XMLTV "
-                    "display name, and current schedule verified"
+                    "display name, unchanged provider name, and current schedule verified"
                 )
                 prior_notes = streaming.clean_text(row.get("notes", ""), 2000)
                 row.update(
@@ -4653,15 +5359,193 @@ def _build_verified_native_review_updates(
     return verified_updates, summary
 
 
+def _ai_policy_semantics(value: Any) -> ai_policy.ProtectedSemantics:
+    return ai_policy.ProtectedSemantics(
+        direction=str(getattr(value, "direction", "") or ""),
+        timeshift=str(getattr(value, "timeshift", "") or ""),
+        has_plus=bool(getattr(value, "has_plus", False)),
+        has_extra=bool(getattr(value, "has_extra", False)),
+        has_alternate=bool(getattr(value, "has_alternate", False)),
+        numbers=frozenset(getattr(value, "numbers", ()) or ()),
+        languages=frozenset(getattr(value, "languages", ()) or ()),
+        content=frozenset(getattr(value, "content", ()) or ()),
+    )
+
+
+def _ai_policy_row(
+    shortlist: automatch.AiReviewShortlist,
+    before: Mapping[str, str],
+) -> ai_policy.ReviewRowEvidence:
+    try:
+        enabled = streaming.parse_bool(
+            before.get("enabled", ""),
+            default=False,
+            field_name="mapping enabled",
+        )
+    except streaming.BuildError as exc:
+        raise SyncError("An AI REVIEW row has invalid enabled state.") from exc
+    return ai_policy.ReviewRowEvidence(
+        server_id=str(shortlist.server_id),
+        stream_id=str(shortlist.stream_id),
+        channel_name=str(shortlist.channel_name),
+        category_name=str(shortlist.category_name),
+        normalized_name=str(shortlist.normalized_name),
+        normalized_category=str(shortlist.normalized_category),
+        strict_identity=str(shortlist.strict_identity),
+        bag_identity=str(shortlist.bag_identity),
+        market=str(shortlist.market),
+        route_plan=tuple(shortlist.route_plan),
+        route_explicit=bool(shortlist.route_explicit),
+        semantics=_ai_policy_semantics(shortlist),
+        smart_epg_id=str(shortlist.smart_epg_id),
+        smart_match_method=str(shortlist.smart_match_method),
+        name_ranker_id=ai_policy.NAME_RANKER_ID,
+        contextual_ranker_id=ai_policy.CONTEXTUAL_RANKER_ID,
+        source_sha256=str(shortlist.source_sha256),
+        text_catalog_file_sha256=str(shortlist.text_catalog_file_sha256),
+        text_catalog_fingerprint_sha256=str(
+            shortlist.text_catalog_fingerprint_sha256
+        ),
+        text_catalog_generated_token=str(shortlist.text_catalog_generated_token),
+        candidates=tuple(
+            ai_policy.CandidateEvidence(
+                epg_id=str(candidate.epg_id),
+                display_name=str(candidate.display_name),
+                market=str(candidate.region),
+                feed=str(candidate.feed),
+                name_score=float(candidate.local_score),
+                contextual_score=float(candidate.contextual_score),
+                semantics=_ai_policy_semantics(candidate),
+            )
+            for candidate in shortlist.candidates
+        ),
+        action=streaming.clean_text(before.get("action", ""), 40).upper(),
+        enabled=enabled,
+        has_open_alert=False,
+        provider_identity_unchanged=True,
+    )
+
+
+def _ai_policy_terminal_rows(
+    prepared: ai_policy.PreparedClusterReview,
+    *,
+    terminal_table: MappingTable,
+    terminal_open_alert_keys: frozenset[tuple[str, str]],
+    provider_verified_keys: frozenset[tuple[str, str]],
+) -> tuple[ai_policy.TerminalRowState, ...]:
+    """Bind policy decisions to an actual terminal Sheet/provider reread."""
+
+    terminal_by_key = _mapping_rows_by_key(terminal_table)
+    result: list[ai_policy.TerminalRowState] = []
+    for proposal_row in prepared.cluster.rows:
+        key = proposal_row.key
+        if key not in provider_verified_keys:
+            # A missing terminal row makes only this row remain REVIEW in the
+            # pure policy. Never manufacture an "unchanged" provider state.
+            continue
+        terminal_entry = terminal_by_key.get(key)
+        if terminal_entry is None:
+            continue
+        _row_number, current = terminal_entry
+        try:
+            enabled = streaming.parse_bool(
+                current.get("enabled", ""),
+                default=False,
+                field_name="mapping enabled",
+            )
+        except streaming.BuildError:
+            continue
+        result.append(
+            ai_policy.TerminalRowState(
+                server_id=key[0],
+                stream_id=key[1],
+                channel_name=str(current.get("channel_name", "")),
+                category_name=str(current.get("category_name", "")),
+                # These derived values are safe to retain only because the
+                # provider verifier above proved that the raw channel/category
+                # identity still equals the proposal-time inventory. The raw
+                # terminal strings are also compared by the policy.
+                normalized_name=proposal_row.normalized_name,
+                normalized_category=proposal_row.normalized_category,
+                strict_identity=proposal_row.strict_identity,
+                bag_identity=proposal_row.bag_identity,
+                market=proposal_row.market,
+                route_plan=proposal_row.route_plan,
+                route_explicit=proposal_row.route_explicit,
+                semantics=proposal_row.semantics,
+                action=streaming.clean_text(
+                    current.get("action", ""), 40
+                ).upper(),
+                enabled=enabled,
+                has_open_alert=key in terminal_open_alert_keys,
+            )
+        )
+    return tuple(result)
+
+
+def _ai_policy_verification(
+    outcome: automatch.AutoMatchOutcome,
+) -> ai_policy.LocalVerificationSnapshot:
+    """Convert the parser's real same-descriptor evidence, never a shortlist."""
+
+    evidence = outcome.verification_evidence
+    return ai_policy.LocalVerificationSnapshot(
+        source_sha256=str(evidence.source_sha256),
+        text_catalog_file_sha256=str(evidence.text_catalog_file_sha256),
+        text_catalog_fingerprint_sha256=str(
+            evidence.text_catalog_fingerprint_sha256
+        ),
+        text_catalog_generated_token=str(evidence.text_catalog_generated_token),
+        xml_catalog_ids=frozenset(evidence.xml_catalog_ids),
+        text_catalog_ids=frozenset(evidence.text_catalog_ids),
+        catalog_candidates=tuple(
+            ai_policy.CatalogCandidateState(
+                epg_id=str(candidate.epg_id),
+                market=str(candidate.market),
+                feed=str(candidate.feed),
+                semantics=_ai_policy_semantics(candidate.semantics),
+                is_real=candidate.is_real,
+            )
+            for candidate in evidence.catalog_candidates
+        ),
+        programme_gates=tuple(
+            ai_policy.ProgrammeGateEvidence(
+                channel_key=str(gate.channel_key),
+                distinct_informative_programmes=(
+                    gate.distinct_informative_programmes
+                ),
+                first_start_epoch=gate.first_start_epoch,
+                latest_stop_epoch=gate.latest_stop_epoch,
+                checked_at_epoch=gate.checked_at_epoch,
+                source_sha256=str(gate.source_sha256),
+                passed=gate.passed,
+            )
+            for gate in evidence.programme_gates
+        ),
+    )
+
+
 def _gemini_review_updates(
     *,
     outcome: automatch.AutoMatchOutcome,
     authoritative_table: MappingTable,
     api_key: str,
     limit: int,
+    sensitive_values: Sequence[str] = (),
     excluded_keys: Iterable[tuple[str, str]] = (),
+    terminal_state_loader: (
+        Callable[
+            [Sequence[Mapping[str, str]]],
+            tuple[
+                MappingTable,
+                frozenset[tuple[str, str]],
+                frozenset[tuple[str, str]],
+            ],
+        ]
+        | None
+    ) = None,
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
-    """Convert HIGH Gemini suggestions into disabled, manual-review patches."""
+    """Apply only Smart+Gemini HIGH agreements which pass every local gate."""
 
     excluded = frozenset(excluded_keys)
     available = tuple(
@@ -4669,163 +5553,251 @@ def _gemini_review_updates(
         for shortlist in (getattr(outcome, "ai_review_shortlists", ()) or ())
         if (str(shortlist.server_id), str(shortlist.stream_id)) not in excluded
     )
-    selected = available[: min(int(limit), MAX_AI_REVIEW_ROWS)]
     summary: dict[str, Any] = {
         "ai_review_enabled": True,
-        "ai_review_considered_rows": len(selected),
+        "ai_review_considered_rows": 0,
+        "ai_review_considered_clusters": 0,
+        "ai_review_deferred_clusters": 0,
+        "ai_review_deferred_rows": 0,
+        "ai_review_policy_blocked_clusters": 0,
         "ai_review_suggestion_rows": 0,
         "ai_review_high_suggestions_found": 0,
         "ai_review_high_suggestion_updates": 0,
         "ai_review_high_suggestions_persisted": 0,
+        "ai_review_auto_enabled_rows": 0,
         "ai_review_abstained_rows": 0,
         "ai_review_error_rows": 0,
-        "ai_review_repeat_suggestions": 0,
-        "ai_review_abstain_marked_rows": 0,
         "ai_review_batches_attempted": 0,
         "ai_review_batches_succeeded": 0,
         "ai_review_prompt_tokens": 0,
         "ai_review_candidate_tokens": 0,
         "ai_review_total_tokens": 0,
     }
-    if not selected:
+    if not available:
         return [], summary
 
-    requests_to_review: list[gemini_review.ReviewRequest] = []
-    shortlist_by_review_id: dict[str, Any] = {}
-    for index, shortlist in enumerate(selected, start=1):
-        review_id = f"review-{index:04d}"
-        shortlist_by_review_id[review_id] = shortlist
-        requests_to_review.append(
-            gemini_review.ReviewRequest(
-                review_id=review_id,
-                channel_name=str(shortlist.channel_name),
-                category=str(shortlist.category_name),
-                market=str(shortlist.market),
-                candidates=tuple(
-                    gemini_review.ReviewCandidate(
-                        candidate_key=str(candidate.candidate_key),
-                        epg_id=str(candidate.epg_id),
-                        display_name=str(candidate.display_name),
-                        region=str(candidate.region),
-                        feed=str(candidate.feed),
-                    )
-                    for candidate in shortlist.candidates
-                ),
-            )
-        )
+    authoritative_by_key = _mapping_rows_by_key(authoritative_table)
+    shortlist_by_key: dict[tuple[str, str], automatch.AiReviewShortlist] = {}
+    policy_rows: list[ai_policy.ReviewRowEvidence] = []
+    for shortlist in available:
+        key = (str(shortlist.server_id), str(shortlist.stream_id))
+        if key in shortlist_by_key or key not in authoritative_by_key:
+            summary["ai_review_error_rows"] += 1
+            continue
+        _row_number, before = authoritative_by_key[key]
+        try:
+            policy_row = _ai_policy_row(shortlist, before)
+        except (SyncError, ai_policy.PolicyInputError, ValueError, TypeError):
+            summary["ai_review_error_rows"] += 1
+            continue
+        shortlist_by_key[key] = shortlist
+        policy_rows.append(policy_row)
+
+    if not policy_rows:
+        summary["ai_review_status"] = "failed_closed"
+        return [], summary
     try:
-        reviewed = gemini_review.review_flagged_channels(
-            tuple(requests_to_review), api_key=api_key
+        clusters = ai_policy.cluster_exact_compatible_rows(tuple(policy_rows))
+        prepared = ai_policy.prepare_cluster_reviews(clusters)
+        plan = ai_policy.partition_review_requests(
+            prepared,
+            run_limit=min(int(limit), MAX_AI_REVIEW_ROWS),
+            batch_size=ai_policy.MAX_ROWS_PER_GEMINI_CALL,
+            rotation=int(getattr(outcome, "ai_review_rotation", 0) or 0),
         )
-    except Exception:
-        # AI is advisory. Its outage or an invalid response must never prevent
-        # deterministic Smart-Rules approvals or the ordinary EPG build.
-        summary["ai_review_error_rows"] = len(requests_to_review)
+    except (ai_policy.PolicyInputError, ValueError, TypeError):
+        summary["ai_review_error_rows"] += len(policy_rows)
         summary["ai_review_status"] = "failed_closed"
         return [], summary
 
-    summary.update(
-        {
-            "ai_review_batches_attempted": reviewed.batches_attempted,
-            "ai_review_batches_succeeded": reviewed.batches_succeeded,
-            "ai_review_prompt_tokens": reviewed.prompt_tokens,
-            "ai_review_candidate_tokens": reviewed.candidate_tokens,
-            "ai_review_total_tokens": reviewed.total_tokens,
-        }
+    summary["ai_review_policy_blocked_clusters"] = sum(
+        1 for item in prepared if not item.eligible
     )
-    authoritative_by_key = _mapping_rows_by_key(authoritative_table)
+
+    # The user-facing limit controls AI clusters.  Keep an independent 200-row
+    # mutation cap so clustering can save API calls without expanding the
+    # Google write blast radius.
+    selected: list[ai_policy.PreparedClusterReview] = []
+    deferred = list(plan.deferred)
+    selected_rows = 0
+    for item in plan.selected:
+        row_count = len(item.cluster.rows)
+        if selected_rows + row_count > MAX_AI_REVIEW_ROWS:
+            deferred.append(item)
+            continue
+        selected.append(item)
+        selected_rows += row_count
+    summary["ai_review_considered_clusters"] = len(selected)
+    summary["ai_review_considered_rows"] = selected_rows
+    summary["ai_review_deferred_clusters"] = len(deferred)
+    summary["ai_review_deferred_rows"] = sum(
+        len(item.cluster.rows) for item in deferred
+    )
+    if not selected:
+        summary["ai_review_status"] = "no_safe_clusters"
+        return [], summary
+
+    batches = tuple(
+        tuple(selected[index : index + ai_policy.MAX_ROWS_PER_GEMINI_CALL])
+        for index in range(0, len(selected), ai_policy.MAX_ROWS_PER_GEMINI_CALL)
+    )
+    results_by_id: dict[str, gemini_review.ReviewResult] = {}
+    for batch_index, batch in enumerate(batches):
+        requests_to_review = tuple(
+            item.request for item in batch if item.request is not None
+        )
+        try:
+            reviewed = gemini_review.review_flagged_channels(
+                requests_to_review,
+                api_key=api_key,
+                sensitive_values=sensitive_values,
+            )
+        except Exception:
+            # AI is optional. Quota, timeout, or malformed output never blocks
+            # deterministic decisions or the normal EPG build.
+            remaining = batches[batch_index:]
+            summary["ai_review_error_rows"] += sum(
+                len(item.cluster.rows)
+                for pending_batch in remaining
+                for item in pending_batch
+            )
+            break
+        summary["ai_review_batches_attempted"] += reviewed.batches_attempted
+        summary["ai_review_batches_succeeded"] += reviewed.batches_succeeded
+        summary["ai_review_prompt_tokens"] += reviewed.prompt_tokens
+        summary["ai_review_candidate_tokens"] += reviewed.candidate_tokens
+        summary["ai_review_total_tokens"] += reviewed.total_tokens
+        for result in reviewed.results:
+            if result.review_id in results_by_id:
+                summary["ai_review_error_rows"] += 1
+                continue
+            results_by_id[result.review_id] = result
+
+    result_items = tuple(
+        item
+        for item in selected
+        if item.cluster.cluster_id in results_by_id
+    )
+    terminal_input_by_key: dict[tuple[str, str], dict[str, str]] = {}
+    for item in result_items:
+        for policy_row in item.cluster.rows:
+            base_entry = authoritative_by_key.get(policy_row.key)
+            if base_entry is not None:
+                terminal_input_by_key[policy_row.key] = dict(base_entry[1])
+    if result_items and terminal_state_loader is None:
+        summary["ai_review_error_rows"] += sum(
+            len(item.cluster.rows) for item in result_items
+        )
+        summary["ai_review_status"] = "failed_closed"
+        return [], summary
+    try:
+        if result_items:
+            (
+                terminal_table,
+                terminal_open_alert_keys,
+                provider_verified_keys,
+            ) = terminal_state_loader(  # type: ignore[misc]
+                tuple(terminal_input_by_key.values())
+            )
+        else:
+            terminal_table = authoritative_table
+            terminal_open_alert_keys = frozenset()
+            provider_verified_keys = frozenset()
+        verification = _ai_policy_verification(outcome)
+        decision_epoch = int(time.time())
+    except Exception:
+        summary["ai_review_error_rows"] += sum(
+            len(item.cluster.rows) for item in result_items
+        )
+        summary["ai_review_status"] = "failed_closed"
+        return [], summary
+
     updates: list[dict[str, str]] = []
-    for result in reviewed.results:
-        shortlist = shortlist_by_review_id.get(result.review_id)
-        if shortlist is None:
-            summary["ai_review_error_rows"] += 1
+    updated_keys: set[tuple[str, str]] = set()
+    for item in selected:
+        result = results_by_id.get(item.cluster.cluster_id)
+        if result is None:
+            # A failed later API batch is already counted above.
             continue
-        if result.decision is gemini_review.ReviewDecision.ERROR:
-            summary["ai_review_error_rows"] += 1
-            continue
-        is_high_suggestion = (
+        is_high = (
             result.decision is gemini_review.ReviewDecision.SUGGEST
             and result.confidence is gemini_review.ReviewConfidence.HIGH
             and bool(result.candidate_key)
         )
-        candidates = {
-            str(candidate.candidate_key): candidate
-            for candidate in shortlist.candidates
-        }
-        candidate = candidates.get(result.candidate_key or "")
-        key = (str(shortlist.server_id), str(shortlist.stream_id))
-        base_entry = authoritative_by_key.get(key)
-        if base_entry is None or (is_high_suggestion and candidate is None):
-            summary["ai_review_error_rows"] += 1
-            continue
-        _row_number, before = base_entry
-        row = dict(before)
-        if not is_high_suggestion:
-            summary["ai_review_abstained_rows"] += 1
-            marker = (
-                "ai-review-v1; Gemini abstained or returned less than HIGH "
-                "confidence; manual review required"
+        if is_high:
+            summary["ai_review_high_suggestions_found"] += len(
+                item.cluster.rows
             )
-            prior_notes = streaming.clean_text(row.get("notes", ""), 2000)
+            summary["ai_review_suggestion_rows"] += len(item.cluster.rows)
+        try:
+            decisions = ai_policy.validate_high_agreement(
+                item,
+                result,
+                verification=verification,
+                terminal_rows=_ai_policy_terminal_rows(
+                    item,
+                    terminal_table=terminal_table,
+                    terminal_open_alert_keys=terminal_open_alert_keys,
+                    provider_verified_keys=provider_verified_keys,
+                ),
+                decision_epoch=decision_epoch,
+            )
+        except (SyncError, ai_policy.PolicyInputError, ValueError, TypeError):
+            summary["ai_review_error_rows"] += len(item.cluster.rows)
+            continue
+        for decision in decisions:
+            key = (decision.server_id, decision.stream_id)
+            if not decision.approved or decision.provenance is None:
+                summary["ai_review_abstained_rows"] += 1
+                continue
+            base_entry = authoritative_by_key.get(key)
+            if base_entry is None or key in updated_keys:
+                summary["ai_review_error_rows"] += 1
+                continue
+            _row_number, before = base_entry
+            row = dict(before)
             row.update(
                 {
-                    "enabled": "FALSE",
-                    "action": "REVIEW",
-                    "reason": "Gemini did not find one HIGH-confidence candidate.",
-                    "notes": (
-                        prior_notes
-                        if marker.casefold() in prior_notes.casefold()
-                        else streaming.clean_text(
-                            "; ".join(
-                                value for value in (prior_notes, marker) if value
-                            ),
-                            2000,
-                        )
+                    "enabled": "TRUE",
+                    "action": "AUTO_EPGSHARE",
+                    "source": "epgshare01",
+                    "epg_feed": "ALL_SOURCES1",
+                    "epg_id": decision.epg_id,
+                    "reason": (
+                        "Smart Rules and Gemini HIGH independently selected "
+                        "the same locally verified EPGShare schedule."
                     ),
                 }
             )
-            if row != before:
-                _validate_review_update(before, row)
-                updates.append(row)
-                summary["ai_review_abstain_marked_rows"] += 1
-            continue
-        assert candidate is not None
-        candidate_display = streaming.clean_text(candidate.display_name, 180)
-        marker = (
-            "ai-review-v1; Gemini HIGH suggestion only; "
-            f"EPGShare name={candidate_display}; exact catalog and programme "
-            "gate verified locally; manual approval required"
-        )
-        prior_notes = streaming.clean_text(row.get("notes", ""), 2000)
-        row.update(
-            {
-                "enabled": "FALSE",
-                "action": "REVIEW",
-                "source": "epgshare01",
-                "epg_feed": "ALL_SOURCES1",
-                "epg_id": str(candidate.epg_id),
-                "reason": (
-                    "Gemini suggested this locally verified EPGShare candidate; "
-                    "manual approval is required."
+            marker = automatch._ai_verified_v2_provenance_note(
+                row,
+                match_method=decision.provenance.match_method,
+                market=decision.provenance.market,
+                source_sha256=decision.provenance.source_sha256,
+                text_catalog_file_sha256=(
+                    decision.provenance.text_catalog_file_sha256
                 ),
-                "notes": (
-                    prior_notes
-                    if marker.casefold() in prior_notes.casefold()
-                    else streaming.clean_text(
-                        "; ".join(value for value in (prior_notes, marker) if value),
-                        2000,
-                    )
+                text_catalog_fingerprint_sha256=(
+                    decision.provenance.text_catalog_fingerprint_sha256
                 ),
-            }
-        )
-        summary["ai_review_suggestion_rows"] += 1
-        summary["ai_review_high_suggestions_found"] += 1
-        if row == before:
-            summary["ai_review_repeat_suggestions"] += 1
-            continue
-        _validate_review_update(before, row)
-        updates.append(row)
-        summary["ai_review_high_suggestion_updates"] += 1
+                text_catalog_generated_token=(
+                    decision.provenance.text_catalog_generated_token
+                ),
+            )
+            prior_notes = streaming.clean_text(row.get("notes", ""), 2000)
+            row["notes"] = streaming.clean_text(
+                " | ".join(value for value in (marker, prior_notes) if value),
+                2000,
+            )
+            _validate_review_update(
+                before,
+                row,
+                verified_ai_updates={key: row},
+            )
+            updates.append(row)
+            updated_keys.add(key)
+            summary["ai_review_high_suggestion_updates"] += 1
+            summary["ai_review_auto_enabled_rows"] += 1
     summary["ai_review_status"] = (
         "completed" if not summary["ai_review_error_rows"] else "partial_failed_closed"
     )
@@ -4858,6 +5830,7 @@ def _run_sync_review_mode(
     ai_review_limit: int,
     validate_native_review: bool,
     native_hint_summary: Mapping[str, int] | None,
+    allow_insecure_http: bool,
 ) -> dict[str, Any]:
     """Run the opt-in REVIEW backlog path without changing the legacy default."""
 
@@ -4969,6 +5942,7 @@ def _run_sync_review_mode(
         "auto_match_rejected_programme_gates": 0,
     }
     outcome: automatch.AutoMatchOutcome | None = None
+    learned_alias_support_rows: tuple[dict[str, str], ...] = ()
     if not overlap_issues:
         try:
             outcome = automatch.auto_match_and_spool(
@@ -4994,17 +5968,24 @@ def _run_sync_review_mode(
         review_results = [
             output_by_key[_row_identity(row)] for row in review_recheck_rows
         ]
+        learned_alias_support_rows = _learned_alias_support_rows_from_outcome(
+            outcome
+        )
         auto_match_summary = outcome.summary_fields()
 
     safe_review_matches = [
         row
         for row in review_results
         if streaming.clean_text(row.get("action", ""), 40).upper()
-        == "AUTO_EPGSHARE"
-        and streaming.parse_bool(
-            row.get("enabled", ""),
-            default=False,
-            field_name="mapping enabled",
+        in {"AUTO_EPGSHARE", "AUTO_DUMMY", "IGNORE"}
+        and (
+            streaming.clean_text(row.get("action", ""), 40).upper()
+            == "IGNORE"
+            or streaming.parse_bool(
+                row.get("enabled", ""),
+                default=False,
+                field_name="mapping enabled",
+            )
         )
     ]
     safe_review_matches.sort(
@@ -5051,6 +6032,8 @@ def _run_sync_review_mode(
     # dry-run and is filled only after Google's authoritative post-write read.
     auto_match_summary["review_recheck_safe_matches"] = int(
         auto_match_summary.get("review_recheck_safe_matches", 0)
+    ) + int(
+        auto_match_summary.get("review_recheck_headings_ignored", 0)
     ) + len(native_verified_updates)
     auto_match_summary["review_recheck_still_review_rows"] = max(
         0,
@@ -5071,13 +6054,91 @@ def _run_sync_review_mode(
         "ai_review_batches_attempted": 0,
         "ai_review_batches_succeeded": 0,
     }
+    ai_terminal_stats: dict[str, Any] = {}
+
+    def load_ai_terminal_state(
+        candidate_rows: Sequence[Mapping[str, str]],
+    ) -> tuple[
+        MappingTable,
+        frozenset[tuple[str, str]],
+        frozenset[tuple[str, str]],
+    ]:
+        """Reacquire Sheet, alert, and provider authority after AI returns."""
+
+        if google_session is None:
+            if mode != "dry-run":
+                raise SyncError(
+                    "AI-assisted approval requires an authoritative terminal "
+                    "Sheet read."
+                )
+            # A library/test preview performs no mutation. Its already-fetched
+            # provider inventory and supplied table may be used to report what
+            # would be eligible, but apply mode can never use this fallback.
+            latest_table = authoritative_table
+            latest_open_keys = frozenset(match_time_quarantine_keys)
+            ai_terminal_stats["ai_review_terminal_mode"] = "preview_snapshot"
+            return (
+                latest_table,
+                latest_open_keys,
+                frozenset(_row_identity(row) for row in candidate_rows),
+            )
+        latest_table = parse_table_values(
+            google_sheet_values(
+                google_session, validate_sheet_id(sheet_id), sheet_tab
+            ),
+            maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
+        )
+        latest_alerts = parse_sync_alert_values(
+            google_sync_alert_values(
+                google_session, validate_sheet_id(sheet_id), alerts_tab
+            )
+        )
+        latest_open_keys = open_alert_quarantine_keys(latest_alerts).union(
+            pending_quarantine_keys
+        )
+        verified_rows, provider_stats = revalidate_provider_identity_updates(
+            candidate_rows,
+            inventories,
+            server_configs,
+            allow_insecure_http=allow_insecure_http,
+        )
+        ai_terminal_stats["ai_terminal_provider_checked"] = int(
+            provider_stats.get("provider_batch_revalidation_checked", 0)
+        )
+        ai_terminal_stats["ai_terminal_provider_rejected"] = int(
+            provider_stats.get("provider_batch_revalidation_rejected", 0)
+        )
+        ai_terminal_stats["ai_terminal_provider_unavailable"] = int(
+            provider_stats.get("provider_batch_revalidation_unavailable", 0)
+        )
+        ai_terminal_stats["ai_review_terminal_mode"] = "authoritative_reread"
+        return (
+            latest_table,
+            frozenset(latest_open_keys),
+            frozenset(_row_identity(row) for row in verified_rows),
+        )
+
     if use_gemini_ai and outcome is not None:
+        provider_sensitive_values = gemini_provider_sensitive_values(
+            server_configs
+        )
         ai_updates, ai_summary = _gemini_review_updates(
             outcome=outcome,
             authoritative_table=authoritative_table,
             api_key=gemini_api_key,
             limit=int(ai_review_limit),
+            sensitive_values=provider_sensitive_values,
             excluded_keys=(_row_identity(row) for row in native_verified_updates),
+            terminal_state_loader=load_ai_terminal_state,
+        )
+        ai_summary.update(ai_terminal_stats)
+        auto_match_summary["review_recheck_safe_matches"] = int(
+            auto_match_summary.get("review_recheck_safe_matches", 0)
+        ) + len(ai_updates)
+        auto_match_summary["review_recheck_still_review_rows"] = max(
+            0,
+            int(auto_match_summary.get("review_recheck_still_review_rows", 0))
+            - len(ai_updates),
         )
 
     review_updates = [*deterministic_updates, *ai_updates]
@@ -5186,6 +6247,27 @@ def _run_sync_review_mode(
         return summary
 
     alert_write_error: SheetWriteError | None = None
+    # Close the concurrent-run duplicate window. Another run may have opened
+    # the same stable incident after proposal generation but before this
+    # append. Re-read, keep that row authoritative, and append only incidents
+    # which are still absent. Any unrelated quarantine change still fails at
+    # the exact-set check below before a Mapping write or snapshot.
+    latest_alerts_before_append = parse_sync_alert_values(
+        google_sync_alert_values(
+            google_session, validate_sheet_id(sheet_id), alerts_tab
+        )
+    )
+    latest_open_incidents = {
+        sync_alert_dedup_key(row)
+        for row in latest_alerts_before_append
+        if streaming.clean_text(row.get("status", ""), 20).upper() == "OPEN"
+    }
+    pending_alerts = [
+        row
+        for row in pending_alerts
+        if sync_alert_dedup_key(row) not in latest_open_incidents
+    ]
+    existing_alerts = latest_alerts_before_append
     try:
         summary["sync_alerts_appended"] = append_sync_alert_rows(
             google_session,
@@ -5285,37 +6367,80 @@ def _run_sync_review_mode(
     final_table = authoritative_table
     intentional_mapping_write = False
     if write_to_sheet:
-        if mode == "apply":
-            refresh_alert_safety_before_mapping_write()
-        try:
-            summary["appended_rows"] = append_google_sheet_rows(
-                google_session,
-                validate_sheet_id(sheet_id),
-                sheet_tab,
-                authoritative_table,
-                new_rows,
-            )
-        except SheetWriteError as exc:
-            summary["appended_rows"] = exc.appended_count
-            summary["write_error"] = str(exc)
-            persist_reports()
-            raise
-        intentional_mapping_write = bool(summary["appended_rows"])
-        final_table = parse_table_values(
-            google_sheet_values(
-                google_session, validate_sheet_id(sheet_id), sheet_tab
-            ),
-            maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
-        )
-        status_table = final_table
         if new_rows:
+            new_rows_revalidated, new_row_revalidation_summary = (
+                revalidate_auto_enabled_new_rows(
+                    new_rows,
+                    inventories,
+                    server_configs,
+                    allow_insecure_http=allow_insecure_http,
+                    learned_alias_support_rows=learned_alias_support_rows,
+                )
+            )
+            summary.update(new_row_revalidation_summary)
+            if not new_rows_revalidated:
+                summary["new_auto_provider_revalidation_error"] = (
+                    "A newly auto-enabled provider identity or learned-alias "
+                    "teaching identity changed or became unavailable before "
+                    "append; no new Mapping row was sent."
+                )
+                persist_reports()
+                raise SyncError(summary["new_auto_provider_revalidation_error"])
+            try:
+                pre_append_table = parse_table_values(
+                    google_sheet_values(
+                        google_session, validate_sheet_id(sheet_id), sheet_tab
+                    ),
+                    maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
+                )
+            except SyncError:
+                summary["new_row_pre_append_mapping_error"] = (
+                    "Mappings could not be authoritatively re-read immediately "
+                    "before the new-channel append; no new Mapping row was sent."
+                )
+                persist_reports()
+                raise
+            if mapping_table_fingerprint(
+                pre_append_table
+            ) != mapping_table_fingerprint(authoritative_table):
+                summary["new_row_pre_append_mapping_error"] = (
+                    "The Mappings tab changed after new-channel proposals were "
+                    "prepared; no new Mapping row was sent."
+                )
+                persist_reports()
+                raise SyncError(summary["new_row_pre_append_mapping_error"])
+            # Mappings is the primary proposal authority. Only after proving
+            # that its complete table is unchanged do we reacquire the
+            # OPEN-alert authority at the final safe point before the append.
+            refresh_alert_safety_before_mapping_write()
+            try:
+                summary["appended_rows"] = append_google_sheet_rows(
+                    google_session,
+                    validate_sheet_id(sheet_id),
+                    sheet_tab,
+                    pre_append_table,
+                    new_rows,
+                )
+            except SheetWriteError as exc:
+                summary["appended_rows"] = exc.appended_count
+                summary["write_error"] = str(exc)
+                persist_reports()
+                raise
+            intentional_mapping_write = bool(summary["appended_rows"])
+            final_table = parse_table_values(
+                google_sheet_values(
+                    google_session, validate_sheet_id(sheet_id), sheet_tab
+                ),
+                maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
+            )
+            status_table = final_table
             if int(summary["appended_rows"]) != len(new_rows):
                 raise SyncError(
                     "Google Sheets did not report the complete new-channel append; "
                     "the build snapshot was blocked."
                 )
             verify_mapping_append_transition(
-                authoritative_table, new_rows, final_table
+                pre_append_table, new_rows, final_table
             )
 
     if mode == "apply" and deterministic_native_updates:
@@ -5327,6 +6452,7 @@ def _run_sync_review_mode(
                 deterministic_native_updates,
                 inventories,
                 server_configs,
+                allow_insecure_http=allow_insecure_http,
             )
         )
         summary.update(revalidation_summary)
@@ -5356,16 +6482,88 @@ def _run_sync_review_mode(
         # no provider response values enter reports.
         persist_reports()
 
+    summary.setdefault("provider_batch_revalidation_checked", 0)
+    summary.setdefault("provider_batch_revalidation_rejected", 0)
+    summary.setdefault("provider_batch_revalidation_unavailable", 0)
+    summary.setdefault("native_batch_revalidation_checked", 0)
+    summary.setdefault("native_batch_revalidation_rejected", 0)
+    summary.setdefault("native_batch_revalidation_unavailable", 0)
+
+    def revalidate_review_batch(
+        batch_rows: Sequence[Mapping[str, str]],
+    ) -> None:
+        """Require unchanged target and learned-rule evidence before one batch."""
+
+        provider_dependencies = _deduplicate_provider_revalidation_rows(
+            batch_rows,
+            learned_alias_support_rows,
+        )
+        verified_rows, provider_stats = revalidate_provider_identity_updates(
+            provider_dependencies,
+            inventories,
+            server_configs,
+            allow_insecure_http=allow_insecure_http,
+        )
+        for field, value in provider_stats.items():
+            summary[field] = int(summary.get(field, 0)) + int(value)
+        wanted_by_key = {
+            _row_identity(row): dict(row) for row in provider_dependencies
+        }
+        verified_by_key = {_row_identity(row): dict(row) for row in verified_rows}
+        if set(verified_by_key) != set(wanted_by_key) or any(
+            verified_by_key[key] != wanted
+            for key, wanted in wanted_by_key.items()
+        ):
+            raise SyncError(
+                "A provider identity changed or became unavailable immediately "
+                "before a REVIEW update batch; that batch was not sent."
+            )
+
+        native_rows = [
+            row
+            for row in batch_rows
+            if streaming.clean_text(row.get("action", ""), 40).upper()
+            == "KEEP_PANEL"
+        ]
+        if not native_rows:
+            return
+        verified_native, native_stats = revalidate_native_review_updates(
+            native_rows,
+            inventories,
+            server_configs,
+            allow_insecure_http=allow_insecure_http,
+        )
+        summary["native_batch_revalidation_checked"] += int(
+            native_stats.get("native_review_revalidation_checked", 0)
+        )
+        summary["native_batch_revalidation_rejected"] += int(
+            native_stats.get("native_review_revalidation_rejected", 0)
+        )
+        summary["native_batch_revalidation_unavailable"] += int(
+            native_stats.get("native_review_revalidation_unavailable", 0)
+        )
+        if {_row_identity(row) for row in verified_native} != {
+            _row_identity(row) for row in native_rows
+        }:
+            raise SyncError(
+                "Native provider evidence changed or became unavailable "
+                "immediately before its REVIEW update batch; that batch was "
+                "not sent."
+            )
+
     if mode == "apply" and review_updates:
         refresh_alert_safety_before_mapping_write()
         try:
             writer_kwargs: dict[str, Any] = {
                 "pre_write_check": refresh_alert_safety_before_mapping_write,
+                "batch_pre_write_check": revalidate_review_batch,
             }
             if deterministic_native_updates:
                 writer_kwargs["verified_native_rows"] = (
                     deterministic_native_updates
                 )
+            if ai_updates:
+                writer_kwargs["verified_ai_rows"] = ai_updates
             updated_count, final_table = update_google_sheet_review_rows(
                 google_session,
                 validate_sheet_id(sheet_id),
@@ -5375,19 +6573,48 @@ def _run_sync_review_mode(
                 **writer_kwargs,
             )
         except SheetWriteError as exc:
+            committed_rows = review_updates[: max(0, exc.appended_count)]
+            committed_ai = sum(
+                1
+                for row in committed_rows
+                if "ai-verified-v2" in streaming.clean_text(
+                    row.get("notes", ""), 2000
+                ).casefold()
+            )
+            committed_deterministic = len(committed_rows) - committed_ai
+            committed_native = sum(
+                1
+                for row in committed_rows
+                if streaming.clean_text(row.get("action", ""), 40).upper()
+                == "KEEP_PANEL"
+            )
+            summary["review_recheck_rows_updated"] = len(committed_rows)
+            summary["review_recheck_safe_matches_persisted"] = (
+                len(committed_rows)
+            )
+            summary["native_review_persisted"] = committed_native
+            summary["ai_review_high_suggestions_persisted"] = committed_ai
+            summary["review_recheck_deferred_rows"] = int(
+                summary.get("review_recheck_deferred_rows", 0)
+            ) + (
+                len(deterministic_updates) - committed_deterministic
+            ) + (len(ai_updates) - committed_ai)
+            summary["native_review_deferred"] = int(
+                summary.get("native_review_deferred", 0)
+            ) + len(deterministic_native_updates) - committed_native
             summary["review_recheck_write_error"] = str(exc)
             persist_reports()
             raise
         summary["review_recheck_rows_updated"] = updated_count
         summary["review_recheck_safe_matches_persisted"] = len(
             deterministic_updates
-        )
+        ) + len(ai_updates)
         summary["native_review_persisted"] = len(
             deterministic_native_updates
         )
         intentional_mapping_write = intentional_mapping_write or bool(updated_count)
         summary["ai_review_high_suggestions_persisted"] = int(
-            ai_summary.get("ai_review_high_suggestion_updates", 0)
+            len(ai_updates)
         )
 
     # Every apply run ends with a fresh Mappings read, even when there were no
@@ -5498,6 +6725,7 @@ def run_sync(
     ai_review_limit: int = 25,
     validate_native_review: bool = False,
     native_hint_summary: Mapping[str, int] | None = None,
+    allow_insecure_http: bool = False,
 ) -> dict[str, Any]:
     normalized_recheck_mode = streaming.clean_text(
         review_recheck_mode, 20
@@ -5534,6 +6762,7 @@ def run_sync(
             ai_review_limit=ai_review_limit,
             validate_native_review=validate_native_review,
             native_hint_summary=native_hint_summary,
+            allow_insecure_http=allow_insecure_http,
         )
     effective_snapshot_path = Path(snapshot_out)
     authoritative_snapshot_path = (
@@ -5597,6 +6826,7 @@ def run_sync(
         "review_recheck_still_review_rows": 0,
         "auto_match_rejected_programme_gates": 0,
     }
+    learned_alias_support_rows: tuple[dict[str, str], ...] = ()
     auto_match_inputs = (
         bool(all_source_file),
         bool(all_source_catalog_file),
@@ -5631,6 +6861,9 @@ def run_sync(
             except automatch.AutoMatchError as exc:
                 raise SyncError(str(exc)) from exc
             new_rows = list(outcome.rows)
+            learned_alias_support_rows = _learned_alias_support_rows_from_outcome(
+                outcome
+            )
             auto_match_summary = outcome.summary_fields()
     projected_sheet_bytes = validate_projected_sheet_size(
         authoritative_table, new_rows
@@ -5785,12 +7018,127 @@ def run_sync(
             # Defensive only: an append helper cannot currently fail when its
             # input is empty, but never swallow a future write failure.
             raise alert_write_error
+        if new_rows:
+            new_rows_revalidated, new_row_revalidation_summary = (
+                revalidate_auto_enabled_new_rows(
+                    new_rows,
+                    inventories,
+                    server_configs,
+                    allow_insecure_http=allow_insecure_http,
+                    learned_alias_support_rows=learned_alias_support_rows,
+                )
+            )
+            summary.update(new_row_revalidation_summary)
+            if not new_rows_revalidated:
+                summary["new_auto_provider_revalidation_error"] = (
+                    "A newly auto-enabled provider identity or learned-alias "
+                    "teaching identity changed or became unavailable before "
+                    "append; no new Mapping row was sent."
+                )
+                write_reports(
+                    output_dir,
+                    inventories=inventories,
+                    new_rows=new_rows,
+                    changed_rows=changed_rows,
+                    missing_rows=missing_rows,
+                    summary=summary,
+                )
+                raise SyncError(summary["new_auto_provider_revalidation_error"])
+        pre_append_table = authoritative_table
+        if new_rows:
+            try:
+                pre_append_table = parse_table_values(
+                    google_sheet_values(
+                        google_session, validate_sheet_id(sheet_id), sheet_tab
+                    ),
+                    maximum_rows=MAX_GOOGLE_MAPPING_ROWS,
+                )
+            except SyncError:
+                summary["new_row_pre_append_mapping_error"] = (
+                    "Mappings could not be authoritatively re-read immediately "
+                    "before the new-channel append; no new Mapping row was sent."
+                )
+                write_reports(
+                    output_dir,
+                    inventories=inventories,
+                    new_rows=new_rows,
+                    changed_rows=changed_rows,
+                    missing_rows=missing_rows,
+                    summary=summary,
+                )
+                raise
+            if mapping_table_fingerprint(
+                pre_append_table
+            ) != mapping_table_fingerprint(authoritative_table):
+                summary["new_row_pre_append_mapping_error"] = (
+                    "The Mappings tab changed after new-channel proposals were "
+                    "prepared; no new Mapping row was sent."
+                )
+                write_reports(
+                    output_dir,
+                    inventories=inventories,
+                    new_rows=new_rows,
+                    changed_rows=changed_rows,
+                    missing_rows=missing_rows,
+                    summary=summary,
+                )
+                raise SyncError(summary["new_row_pre_append_mapping_error"])
+
+        if new_rows:
+            # Reacquire the alert authority only after the slower provider
+            # check and exact Mappings pre-read, making it the final safety
+            # condition adjacent to the append request.
+            try:
+                terminal_alerts = parse_sync_alert_values(
+                    google_sync_alert_values(
+                        google_session, validate_sheet_id(sheet_id), alerts_tab
+                    )
+                )
+                if pending_alerts:
+                    verify_pending_alerts_are_open(pending_alerts, terminal_alerts)
+            except SyncError:
+                summary["sync_alert_verification_error"] = (
+                    "Sync Alerts changed or could not be verified immediately "
+                    "before the new-channel append; no new Mapping row was sent."
+                )
+                write_reports(
+                    output_dir,
+                    inventories=inventories,
+                    new_rows=new_rows,
+                    changed_rows=changed_rows,
+                    missing_rows=missing_rows,
+                    summary=summary,
+                )
+                raise
+            terminal_quarantine_keys = open_alert_quarantine_keys(terminal_alerts)
+            if terminal_quarantine_keys != pre_match_quarantine_keys:
+                summary["sync_alert_verification_error"] = (
+                    "The OPEN Sync Alerts quarantine set changed after matching; "
+                    "no new Mapping row was sent."
+                )
+                write_reports(
+                    output_dir,
+                    inventories=inventories,
+                    new_rows=new_rows,
+                    changed_rows=changed_rows,
+                    missing_rows=missing_rows,
+                    summary=summary,
+                )
+                raise SyncError(summary["sync_alert_verification_error"])
+            existing_alerts = terminal_alerts
+            persistent_quarantine_keys = terminal_quarantine_keys
+            summary["open_sync_alerts"] = sum(
+                1
+                for row in terminal_alerts
+                if streaming.clean_text(row.get("status", ""), 20).upper()
+                == "OPEN"
+            )
         try:
             summary["appended_rows"] = append_google_sheet_rows(
                 google_session,
                 validate_sheet_id(sheet_id),
                 sheet_tab,
-                authoritative_table,
+                pre_append_table,
                 new_rows,
             )
         except SheetWriteError as exc:
@@ -5957,7 +7305,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--use-gemini-ai",
         action="store_true",
-        help="Ask Gemini to suggest only among locally verified candidates.",
+        help=(
+            "Use Gemini only as a second verifier for unresolved, locally "
+            "shortlisted candidates."
+        ),
     )
     parser.add_argument(
         "--validate-native-review",
@@ -6190,6 +7541,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ai_review_limit=args.ai_review_limit,
             validate_native_review=args.validate_native_review,
             native_hint_summary=native_hint_summary,
+            allow_insecure_http=args.allow_insecure_http,
         )
         if bootstrap_error:
             raise SyncError(bootstrap_error)

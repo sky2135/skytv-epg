@@ -1,12 +1,15 @@
 # SKY TV EPG Version 1 — validation report
 
-**Local release status: PASS**  
-Validated through: 2026-09-16 UTC
+**Local release status: PASS — affected-files release sealed**  
+Validated through: **2026-09-17 03:35 UTC**
 
 The catalog-rollover, Workflow 2 snapshot-guard, native-panel XMLTV, and
-Server 2/3 REVIEW-backlog repairs have passed focused adversarial validation.
-The integrity manifest has been resealed for the repaired files, and the
-complete repository suite now passes.
+Server 2/3 REVIEW-backlog repairs previously passed focused adversarial
+validation. The current release also adds the scheduled all-server REVIEW
+recheck, durable Smart Rule memory, strict Gemini verification, and deterministic
+`AUTO_DUMMY`/`IGNORE` outcomes. The sealed tree passed all **477** repository
+tests, Python compilation, workflow parsing, integrity-hash verification, the
+private-workbook shadow acceptance run, and an independent final audit.
 
 ## Server 2/3 native REVIEW recovery
 
@@ -33,9 +36,10 @@ Automatic `KEEP_PANEL` approval now requires all of the following:
 The Sheet writer requires the exact verified native update in a separate
 in-memory allowlist. Forged `KEEP_PANEL` rows, Server 1 native rows, unrelated
 cell changes, concurrent Sheet edits, or alert changes fail before or after the
-single atomic request. EPGShare and native approvals share the existing maximum
-of 1,000 deterministic updates per apply run. Dry-run performs every validation
-but changes no Sheet row.
+single atomic request. EPGShare, native, verified-placeholder, and decorative
+heading decisions share the maximum of **5,000 deterministic updates** per
+apply run. Strict Gemini review is separately capped at **200 affected rows**.
+Dry-run performs every validation but changes no Sheet row.
 
 Adversarial coverage includes conflicting API/M3U IDs, trimmed IDs, duplicate
 M3U attributes, conflicting ID aliases, M3U name and stream-ID mismatches,
@@ -167,28 +171,42 @@ verifiable non-atomic source rollout to complete without silently approving the
 
 ## Automated code and workflow checks
 
-- Full repository suite: **404 tests passed, 0 failed**.
-- Stage 2 native/analyzer/synchronizer suite: **168 tests passed, 0 failed**,
-  including **125** synchronizer tests and **14** dedicated native XMLTV
-  adversarial tests.
-- Full 25,170-row Version 1 seed snapshot-bundle exercise: **passed**, including
-  the exact Server 3 census of 9,943 authoritative, 1,180 quarantined, and 8,763
-  effective runnable rows.
-- New quarantine-guard regressions cover the production 9,943 → 8,763 case,
-  genuine authoritative truncation, dropped/reordered identities, hidden name
-  or EPG edits, stale hashes, duplicate and orphan alerts, pre-disabled rows,
-  reserved-marker spoofing, per-server accounting, and last-good publication
-  preservation.
-- Frozen matcher regression: **222 matching and safety cases passed**.
-- Independent adversarial review found no remaining approval-safety blocker
-  after whole-catalog name-collision, raw-source parity, immediate provider
-  revalidation, and user-facing summary corrections.
-- Production-sized live XML/TXT one-pass validation after the final
-  Unicode/case/route hardening: **passed**.
-- Python compilation, installed-dependency consistency, integrity-manifest
-  verification, and all three workflow `actionlint` checks passed.
-- No private-key, GitHub-token, or Google-API-key signature was found in the
-  repository overlay in the preceding release audit.
+The final sealed tree passed **477 of 477** repository tests. The relevant
+Workflow 1 Python modules compile, both workflow YAML files parse, and every
+manifest-bound production file matches its recorded SHA-256. Adversarial tests
+also prove that raw, recursively percent-encoded, base64-reflected, HTML-entity,
+and mixed-encoding credential material is rejected before Sheet persistence or
+Gemini transport.
+
+The attached private workbook was processed read-only as a production-shaped
+acceptance corpus. The original workbook SHA-256 remained
+`e1b4d8d361128edaaed196fa0ed6a7cb3a129b62c3070d255d0925ccb20159a6`.
+Aggregate results were:
+
+| Workbook shadow measurement | Result |
+|---|---:|
+| Exact-name holdout recovered / wrong | 199 / 0 |
+| Quality-stripped holdout recovered / wrong | 1,202 / 0 |
+| Ambiguous-name cohort recovered / wrong | 3 / 0 |
+| Cross-market cohort recovered / wrong | 382 / 0 |
+| Verified placeholder/heading decisions | 944 |
+| Strict EPGShare candidates before live programme gate | 14 |
+| Total safe shadow actions | 958 |
+| Repeated decisions after simulated apply | 0 |
+
+The workbook does not contain a complete current EPGShare programme snapshot
+or current native XMLTV files. Therefore, the 14 real-guide candidates remain
+pre-gate opportunities rather than promised production writes; the live run
+must still pass exact XML/TXT catalog, programme, provider, Sheet, and alert
+checks. The acceptance run changed no workbook or Google Sheet row.
+
+The final audit must cover the production Server 3 quarantine census,
+authoritative truncation, dropped or reordered identities, unauthorized EPG or
+name edits, stale hashes, duplicate and orphan alerts, pre-disabled rows,
+reserved-marker spoofing, per-server accounting, last-good publication
+preservation, strict AI agreement, encoded credential rejection, current
+provider terminal rereads, deterministic caps, scheduled defaults, and
+idempotent workbook processing.
 
 Regression coverage includes exact-alignment mode, both bounded-drift limits,
 oversized and unsafe drift rejection, exact-intersection-only approval,
@@ -297,28 +315,26 @@ the owner's private Sheet remains part of the documented OFF-then-ON test.
 
 ## Critical Version 1 file integrity
 
-| File | SHA-256 |
+| Sealed production file | SHA-256 |
 |---|---|
-| `scripts/build_epg_streaming.py` | `3b88fbd4e41284607fdde2783d618864b3fb15b54ff2747ec4b5c3e557e56d97` |
-| `src/skytv_epg_auto_match_v1.py` | `8f346761daa5da73fcd5abe79d582c22557cdd1b8496ec90ef3e47174f61deaa` |
-| `scripts/auto_match_inventory.py` | `cbf40f15c0acd7f58d13449674774804fa566b1fba76c2abb73cc2e29b6d1922` |
-| `scripts/epg_catalog_stream.py` | `fb04f5f9097bffe96ba4f3a421b4d53f1ce6110dc80e390ee45a91f2d99a9821` |
-| `scripts/epg_selection_spool.py` | `c0ad4e485972b206515f2205e37cf056593cb1105035a6031ef95b5371cd1336` |
-| `scripts/analyze_review_backlog.py` | `d5af5112922e4d1a7ce85dd34ceffa3cb732d5680e60fb7e5e6eb2f4550d3ab2` |
-| `scripts/native_epg_review.py` | `89e6145f2b855b6cbab43b32582985b68af3365b7cbc9e5c0232ce23bb274fee` |
-| `scripts/sync_channel_inventory.py` | `aa814787ac5186b31671248de41cb002822897c02a3e073e3d3fd963cc6663e1` |
-| `.github/workflows/main.yml` | `23770174a7690423b9c835c789ebb6ca43c701bdf448b65a1970132e5c0e4a11` |
-| `.github/workflows/channel_inventory_sync.yml` | `8dfde002cb5dda72b26376ea4b4fc19b71063e2140d379f4d3c104648be2a885` |
-| `requirements-sync.txt` | `cb80ac4377fa3656ea135c65273fdc1b6ba7f5ce198f1f14ccb13de0e3ed593f` |
-| `MATCHER_INTEGRITY.json` | `c8bc69922b47816e9950326c1e6c53d0d5e0133f732cf3bf9dc3c9bd9177bbca` |
+| `src/skytv_epg_auto_match_v1.py` | `db49198de05cb6c618ff11a0408081eeba581eb9b9a05f231a0d04a3ce70d7e8` |
+| `scripts/auto_match_inventory.py` | `03e04d99d66b34ad8d79f5a9164167bab62ea23880e20c4d9e1e7f267140501d` |
+| `scripts/ai_review_gemini.py` | `b2cb275375f77648dad8bf9572eb299b42876a80d53fa405a1fd862ed244c1ca` |
+| `scripts/ai_review_policy.py` | `c398297cbf4eabef74c8a02af2a567d78724505b26779904ecdf96fe58442000` |
+| `scripts/sync_channel_inventory.py` | `09e1998ea0f462e5ea4beb3ad27995fa9bc2365d6dad92e318776aec32d2c312` |
+| `.github/workflows/channel_inventory_sync.yml` | `5c4f4e6d5783a02559c839eaae2504823d8f13a3f1314b3b11616217a8532800` |
 
 ## External validation still required
 
 This local repair did not use the owner's provider credentials, Google service
 account, private Sheet, or GitHub Pages environment. Keep the current Sheet,
 repository, `main` branch, and Pages setup. Install the affected replacement
-files, then run Workflow 1 first in `dry-run` mode with server scope `all` and
-Gemini off. If the summary is healthy, rerun in `apply` mode. Each apply may
-enable up to 1,000 exact verified EPGShare/native mappings; rerun only while the
-summary reports verified matches deferred by the write limit. Do not bulk-mark
-open alerts `RESOLVED` and do not enable unresolved rows manually.
+files, confirm the existing `GEMINI_API_KEY` repository secret, then run
+Workflow 1 once with its defaults: Sheet writes on, REVIEW mode `apply`, server
+scope `all`, Gemini on, and the 200-row limit. A run may apply up to 5,000
+deterministic decisions; any verified remainder continues automatically at
+**02:17 Toronto time** on the next daily Workflow 1 schedule. The displayed
+summary stays compact; use its downloaded
+`summary.json` for detailed eligible, skipped, deferred, native, AI, learning,
+and catalog counters. Do not bulk-mark open alerts `RESOLVED` and do not enable
+unresolved rows manually.

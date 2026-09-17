@@ -14,6 +14,9 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import math
+import os
+import re
+import stat
 import sys
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -35,19 +38,26 @@ import epg_catalog_stream as catalog_stream  # noqa: E402
 from epg_selection_spool import EpgSelectionSpoolWriter, SpoolError  # noqa: E402
 from skytv_epg_auto_match_v1 import (  # noqa: E402
     CatalogSnapshot as MatcherCatalogSnapshot,
-    DUMMY_REVIEW_METHODS,
     MatcherIdentity,
     MatcherPreflight,
+    SAFE_REAL_METHODS,
     ScheduleEvidence,
+    STRICT_ENGINE_SOURCE_SHA256,
+    STRICT_MATCHER_BUILD_ID,
+    STRICT_MATCHER_SOURCE_SHA256,
+    STRICT_MATCHER_VERSION,
     _has_adult_evidence as _matcher_has_adult_evidence,
     _is_generic_numbered_or_blank as _matcher_is_generic_numbered_or_blank,
     _market_code as _matcher_market_code,
+    automatic_mapping_binding_sha256,
+    automatic_mapping_provenance_note,
     finalize_proposal,
     prepare_resolver_strict,
     propose_new_channel_matches,
 )
 from skytv_epg_contextual_v8 import (  # noqa: E402
     install_contextual_v8,
+    parse_candidate_context_v8,
     parse_channel_context_v8,
 )
 
@@ -66,6 +76,11 @@ MAX_CATALOG_ID_DRIFT = 64
 # At most one drifting ID per 400 union IDs (0.25%). Keeping this as an
 # integer denominator makes the boundary exact and deterministic.
 MAX_CATALOG_ID_DRIFT_RATIO_DENOMINATOR = 400
+# The official TXT file carries its own UTC generation token.  It may lag the
+# XML guide during EPGShare's non-atomic rollover, but an old or future-dated
+# catalog must never supply market/feed semantics to an AI approval.
+MAX_TEXT_CATALOG_AGE_SECONDS = 48 * 60 * 60
+MAX_TEXT_CATALOG_FUTURE_SKEW_SECONDS = 6 * 60 * 60
 SOURCE_BASE_URL = "https://epgshare01.online/epgshare01/"
 ENGINE_SOURCE_PATH = SRC_DIR / "skytv_epg_engine.py"
 CONTEXTUAL_SOURCE_PATH = SRC_DIR / "skytv_epg_contextual_v8.py"
@@ -83,13 +98,18 @@ LARGE_BATCH_THRESHOLD = 100
 MAX_LARGE_BATCH_APPROVAL_FRACTION = 0.35
 MAX_LARGE_BATCH_APPROVALS = 5_000
 MAX_LARGE_BATCH_APPROVALS_PER_SERVER = 2_500
-MAX_AI_REVIEW_SHORTLISTS = 50
-MAX_AI_REVIEW_ATTEMPTED_ROWS = 250
-MAX_AI_REVIEW_COMPARISONS = 1_000_000
+MAX_AI_REVIEW_SHORTLISTS = 200
+MAX_AI_REVIEW_ATTEMPTED_ROWS = 1_000
+MAX_AI_REVIEW_COMPARISONS = 4_000_000
 MAX_AI_REVIEW_ROTATION = 1_000_000
 MIN_AI_REVIEW_CANDIDATES = 2
 MAX_AI_REVIEW_CANDIDATES = 8
 MIN_AI_REVIEW_FUZZY_SCORE = 55.0
+_SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+_AUTOMATIC_MEMORY_ACTION = "AUTO_EPGSHARE"
+_HUMAN_MEMORY_ACTIONS = frozenset({"MANUAL", "APPROVED"})
+_AI_VERIFIED_V2_GATE = "smart+gemini-high+catalog+programme"
+_AI_VERIFIED_METHODS = SAFE_REAL_METHODS.union({"dual_rank_consensus"})
 _METADATA_COLUMNS = frozenset(
     {
         "region_code",
@@ -145,11 +165,16 @@ class _LearnedAliasMemory:
     static_reused_groups: int
     rejected_groups: int
     sha256: str
+    # Exact private Mapping rows which supported aliases actually registered
+    # into this run's resolver. This never enters summary_fields(); the sync
+    # layer uses it only to reacquire the teaching provider identities before
+    # any dependent Sheet mutation.
+    support_rows: tuple[dict[str, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
 class AiReviewCandidate:
-    """One exact real EPGShare identity offered for suggestion-only review."""
+    """One exact real EPGShare identity offered for strict AI verification."""
 
     candidate_key: str
     epg_id: str
@@ -157,6 +182,20 @@ class AiReviewCandidate:
     feed: str
     region: str
     local_score: int
+    contextual_score: int = 0
+    direction: str = ""
+    timeshift: str = ""
+    has_plus: bool = False
+    has_extra: bool = False
+    has_alternate: bool = False
+    numbers: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
+    content: tuple[str, ...] = ()
+    programme_count: int = 0
+    programme_first_start_epoch: int | None = None
+    programme_latest_stop_epoch: int | None = None
+    programme_checked_at_epoch: int = 0
+    programme_source_sha256: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +208,26 @@ class AiReviewShortlist:
     category_name: str
     market: str
     candidates: tuple[AiReviewCandidate, ...]
+    normalized_name: str = ""
+    normalized_category: str = ""
+    strict_identity: str = ""
+    bag_identity: str = ""
+    route_plan: tuple[str, ...] = ()
+    route_explicit: bool = False
+    direction: str = ""
+    timeshift: str = ""
+    has_plus: bool = False
+    has_extra: bool = False
+    has_alternate: bool = False
+    numbers: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
+    content: tuple[str, ...] = ()
+    smart_epg_id: str = ""
+    smart_match_method: str = "dual_rank_consensus"
+    source_sha256: str = ""
+    text_catalog_file_sha256: str = ""
+    text_catalog_fingerprint_sha256: str = ""
+    text_catalog_generated_token: str = ""
 
     @property
     def key(self) -> tuple[str, str]:
@@ -182,6 +241,103 @@ class _AiReviewStaging:
     shortlists: tuple[AiReviewShortlist, ...]
     attempted_rows: int
     comparisons: int
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationSemanticsEvidence:
+    """Protected station semantics parsed from one corroborated catalog ID."""
+
+    direction: str = ""
+    timeshift: str = ""
+    has_plus: bool = False
+    has_extra: bool = False
+    has_alternate: bool = False
+    numbers: tuple[str, ...] = ()
+    languages: tuple[str, ...] = ()
+    content: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationCatalogCandidateEvidence:
+    """Exact current-run metadata for one XML/TXT-corroborated real ID."""
+
+    epg_id: str
+    market: str
+    feed: str
+    semantics: VerificationSemanticsEvidence
+    is_real: bool
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationProgrammeGateEvidence:
+    """One unmodified current-run programme-gate result plus its provenance."""
+
+    channel_key: str
+    distinct_informative_programmes: int
+    first_start_epoch: int | None
+    latest_stop_epoch: int | None
+    checked_at_epoch: int
+    source_sha256: str
+    passed: bool
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentRunVerificationEvidence:
+    """Immutable source-bound evidence for a later local approval boundary.
+
+    This object deliberately retains the complete exact-ID sets and every
+    programme gate returned by the one-pass parser. It is private run state,
+    not part of the compact JSON workflow summary.
+    """
+
+    source_sha256: str
+    text_catalog_file_sha256: str
+    text_catalog_fingerprint_sha256: str
+    text_catalog_generated_token: str
+    checked_at_epoch: int
+    xml_catalog_ids: frozenset[str]
+    text_catalog_ids: frozenset[str]
+    catalog_candidates: tuple[VerificationCatalogCandidateEvidence, ...]
+    programme_gates: tuple[VerificationProgrammeGateEvidence, ...]
+
+    def __post_init__(self) -> None:
+        xml_ids = frozenset(self.xml_catalog_ids)
+        text_ids = frozenset(self.text_catalog_ids)
+        candidates = tuple(self.catalog_candidates)
+        gates = tuple(self.programme_gates)
+        object.__setattr__(self, "xml_catalog_ids", xml_ids)
+        object.__setattr__(self, "text_catalog_ids", text_ids)
+        object.__setattr__(self, "catalog_candidates", candidates)
+        object.__setattr__(self, "programme_gates", gates)
+        if _SHA256_RE.fullmatch(self.source_sha256) is None:
+            raise AutoMatchError("Current-run verification evidence has an invalid source hash.")
+        if (
+            _SHA256_RE.fullmatch(self.text_catalog_file_sha256) is None
+            or _SHA256_RE.fullmatch(self.text_catalog_fingerprint_sha256) is None
+        ):
+            raise AutoMatchError(
+                "Current-run verification evidence has invalid text-catalog hashes."
+            )
+        if int(self.checked_at_epoch) <= 0:
+            raise AutoMatchError("Current-run verification evidence has an invalid check time.")
+        _validate_text_catalog_generation(
+            self.text_catalog_generated_token,
+            now_epoch=int(self.checked_at_epoch),
+        )
+        exact_ids = xml_ids.intersection(text_ids)
+        if any(candidate.epg_id not in exact_ids for candidate in candidates):
+            raise AutoMatchError(
+                "Current-run candidate evidence is not exactly XML/TXT corroborated."
+            )
+        if any(
+            gate.source_sha256 != self.source_sha256
+            or gate.checked_at_epoch != self.checked_at_epoch
+            for gate in gates
+        ):
+            raise AutoMatchError(
+                "Current-run programme evidence is not bound to one source snapshot."
+            )
 
 
 @dataclass(frozen=True)
@@ -228,15 +384,23 @@ class AutoMatchOutcome:
     learned_alias_static_reused_groups: int
     learned_alias_rejected_groups: int
     learned_alias_sha256: str
+    # Internal terminal-write dependency. Do not add these private rows to
+    # public reports or artifacts.
+    learned_alias_support_rows: tuple[dict[str, str], ...]
     ai_review_rotation: int
     ai_review_attempted_rows: int
     ai_review_comparisons: int
     ai_review_shortlists: tuple[AiReviewShortlist, ...]
+    verification_evidence: CurrentRunVerificationEvidence
     # Current-run, exact XML/TXT-corroborated dummy proposals.  These remain
     # REVIEW-only and are intentionally omitted from public sync summaries;
     # the read-only backlog analyzer uses the identities only in memory to
     # produce an aggregate count.
     verified_placeholder_keys: frozenset[tuple[str, str]]
+    new_dummy_rows: int = 0
+    recheck_dummy_rows: int = 0
+    new_ignored_rows: int = 0
+    recheck_ignored_rows: int = 0
 
     def summary_fields(self) -> dict[str, Any]:
         return {
@@ -254,6 +418,10 @@ class AutoMatchOutcome:
             "review_recheck_rejected_programme_gates": (
                 self.recheck_rejected_programme_gates
             ),
+            "new_channels_classified_as_placeholders": self.new_dummy_rows,
+            "review_recheck_classified_as_placeholders": self.recheck_dummy_rows,
+            "new_channel_headings_ignored": self.new_ignored_rows,
+            "review_recheck_headings_ignored": self.recheck_ignored_rows,
             "ai_review_attempted_rows": self.ai_review_attempted_rows,
             "ai_review_fuzzy_comparisons": self.ai_review_comparisons,
             "ai_review_rotation": self.ai_review_rotation,
@@ -434,8 +602,17 @@ def _proposal_blocked_by_all_route(
     method = str(proposal.match_method or "").casefold()
     if method == "verified_station_identity":
         return "callsign" in labels
-    if method == "strict":
-        return "strict" in labels
+    structural_label = {
+        "canonical_identity": "identity",
+        "category_language_default": "bag",
+        "descriptor_relaxed": "relaxed",
+        "edition_aware": "edition",
+        "spacing_compact": "compact",
+        "strict": "strict",
+        "token_multiset": "bag",
+    }.get(method)
+    if structural_label is not None:
+        return structural_label in labels
     if method == "approved_knowledge":
         # Approved aliases select a specific target, but a catalog identity
         # that is exact under any of the matcher's strong canonical forms is
@@ -446,6 +623,149 @@ def _proposal_blocked_by_all_route(
             )
         )
     return False
+
+
+# Country/market words can appear in an official display name even though the
+# provider already supplied the same market out-of-band.  Removing only the
+# words for that candidate's own route gives us a deliberately coarse station
+# family used as a veto, never as a positive matcher.  For example, the CA
+# catalog identities ``History`` and ``History Television (Canada)`` both
+# reduce to ``history`` and therefore cannot be selected unattended merely
+# because a provider writes ``CA History Channel``.
+_MARKET_FAMILY_TOKENS: Mapping[str, frozenset[str]] = {
+    "US": frozenset({"us", "usa", "american", "united", "states"}),
+    "CA": frozenset({"ca", "can", "canada", "canadian"}),
+    "UK": frozenset({"uk", "gb", "britain", "british", "england", "united", "kingdom"}),
+    "IN": frozenset({"in", "india", "indian"}),
+    "AU": frozenset({"au", "australia", "australian"}),
+    "NZ": frozenset({"nz", "zealand", "newzealand"}),
+}
+
+
+def _same_market_family_ambiguity_ids(runtime: MatcherRuntime) -> frozenset[str]:
+    """Return targets shadowed by a second coarse family in the same market.
+
+    This is an abstention-only catalog check.  It never creates a candidate and
+    it deliberately retains the matcher's protected edition/language/content
+    dimensions.  Approved knowledge (human approval or cross-server durable
+    memory) may still identify one exact member; unlearned structural matches
+    must stay in REVIEW when this veto fires.
+    """
+
+    state = getattr(runtime.resolver, "state", None)
+    by_region = getattr(state, "by_region", None)
+    contexts = by_region.get("ALL") if isinstance(by_region, dict) else None
+    if not isinstance(contexts, list):
+        # Dependency-injected unit runtimes predating this abstention index do
+        # not expose contextual state.  The pinned production runtime does, as
+        # enforced by prepare_resolver_strict().
+        return frozenset()
+
+    grouped: dict[tuple[object, ...], set[str]] = {}
+    for context in contexts:
+        candidate = dict(getattr(context, "candidate", {}) or {})
+        epg_id = str(candidate.get("epg_id") or "")
+        market = _matcher_market_code(candidate.get("region", ""))
+        if not epg_id or not market or market in {"ALL", "UNKNOWN", "AMBIGUOUS"}:
+            continue
+        bag_key = getattr(context, "bag_key", "")
+        # Lightweight test/runtime doubles may omit the contextual identity
+        # fields.  They cannot manufacture a collision and are skipped; the
+        # pinned production preflight supplies every field below.
+        if not isinstance(bag_key, str) or not bag_key.strip():
+            continue
+        raw_family = (
+            bag_key,
+            str(getattr(context, "direction", "") or ""),
+            bool(getattr(context, "has_plus", False)),
+            bool(getattr(context, "has_extra", False)),
+            bool(getattr(context, "has_alternate", False)),
+            str(getattr(context, "timeshift", "") or ""),
+            tuple(sorted(getattr(context, "numbers", ()) or ())),
+            tuple(sorted(getattr(context, "languages", ()) or ())),
+            tuple(sorted(getattr(context, "content", ()) or ())),
+        )
+        route_tokens = _MARKET_FAMILY_TOKENS.get(market, frozenset({market.casefold()}))
+        stable_words = tuple(
+            word
+            for word in raw_family[0].casefold().split()
+            if word and word not in route_tokens
+        )
+        if len("".join(stable_words)) < 4:
+            continue
+        key = (market, " ".join(stable_words), *raw_family[1:])
+        grouped.setdefault(key, set()).add(epg_id)
+
+    return frozenset(
+        epg_id
+        for members in grouped.values()
+        if len(members) > 1
+        for epg_id in members
+    )
+
+
+def _proposal_blocked_by_same_market_family(
+    proposal: Any, ambiguous_ids: frozenset[str]
+) -> bool:
+    """Keep unlearned structural matches out of an ambiguous station family."""
+
+    if str(proposal.target_epg_id or "") not in ambiguous_ids:
+        return False
+    return str(proposal.match_method or "").casefold() not in {
+        "approved_knowledge",
+        "verified_station_identity",
+    }
+
+
+def _apply_catalog_ambiguity_veto(
+    proposal: Any,
+    *,
+    all_route_labels: Mapping[str, frozenset[str]],
+    same_market_ids: frozenset[str],
+) -> Any:
+    if not proposal.eligible_for_finalization:
+        return proposal
+    if _proposal_blocked_by_all_route(proposal, all_route_labels):
+        return replace(
+            proposal,
+            eligible_for_finalization=False,
+            decision_reason=(
+                "An unscoped ALL-market EPG candidate shares a strong "
+                "identity with the proposed target"
+            ),
+        )
+    if _proposal_blocked_by_same_market_family(proposal, same_market_ids):
+        return replace(
+            proposal,
+            eligible_for_finalization=False,
+            decision_reason=(
+                "A second same-market EPG identity belongs to the same "
+                "coarse station family"
+            ),
+        )
+    return proposal
+
+
+def _apply_ai_shortlist_catalog_ambiguity_veto(
+    staged: _AiReviewStaging,
+    *,
+    all_route_labels: Mapping[str, frozenset[str]],
+    same_market_ids: frozenset[str],
+) -> _AiReviewStaging:
+    """Keep catalog competitors omitted by market-scoped AI from becoming invisible."""
+
+    if not staged.shortlists or (not all_route_labels and not same_market_ids):
+        return staged
+    return _AiReviewStaging(
+        shortlists=tuple(
+            shortlist
+            for shortlist in staged.shortlists
+            if shortlist.smart_epg_id not in all_route_labels
+            and shortlist.smart_epg_id not in same_market_ids
+        ),
+        attempted_rows=staged.attempted_rows,
+        comparisons=staged.comparisons,
+    )
 
 
 def _corroborate_catalog_ids(
@@ -700,6 +1020,115 @@ def _timestamp_epoch(value: str) -> int:
     return epoch
 
 
+def _read_bound_text_catalog(path: Path) -> tuple[bytes, str]:
+    """Read one immutable regular-file view of the official TXT catalog.
+
+    A pathname can be replaced between ``stat`` and ``read_bytes``.  Keep one
+    descriptor open, bound it to the pathname before and after the read, and
+    return the exact byte hash used by all later AI evidence.
+    """
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(os.fspath(path), flags)
+    except OSError as exc:
+        raise AutoMatchError(
+            "The official ALL_SOURCES1 text catalog cannot be opened safely."
+        ) from exc
+    try:
+        initial = os.fstat(descriptor)
+        path_state = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or not stat.S_ISREG(path_state.st_mode)
+            or (initial.st_dev, initial.st_ino)
+            != (path_state.st_dev, path_state.st_ino)
+        ):
+            raise AutoMatchError(
+                "The official ALL_SOURCES1 text catalog is not a stable regular file."
+            )
+        if (
+            initial.st_size < 1
+            or initial.st_size > catalog_stream.MAX_CATALOG_TEXT_BYTES
+        ):
+            raise AutoMatchError(
+                "The official ALL_SOURCES1 text catalog has an invalid size."
+            )
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            content = handle.read(catalog_stream.MAX_CATALOG_TEXT_BYTES + 1)
+        final = os.fstat(descriptor)
+        final_path = os.stat(path, follow_symlinks=False)
+        stable_fields = (
+            "st_dev",
+            "st_ino",
+            "st_size",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        )
+        if (
+            len(content) != initial.st_size
+            or any(
+                getattr(final, field) != getattr(initial, field)
+                for field in stable_fields
+            )
+            or any(
+                getattr(final_path, field) != getattr(initial, field)
+                for field in stable_fields
+            )
+        ):
+            raise AutoMatchError(
+                "The official ALL_SOURCES1 text catalog changed while reading."
+            )
+        return content, hashlib.sha256(content).hexdigest()
+    except AutoMatchError:
+        raise
+    except OSError as exc:
+        raise AutoMatchError(
+            "The official ALL_SOURCES1 text catalog could not be verified."
+        ) from exc
+    finally:
+        os.close(descriptor)
+
+
+def _text_catalog_generation_epoch(generated_token: str) -> int:
+    """Parse one strict official UTC generation token."""
+
+    token = str(generated_token or "")
+    formats = {12: "%Y%m%d%H%M", 14: "%Y%m%d%H%M%S"}
+    format_string = formats.get(len(token))
+    if format_string is None or not token.isascii() or not token.isdigit():
+        raise AutoMatchError(
+            "The official ALL_SOURCES1 text catalog has an invalid generation token."
+        )
+    try:
+        generated_epoch = int(
+            datetime.strptime(token, format_string)
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+        )
+    except ValueError as exc:
+        raise AutoMatchError(
+            "The official ALL_SOURCES1 text catalog has an invalid generation token."
+        ) from exc
+    return generated_epoch
+
+
+def _validate_text_catalog_generation(generated_token: str, *, now_epoch: int) -> int:
+    """Return the TXT generation epoch only when it is current enough to trust."""
+
+    generated_epoch = _text_catalog_generation_epoch(generated_token)
+    age = int(now_epoch) - generated_epoch
+    if (
+        age > MAX_TEXT_CATALOG_AGE_SECONDS
+        or age < -MAX_TEXT_CATALOG_FUTURE_SKEW_SECONDS
+    ):
+        raise AutoMatchError(
+            "The official ALL_SOURCES1 text catalog generation is not current."
+        )
+    return generated_epoch
+
+
 def _validate_candidate_rows(
     *,
     new_rows: Sequence[Mapping[str, Any]],
@@ -785,12 +1214,18 @@ def _previous_ai_review_keys(
     review_keys: Iterable[tuple[str, str]],
     rows_by_key: Mapping[tuple[str, str], Mapping[str, Any]],
 ) -> frozenset[tuple[str, str]]:
-    """Return REVIEW identities that already carry an AI suggestion marker."""
+    """Return rows already finalized by the strict dual-verifier AI gate.
+
+    Legacy ``ai-review-v1`` notes were advisory-only.  Excluding those rows
+    forever would make an old abstention or suggestion impossible to improve
+    after the catalog, Smart Rules, or clustering policy changes.  The rotated
+    bounded queue is the rate limiter; only a valid v2 approval is terminal.
+    """
 
     return frozenset(
         key
         for key in review_keys
-        if "ai-review-v1" in str(rows_by_key[key].get("notes", "")).casefold()
+        if "ai-verified-v2" in str(rows_by_key[key].get("notes", "")).casefold()
     )
 
 
@@ -830,6 +1265,7 @@ def _rotated_round_robin_review_keys(
 
 def _stage_ai_review_shortlists_with_metrics(
     *,
+    resolver: Any | None = None,
     proposals: Mapping[tuple[str, str], Any],
     review_keys: Iterable[tuple[str, str]],
     ai_excluded_keys: Iterable[tuple[str, str]] = (),
@@ -854,8 +1290,14 @@ def _stage_ai_review_shortlists_with_metrics(
             f"{MAX_AI_REVIEW_ROTATION:,}."
         )
 
-    candidates_by_market: dict[str, list[dict[str, str]]] = {}
-    normalized_counts: dict[tuple[str, str], int] = {}
+    contextual_resolver = (
+        resolver
+        if resolver is not None
+        and callable(getattr(resolver, "_compatible", None))
+        and callable(getattr(resolver, "_fuzzy_score", None))
+        else None
+    )
+    candidates_by_market: dict[str, list[dict[str, Any]]] = {}
     for raw in corroborated_real_candidates:
         epg_id = str(raw.get("epg_id") or "")
         display_name = str(raw.get("display_name") or "").strip()
@@ -882,21 +1324,19 @@ def _stage_ai_review_shortlists_with_metrics(
             "feed": feed,
             "region": region,
             "normalized": normalized,
+            "context": (
+                parse_candidate_context_v8(contextual_resolver.engine, raw)
+                if contextual_resolver is not None
+                else None
+            ),
         }
         candidates_by_market.setdefault(region, []).append(candidate)
-        normalized_counts[(region, normalized)] = (
-            normalized_counts.get((region, normalized), 0) + 1
-        )
 
-    # Two distinct exact IDs with the same local identity are not useful AI
-    # choices.  Remove the entire ambiguous family instead of asking a model to
-    # choose between source variants it cannot verify.
-    for market, candidates in tuple(candidates_by_market.items()):
-        candidates_by_market[market] = [
-            candidate
-            for candidate in candidates
-            if normalized_counts[(market, candidate["normalized"])] == 1
-        ]
+    # Preserve every corroborated identity in the ranking universe, including
+    # two IDs with the same normalized display name.  Their tie is material
+    # negative evidence: both rankers must retain it so the independent margin
+    # policy abstains.  Deleting the tied leaders here could promote a weaker
+    # third candidate into a manufactured unique winner.
 
     # Rows which already hold an AI suggestion still run through Smart Rules,
     # but must not consume the bounded AI backlog again.  Filtering the key set
@@ -946,29 +1386,114 @@ def _stage_ai_review_shortlists_with_metrics(
         # Stop this bounded run and let a later rotation retry instead.
         if len(market_candidates) > MAX_AI_REVIEW_COMPARISONS - comparisons:
             break
-        ranked: list[tuple[float, str, str, dict[str, str]]] = []
+        query_context = None
+        if contextual_resolver is not None:
+            try:
+                query_context = parse_channel_context_v8(
+                    contextual_resolver.engine,
+                    proposal.channel_name,
+                    proposal.category_name,
+                )
+            except Exception as exc:
+                raise AutoMatchError(
+                    "The Smart Rules AI-review context could not be parsed."
+                ) from exc
+        ranked: list[tuple[float, float, str, str, dict[str, Any]]] = []
         for candidate in market_candidates:
             comparisons += 1
-            score = float(fuzz.WRatio(query, candidate["normalized"]))
-            if score < MIN_AI_REVIEW_FUZZY_SCORE:
+            target_context = candidate["context"]
+            if (
+                contextual_resolver is not None
+                and not contextual_resolver._compatible(
+                    query_context, target_context
+                )
+            ):
+                continue
+            name_score = float(fuzz.WRatio(query, candidate["normalized"]))
+            contextual_score = (
+                float(
+                    contextual_resolver._fuzzy_score(
+                        query_context, target_context
+                    )
+                )
+                if contextual_resolver is not None
+                else name_score
+            )
+            if (
+                name_score < MIN_AI_REVIEW_FUZZY_SCORE
+                or contextual_score < MIN_AI_REVIEW_FUZZY_SCORE
+            ):
                 continue
             ranked.append(
                 (
-                    score,
+                    contextual_score,
+                    name_score,
                     candidate["normalized"],
                     candidate["epg_id"],
                     candidate,
                 )
             )
-        ranked.sort(
+        # Use the exact rounded scores and ID tie-break used by the independent
+        # approval policy.  Selecting with extra secondary sort fields here
+        # could otherwise omit the policy's real runner-up after rounding.
+        by_context = sorted(
+            ranked,
             key=lambda item: (
-                -item[0],
-                item[1],
-                item[2].casefold(),
-                item[2],
-            )
+                -int(round(item[0])),
+                item[3].casefold(),
+                item[3],
+            ),
         )
-        selected = ranked[:MAX_AI_REVIEW_CANDIDATES]
+        by_name = sorted(
+            ranked,
+            key=lambda item: (
+                -int(round(item[1])),
+                item[3].casefold(),
+                item[3],
+            ),
+        )
+
+        # Form a genuinely bounded union of both independent rankings.  Each
+        # ranker's top and runner-up are reserved first; remaining capacity is
+        # filled round-robin.  A context-first fill could consume all eight
+        # slots, hide the name runner-up, and manufacture an inflated margin.
+        selected: list[tuple[float, float, str, str, dict[str, Any]]] = []
+        selected_ids: set[str] = set()
+
+        def add_selected(item: tuple[float, float, str, str, dict[str, Any]]) -> None:
+            epg_id = item[3]
+            if epg_id in selected_ids:
+                return
+            selected.append(item)
+            selected_ids.add(epg_id)
+
+        for ranking in (by_context, by_name):
+            for item in ranking[:2]:
+                add_selected(item)
+
+        rank_index = 2
+        while (
+            len(selected) < MAX_AI_REVIEW_CANDIDATES
+            and rank_index < max(len(by_context), len(by_name))
+        ):
+            for ranking in (by_context, by_name):
+                if rank_index < len(ranking):
+                    add_selected(ranking[rank_index])
+                if len(selected) >= MAX_AI_REVIEW_CANDIDATES:
+                    break
+            rank_index += 1
+
+        # Identical/overlapping rankings can leave room after the balanced
+        # pass only when one ranking is shorter.  Fill deterministically from
+        # the complete rankings without weakening the reserved top-two rule.
+        if len(selected) < MAX_AI_REVIEW_CANDIDATES:
+            for item in (*by_context, *by_name):
+                add_selected(item)
+                if len(selected) >= MAX_AI_REVIEW_CANDIDATES:
+                    break
+        if len(selected) > MAX_AI_REVIEW_CANDIDATES:
+            # Defensive invariant for future constant changes.
+            selected = selected[:MAX_AI_REVIEW_CANDIDATES]
         if len(selected) < MIN_AI_REVIEW_CANDIDATES:
             continue
         shortlist_candidates = tuple(
@@ -978,9 +1503,40 @@ def _stage_ai_review_shortlists_with_metrics(
                 display_name=candidate["display_name"],
                 feed=candidate["feed"],
                 region=candidate["region"],
-                local_score=int(round(score)),
+                local_score=int(round(name_score)),
+                contextual_score=int(round(contextual_score)),
+                direction=str(
+                    getattr(candidate["context"], "direction", "") or ""
+                ),
+                timeshift=str(
+                    getattr(candidate["context"], "timeshift", "") or ""
+                ),
+                has_plus=bool(
+                    getattr(candidate["context"], "has_plus", False)
+                ),
+                has_extra=bool(
+                    getattr(candidate["context"], "has_extra", False)
+                ),
+                has_alternate=bool(
+                    getattr(candidate["context"], "has_alternate", False)
+                ),
+                numbers=tuple(
+                    sorted(getattr(candidate["context"], "numbers", ()) or ())
+                ),
+                languages=tuple(
+                    sorted(getattr(candidate["context"], "languages", ()) or ())
+                ),
+                content=tuple(
+                    sorted(getattr(candidate["context"], "content", ()) or ())
+                ),
             )
-            for index, (score, _normalized, _epg_id, candidate) in enumerate(
+            for index, (
+                contextual_score,
+                name_score,
+                _normalized,
+                _epg_id,
+                candidate,
+            ) in enumerate(
                 selected, start=1
             )
         )
@@ -992,6 +1548,48 @@ def _stage_ai_review_shortlists_with_metrics(
                 category_name=proposal.category_name,
                 market=market,
                 candidates=shortlist_candidates,
+                normalized_name=query,
+                normalized_category=catalog_stream._simple_match_key(
+                    proposal.category_name
+                ),
+                strict_identity=str(
+                    getattr(query_context, "strict_key", query) or query
+                ),
+                bag_identity=str(
+                    getattr(query_context, "bag_key", query) or query
+                ),
+                route_plan=route_plan,
+                route_explicit=bool(proposal.route_explicit),
+                direction=str(
+                    getattr(query_context, "direction", "") or ""
+                ),
+                timeshift=str(
+                    getattr(query_context, "timeshift", "") or ""
+                ),
+                has_plus=bool(getattr(query_context, "has_plus", False)),
+                has_extra=bool(getattr(query_context, "has_extra", False)),
+                has_alternate=bool(
+                    getattr(query_context, "has_alternate", False)
+                ),
+                numbers=tuple(
+                    sorted(getattr(query_context, "numbers", ()) or ())
+                ),
+                languages=tuple(
+                    sorted(getattr(query_context, "languages", ()) or ())
+                ),
+                content=tuple(
+                    sorted(getattr(query_context, "content", ()) or ())
+                ),
+                smart_epg_id=(
+                    by_context[0][3]
+                    if by_context
+                    and by_name
+                    and by_context[0][3] == by_name[0][3]
+                    else ""
+                ),
+                source_sha256=str(
+                    getattr(proposal, "catalog_source_sha256", "") or ""
+                ),
             )
         )
     return _AiReviewStaging(
@@ -1003,6 +1601,7 @@ def _stage_ai_review_shortlists_with_metrics(
 
 def _stage_ai_review_shortlists(
     *,
+    resolver: Any | None = None,
     proposals: Mapping[tuple[str, str], Any],
     review_keys: Iterable[tuple[str, str]],
     ai_excluded_keys: Iterable[tuple[str, str]] = (),
@@ -1012,6 +1611,7 @@ def _stage_ai_review_shortlists(
     """Compatibility wrapper returning only bounded shortlist rows."""
 
     return _stage_ai_review_shortlists_with_metrics(
+        resolver=resolver,
         proposals=proposals,
         review_keys=review_keys,
         ai_excluded_keys=ai_excluded_keys,
@@ -1026,13 +1626,70 @@ def _finalize_ai_review_shortlists(
     unresolved_keys: frozenset[tuple[str, str]],
     programme_gates: Mapping[str, Any],
     resolved_source_ids: Mapping[str, str],
+    checked_at_epoch: int,
+    source_sha256: str,
+    text_catalog_file_sha256: str,
+    text_catalog_fingerprint_sha256: str,
+    text_catalog_generated_token: str,
 ) -> tuple[AiReviewShortlist, ...]:
     """Keep only same-snapshot candidates with the strong programme gate."""
+
+    if (
+        _SHA256_RE.fullmatch(str(source_sha256)) is None
+        or _SHA256_RE.fullmatch(str(text_catalog_file_sha256)) is None
+        or _SHA256_RE.fullmatch(str(text_catalog_fingerprint_sha256)) is None
+    ):
+        raise AutoMatchError("AI shortlist source provenance is invalid.")
+    _validate_text_catalog_generation(
+        text_catalog_generated_token,
+        now_epoch=int(checked_at_epoch),
+    )
 
     result: list[AiReviewShortlist] = []
     for shortlist in staged:
         if shortlist.key not in unresolved_keys:
             continue
+        # Programme availability is a gate, never another ranking pass.  Bind
+        # the decision to the original top and runner-up under both rankers so
+        # removing a stronger candidate cannot promote a weaker survivor or
+        # enlarge either approval margin.
+        prefilter_name_ranked = sorted(
+            shortlist.candidates,
+            key=lambda candidate: (
+                -candidate.local_score,
+                candidate.epg_id.casefold(),
+                candidate.epg_id,
+            ),
+        )
+        prefilter_contextual_ranked = sorted(
+            shortlist.candidates,
+            key=lambda candidate: (
+                -candidate.contextual_score,
+                candidate.epg_id.casefold(),
+                candidate.epg_id,
+            ),
+        )
+        if (
+            len(prefilter_name_ranked) < MIN_AI_REVIEW_CANDIDATES
+            or len(prefilter_contextual_ranked) < MIN_AI_REVIEW_CANDIDATES
+        ):
+            continue
+        prefilter_smart_epg_id = (
+            prefilter_name_ranked[0].epg_id
+            if prefilter_name_ranked[0].epg_id
+            == prefilter_contextual_ranked[0].epg_id
+            else ""
+        )
+        if shortlist.smart_epg_id != prefilter_smart_epg_id:
+            # Internal shortlist state is inconsistent with its own scores.
+            continue
+        material_competitor_ids = {
+            candidate.epg_id
+            for candidate in (
+                *prefilter_name_ranked[:2],
+                *prefilter_contextual_ranked[:2],
+            )
+        }
         viable: list[AiReviewCandidate] = []
         for candidate in shortlist.candidates:
             gate = programme_gates.get(candidate.epg_id)
@@ -1042,8 +1699,23 @@ def _finalize_ai_review_shortlists(
                 or resolved_source_ids.get(candidate.epg_id) != candidate.epg_id
             ):
                 continue
-            viable.append(candidate)
+            viable.append(
+                replace(
+                    candidate,
+                    programme_count=int(
+                        gate.distinct_informative_programmes
+                    ),
+                    programme_first_start_epoch=gate.first_start_epoch,
+                    programme_latest_stop_epoch=gate.latest_stop_epoch,
+                    programme_checked_at_epoch=int(checked_at_epoch),
+                    programme_source_sha256=str(source_sha256),
+                )
+            )
         if not MIN_AI_REVIEW_CANDIDATES <= len(viable) <= MAX_AI_REVIEW_CANDIDATES:
+            continue
+        if not material_competitor_ids.issubset(
+            {candidate.epg_id for candidate in viable}
+        ):
             continue
         # Reissue opaque keys after programme filtering so every shortlist is
         # contiguous and has no externally observable gap from a rejected ID.
@@ -1051,8 +1723,237 @@ def _finalize_ai_review_shortlists(
             replace(candidate, candidate_key=f"c{index:02d}")
             for index, candidate in enumerate(viable, start=1)
         )
-        result.append(replace(shortlist, candidates=finalized))
+        result.append(
+            replace(
+                shortlist,
+                candidates=finalized,
+                smart_epg_id=prefilter_smart_epg_id,
+                source_sha256=source_sha256,
+                text_catalog_file_sha256=text_catalog_file_sha256,
+                text_catalog_fingerprint_sha256=text_catalog_fingerprint_sha256,
+                text_catalog_generated_token=text_catalog_generated_token,
+            )
+        )
     return tuple(result)
+
+
+_AUTO_MAP_V2_PROVENANCE_RE = re.compile(
+    r"(?:\A| \| )auto-map-v2 "
+    r"method=(?P<method>[a-z0-9_]+); "
+    r"market=(?P<market>[A-Z0-9_]+); "
+    r"source_sha256=(?P<source_sha256>[0-9a-f]{64}); "
+    r"binding_sha256=(?P<binding_sha256>[0-9a-f]{64})(?= \| |\Z)"
+)
+_AI_VERIFIED_V2_PROVENANCE_RE = re.compile(
+    r"(?:\A| \| )ai-verified-v2 "
+    r"gate=(?P<gate>[a-z0-9+_-]+); "
+    r"method=(?P<method>[a-z0-9_]+); "
+    r"market=(?P<market>[A-Z0-9_]+); "
+    r"source_sha256=(?P<source_sha256>[0-9a-f]{64}); "
+    r"text_file_sha256=(?P<text_file_sha256>[0-9a-f]{64}); "
+    r"text_fingerprint_sha256=(?P<text_fingerprint_sha256>[0-9a-f]{64}); "
+    r"text_generated=(?P<text_generated>[0-9]{12}(?:[0-9]{2})?); "
+    r"binding_sha256=(?P<binding_sha256>[0-9a-f]{64})(?= \| |\Z)"
+)
+
+
+def _digest_fields(*values: object) -> str:
+    """Hash an unambiguous sequence of provenance fields."""
+
+    digest = hashlib.sha256()
+    for value in values:
+        encoded = str(value).encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _ai_verified_v2_binding(
+    row: Mapping[str, Any],
+    *,
+    match_method: str,
+    market: str,
+    source_sha256: str,
+    text_catalog_file_sha256: str,
+    text_catalog_fingerprint_sha256: str,
+    text_catalog_generated_token: str,
+) -> str:
+    """Bind a future dual-gate AI approval to one exact private Sheet row.
+
+    This is deliberately a tamper-evident preimage, not an authorization
+    signature. The private Mappings sheet remains the trusted durable store;
+    the binding prevents a provenance marker from being copied to a different
+    stream, label, market, or target by accident.
+    """
+
+    server_id, stream_id = _canonical_key(
+        row.get("server_id", ""), row.get("stream_id", "")
+    )
+    method = streaming.clean_text(match_method, 80).casefold()
+    normalized_market = _matcher_market_code(market)
+    source_hash = streaming.clean_identifier(source_sha256, 64).casefold()
+    text_file_hash = streaming.clean_identifier(
+        text_catalog_file_sha256, 64
+    ).casefold()
+    text_fingerprint_hash = streaming.clean_identifier(
+        text_catalog_fingerprint_sha256, 64
+    ).casefold()
+    text_generated = streaming.clean_identifier(
+        text_catalog_generated_token, 14
+    )
+    epg_id = streaming.clean_identifier(row.get("epg_id", ""), 300)
+    if (
+        method not in _AI_VERIFIED_METHODS
+        or normalized_market in {"", "ALL", "UNKNOWN", "AMBIGUOUS"}
+        or not epg_id
+        or _SHA256_RE.fullmatch(source_hash) is None
+        or _SHA256_RE.fullmatch(text_file_hash) is None
+        or _SHA256_RE.fullmatch(text_fingerprint_hash) is None
+        or re.fullmatch(r"[0-9]{12}(?:[0-9]{2})?", text_generated) is None
+    ):
+        raise AutoMatchError("The ai-verified-v2 provenance fields are invalid.")
+    _text_catalog_generation_epoch(text_generated)
+    return _digest_fields(
+        "ai-verified-v2",
+        _AI_VERIFIED_V2_GATE,
+        server_id,
+        stream_id,
+        streaming.clean_identifier(row.get("channel_name", ""), 300),
+        streaming.clean_text(row.get("category_name", ""), 200),
+        epg_id,
+        method,
+        normalized_market,
+        source_hash,
+        text_file_hash,
+        text_fingerprint_hash,
+        text_generated,
+        STRICT_MATCHER_VERSION,
+        STRICT_MATCHER_BUILD_ID,
+        STRICT_MATCHER_SOURCE_SHA256,
+        STRICT_ENGINE_SOURCE_SHA256,
+    )
+
+
+def _ai_verified_v2_provenance_note(
+    row: Mapping[str, Any],
+    *,
+    match_method: str,
+    market: str,
+    source_sha256: str,
+    text_catalog_file_sha256: str,
+    text_catalog_fingerprint_sha256: str,
+    text_catalog_generated_token: str,
+) -> str:
+    """Return the exact compact note format reserved for a future v2 gate.
+
+    The future writer must call this only after the deterministic Smart-Rules
+    target and Gemini HIGH target are identical and the exact catalog,
+    programme, and market checks pass. Merely typing ``ai-verified-v2`` into a
+    Sheet note is intentionally insufficient for learned memory.
+    """
+
+    method = streaming.clean_text(match_method, 80).casefold()
+    normalized_market = _matcher_market_code(market)
+    source_hash = streaming.clean_identifier(source_sha256, 64).casefold()
+    text_file_hash = streaming.clean_identifier(
+        text_catalog_file_sha256, 64
+    ).casefold()
+    text_fingerprint_hash = streaming.clean_identifier(
+        text_catalog_fingerprint_sha256, 64
+    ).casefold()
+    text_generated = streaming.clean_identifier(
+        text_catalog_generated_token, 14
+    )
+    binding = _ai_verified_v2_binding(
+        row,
+        match_method=method,
+        market=normalized_market,
+        source_sha256=source_hash,
+        text_catalog_file_sha256=text_file_hash,
+        text_catalog_fingerprint_sha256=text_fingerprint_hash,
+        text_catalog_generated_token=text_generated,
+    )
+    return (
+        f"ai-verified-v2 gate={_AI_VERIFIED_V2_GATE}; "
+        f"method={method}; market={normalized_market}; "
+        f"source_sha256={source_hash}; "
+        f"text_file_sha256={text_file_hash}; "
+        f"text_fingerprint_sha256={text_fingerprint_hash}; "
+        f"text_generated={text_generated}; "
+        f"binding_sha256={binding}"
+    )
+
+
+def _automatic_memory_provenance(
+    row: Mapping[str, Any],
+    *,
+    expected_market: str,
+) -> str | None:
+    """Return the verified automatic evidence tier, or fail closed.
+
+    Deterministic and AI v2 evidence both bind their complete preimage to the
+    exact private mapping row.  Historical unbound ``auto-map-v1`` records,
+    suggestion-only ``ai-review-v1`` notes and partial/forged v2 markers never
+    become matcher knowledge.
+    """
+
+    notes = streaming.clean_text(row.get("notes", ""), 2000)
+    normalized_market = _matcher_market_code(expected_market)
+
+    auto_matches = tuple(_AUTO_MAP_V2_PROVENANCE_RE.finditer(notes))
+    if notes.count("auto-map-v2") == 1 and len(auto_matches) == 1:
+        fields = auto_matches[0].groupdict()
+        if (
+            fields["method"] in SAFE_REAL_METHODS
+            and _matcher_market_code(fields["market"]) == normalized_market
+            and _SHA256_RE.fullmatch(fields["source_sha256"]) is not None
+        ):
+            try:
+                expected_binding = automatic_mapping_binding_sha256(
+                    server_id=row.get("server_id", ""),
+                    stream_id=row.get("stream_id", ""),
+                    channel_name=streaming.clean_identifier(
+                        row.get("channel_name", ""), 300
+                    ),
+                    category_name=streaming.clean_text(
+                        row.get("category_name", ""), 200
+                    ),
+                    epg_id=streaming.clean_identifier(row.get("epg_id", ""), 300),
+                    match_method=fields["method"],
+                    market=fields["market"],
+                    source_sha256=fields["source_sha256"],
+                )
+            except (streaming.BuildError, ValueError):
+                expected_binding = ""
+            if fields["binding_sha256"] == expected_binding:
+                return "deterministic_bound_v2"
+
+    ai_matches = tuple(_AI_VERIFIED_V2_PROVENANCE_RE.finditer(notes))
+    if notes.count("ai-verified-v2") == 1 and len(ai_matches) == 1:
+        fields = ai_matches[0].groupdict()
+        if (
+            fields["gate"] == _AI_VERIFIED_V2_GATE
+            and fields["method"] in _AI_VERIFIED_METHODS
+            and _matcher_market_code(fields["market"]) == normalized_market
+            and _SHA256_RE.fullmatch(fields["source_sha256"]) is not None
+        ):
+            try:
+                expected_binding = _ai_verified_v2_binding(
+                    row,
+                    match_method=fields["method"],
+                    market=fields["market"],
+                    source_sha256=fields["source_sha256"],
+                    text_catalog_file_sha256=fields["text_file_sha256"],
+                    text_catalog_fingerprint_sha256=(
+                        fields["text_fingerprint_sha256"]
+                    ),
+                    text_catalog_generated_token=fields["text_generated"],
+                )
+            except (AutoMatchError, streaming.BuildError, ValueError):
+                expected_binding = ""
+            if fields["binding_sha256"] == expected_binding:
+                return "ai_verified_v2"
+    return None
 
 
 def _learn_cross_server_approved_aliases(
@@ -1063,12 +1964,16 @@ def _learn_cross_server_approved_aliases(
     quarantined_keys: frozenset[tuple[str, str]],
     current_unchanged_keys: frozenset[tuple[str, str]],
 ) -> _LearnedAliasMemory:
-    """Register only independently repeated, human-approved mapping memory.
+    """Rebuild safe durable alias memory from the private Mappings rows.
 
-    This knowledge exists for one run only.  It is derived after both official
-    catalogs have been corroborated, and it can therefore help Smart Rules
-    without turning one provider's spelling (or an AI suggestion) into global
-    unattended policy.
+    The Sheet is already the persistent authority, so no learned file is
+    written to the public repository. A current human ``MANUAL``/``APPROVED``
+    row may teach one exact alias/market target. Automatic evidence is weaker:
+    it needs strong deterministic or dual-gate AI provenance and the identical
+    target on at least two distinct current server identities. Every target is
+    revalidated against this run's exact corroborated real catalog. Conflicts
+    reject the complete alias/market group, while pinned static rules are never
+    overwritten.
     """
 
     candidates_by_id: dict[str, list[Mapping[str, str]]] = {}
@@ -1080,12 +1985,19 @@ def _learn_cross_server_approved_aliases(
         candidates_by_id.setdefault(epg_id, []).append(candidate)
         case_variants.setdefault(epg_id.casefold(), set()).add(epg_id)
 
-    evidence: dict[tuple[str, str], dict[str, set[str]]] = {}
+    evidence: dict[
+        tuple[str, str],
+        dict[str, dict[str, set[str]]],
+    ] = {}
+    evidence_support_keys: dict[
+        tuple[str, str, str], set[tuple[str, str]]
+    ] = {}
+    support_rows_by_key: dict[tuple[str, str], dict[str, str]] = {}
     evidence_rows = 0
     for row in mapping_rows:
         action = streaming.clean_text(row.get("action", ""), 40).upper()
         source = streaming.clean_text(row.get("source", ""), 40).casefold()
-        if action not in {"MANUAL", "APPROVED"} or source not in {
+        if action not in _HUMAN_MEMORY_ACTIONS.union({_AUTOMATIC_MEMORY_ACTION}) or source not in {
             "epgshare",
             "epgshare01",
         }:
@@ -1121,25 +2033,82 @@ def _learn_cross_server_approved_aliases(
             # it simply cannot become shared matcher knowledge in this run.
             continue
         alias = str(getattr(context, "strict_key", "") or "").strip()
-        if not alias:
+        route_plan = tuple(
+            _matcher_market_code(value)
+            for value in tuple(getattr(context, "route_plan", ()) or ())
+        )
+        explicit_market = _matcher_market_code(
+            getattr(context, "explicit_market", "")
+        )
+        if (
+            not alias
+            or not bool(getattr(context, "route_explicit", False))
+            or explicit_market in {"", "ALL", "UNKNOWN", "AMBIGUOUS"}
+        ):
             continue
         region = next(iter(regions))
-        evidence.setdefault((alias, region), {}).setdefault(epg_id, set()).add(key[0])
+        if region not in route_plan:
+            # An exact alias is not enough when the approved target belongs to
+            # a market outside the provider label's current deterministic route.
+            continue
+        if action in _HUMAN_MEMORY_ACTIONS:
+            tier = "human"
+        else:
+            tier = _automatic_memory_provenance(
+                row,
+                expected_market=explicit_market,
+            )
+            if tier is None:
+                continue
+        target_evidence = evidence.setdefault((alias, region), {}).setdefault(
+            epg_id,
+            {
+                "human_servers": set(),
+                "automatic_servers": set(),
+                "automatic_tiers": set(),
+            },
+        )
+        if tier == "human":
+            target_evidence["human_servers"].add(key[0])
+        else:
+            target_evidence["automatic_servers"].add(key[0])
+            target_evidence["automatic_tiers"].add(tier)
+        evidence_support_keys.setdefault((alias, region, epg_id), set()).add(key)
+        support_rows_by_key[key] = {
+            column: str(row.get(column, ""))
+            for column in streaming.SHEET_COLUMNS
+        }
         evidence_rows += 1
 
     static_aliases = tuple(getattr(resolver, "approved_aliases", ()) or ())
     accepted: list[dict[str, str]] = []
+    accepted_support_keys: set[tuple[str, str]] = set()
     static_reused_groups = 0
     rejected_groups = 0
     for (alias, region), targets in sorted(evidence.items()):
-        # One spelling must point to one exact schedule, and independent
-        # approval on at least two servers is required to defeat one-provider
-        # systematic naming mistakes.
+        # One exact alias/market spelling must point to one exact schedule.
+        # Weak or unknown rows never enter ``evidence`` and therefore cannot
+        # poison a legitimate group merely by containing a suggestive marker.
         if len(targets) != 1:
             rejected_groups += 1
             continue
-        epg_id, supporting_servers = next(iter(targets.items()))
-        if len(supporting_servers) < 2:
+        epg_id, support = next(iter(targets.items()))
+        human_servers = support["human_servers"]
+        automatic_servers = support["automatic_servers"]
+        if human_servers:
+            relationship = "durable_human_approved_memory"
+            evidence_note = (
+                "Rebuilt from a current human-approved private Mapping and "
+                "revalidated against the current corroborated catalog."
+            )
+        elif len(automatic_servers) >= 2:
+            relationship = "durable_automatic_verified_memory"
+            evidence_note = (
+                "Rebuilt from the same strongly proven automatic target on at "
+                "least two distinct current server identities and revalidated "
+                "against the current corroborated catalog."
+            )
+        else:
             rejected_groups += 1
             continue
 
@@ -1175,13 +2144,12 @@ def _learn_cross_server_approved_aliases(
                 "alias": alias,
                 "regions": region,
                 "epg_ids": epg_id,
-                "relationship": "cross_server_approved_memory",
-                "note": (
-                    "Learned in memory from the same human-approved EPGShare "
-                    "target on at least two servers and revalidated against the "
-                    "current corroborated catalog."
-                ),
+                "relationship": relationship,
+                "note": evidence_note,
             }
+        )
+        accepted_support_keys.update(
+            evidence_support_keys.get((alias, region, epg_id), ())
         )
 
     if accepted:
@@ -1215,6 +2183,16 @@ def _learn_cross_server_approved_aliases(
         static_reused_groups=static_reused_groups,
         rejected_groups=rejected_groups,
         sha256=digest.hexdigest(),
+        support_rows=tuple(
+            support_rows_by_key[key]
+            for key in sorted(
+                accepted_support_keys,
+                key=lambda item: (
+                    item[0],
+                    streaming.stream_sort_key(item[1]),
+                ),
+            )
+        ),
     )
 
 
@@ -1324,20 +2302,20 @@ def auto_match_and_spool(
         raise AutoMatchError("The EPG selection spool could not be prepared.") from exc
     if source_path.is_symlink() or not source_path.is_file():
         raise AutoMatchError("The downloaded ALL_SOURCES1 file is unavailable.")
-    if text_catalog_path.is_symlink() or not text_catalog_path.is_file():
-        raise AutoMatchError("The official ALL_SOURCES1 text catalog is unavailable.")
+    now_epoch = _timestamp_epoch(generated_at)
     try:
-        text_catalog_size = text_catalog_path.stat().st_size
-        if text_catalog_size < 1 or text_catalog_size > catalog_stream.MAX_CATALOG_TEXT_BYTES:
-            raise AutoMatchError("The official ALL_SOURCES1 text catalog has an invalid size.")
-        text_catalog_bytes = text_catalog_path.read_bytes()
-        if len(text_catalog_bytes) != text_catalog_size:
-            raise AutoMatchError("The official ALL_SOURCES1 text catalog changed while reading.")
+        text_catalog_bytes, text_catalog_file_sha256 = _read_bound_text_catalog(
+            text_catalog_path
+        )
         text_catalog = catalog_stream.parse_all_sources_text(
             text_catalog_bytes,
             minimum_ids=int(minimum_unique_channels),
         )
         text_catalog.validate_for_unattended_matching()
+        _validate_text_catalog_generation(
+            text_catalog.generated_token,
+            now_epoch=now_epoch,
+        )
     except AutoMatchError:
         raise
     except (OSError, catalog_stream.CatalogStreamError) as exc:
@@ -1363,7 +2341,6 @@ def auto_match_and_spool(
         existing_rows=existing_rows_by_key,
     )
     fixed_ids = active_combined_source_ids(mapping_rows)
-    now_epoch = _timestamp_epoch(generated_at)
     window_start = now_epoch - DEFAULT_EPG_HISTORY_DAYS * 86400
     # A caller may pin the rotation for exact replay. Otherwise advance it
     # once per UTC minute, deterministically from this run's generated_at.
@@ -1397,6 +2374,9 @@ def auto_match_and_spool(
     staged_shortlists_box: list[_AiReviewStaging] = []
     finalized_shortlists_box: list[tuple[AiReviewShortlist, ...]] = []
     learned_alias_box: list[_LearnedAliasMemory] = []
+    verification_candidates_box: list[
+        tuple[VerificationCatalogCandidateEvidence, ...]
+    ] = []
 
     def select_provisional_ids(
         source_catalog: catalog_stream.CatalogSnapshot,
@@ -1508,6 +2488,34 @@ def auto_match_and_spool(
         runtime = runtime_factory(runtime_candidates, runtime_dummy_ids)
         if not runtime.identity.is_expected or not runtime.preflight.ready:
             raise AutoMatchError("The Version 1 matcher verification failed safely.")
+        verification_candidates: list[VerificationCatalogCandidateEvidence] = []
+        for candidate in sorted(
+            corroborated_real_candidates,
+            key=lambda value: (
+                str(value.get("epg_id") or "").casefold(),
+                str(value.get("epg_id") or ""),
+            ),
+        ):
+            context = parse_candidate_context_v8(runtime.resolver.engine, candidate)
+            verification_candidates.append(
+                VerificationCatalogCandidateEvidence(
+                    epg_id=str(candidate.get("epg_id") or ""),
+                    market=_matcher_market_code(candidate.get("region", "")),
+                    feed=str(candidate.get("feed") or "").strip().upper(),
+                    semantics=VerificationSemanticsEvidence(
+                        direction=str(context.direction or ""),
+                        timeshift=str(context.timeshift or ""),
+                        has_plus=bool(context.has_plus),
+                        has_extra=bool(context.has_extra),
+                        has_alternate=bool(context.has_alternate),
+                        numbers=tuple(sorted(context.numbers)),
+                        languages=tuple(sorted(context.languages)),
+                        content=tuple(sorted(context.content)),
+                    ),
+                    is_real=True,
+                )
+            )
+        verification_candidates_box.append(tuple(verification_candidates))
         learned_alias_memory = _learn_cross_server_approved_aliases(
             resolver=runtime.resolver,
             mapping_rows=mapping_rows,
@@ -1523,6 +2531,7 @@ def auto_match_and_spool(
             )
             else {}
         )
+        same_market_family_ambiguity = _same_market_family_ambiguity_ids(runtime)
         matcher_catalog = MatcherCatalogSnapshot.from_matcher_catalog(
             (channel.epg_id for channel in source_catalog.channels),
             real_candidates=corroborated_real_candidates,
@@ -1549,17 +2558,11 @@ def auto_match_and_spool(
                 preflight=runtime.preflight,
             )
             server_proposals = {
-                key: replace(
+                key: _apply_catalog_ambiguity_veto(
                     proposal,
-                    eligible_for_finalization=False,
-                    decision_reason=(
-                        "An unscoped ALL-market EPG candidate shares a strong "
-                        "identity with the proposed target"
-                    ),
+                    all_route_labels=all_route_ambiguity,
+                    same_market_ids=same_market_family_ambiguity,
                 )
-                if proposal.eligible_for_finalization
-                and _proposal_blocked_by_all_route(proposal, all_route_ambiguity)
-                else proposal
                 for key, proposal in server_proposals.items()
             }
             overlap = set(proposals).intersection(server_proposals)
@@ -1570,6 +2573,7 @@ def auto_match_and_spool(
             raise AutoMatchError("The matcher result did not cover the exact candidate set.")
         staged_shortlists = (
             _stage_ai_review_shortlists_with_metrics(
+                resolver=runtime.resolver,
                 proposals=proposals,
                 review_keys=review_keys,
                 ai_excluded_keys=_previous_ai_review_keys(
@@ -1580,6 +2584,18 @@ def auto_match_and_spool(
             )
             if enable_ai_review and review_keys
             else _AiReviewStaging((), 0, 0)
+        )
+        # Gemini cannot resolve either a routed target shadowed by an unscoped
+        # ALL-market identity or two official schedules that collapse to the
+        # same coarse station family.  Those competitors are deliberately
+        # absent from the explicit-market shortlist, so allowing its Smart top
+        # choice through would manufacture a false local margin and bypass the
+        # deterministic catalog veto above.  Only explicit human/cross-server
+        # memory may disambiguate either family on a future run.
+        staged_shortlists = _apply_ai_shortlist_catalog_ambiguity_veto(
+            staged_shortlists,
+            all_route_labels=all_route_ambiguity,
+            same_market_ids=same_market_family_ambiguity,
         )
         runtime_box.append(runtime)
         matcher_catalog_box.append(matcher_catalog)
@@ -1620,6 +2636,7 @@ def auto_match_and_spool(
                 or len(corroboration_box) != 1
                 or len(staged_shortlists_box) != 1
                 or len(learned_alias_box) != 1
+                or len(verification_candidates_box) != 1
             ):
                 raise AutoMatchError("The ALL_SOURCES1 catalog boundary was not verified.")
             if (
@@ -1665,19 +2682,39 @@ def auto_match_and_spool(
                 row = dict(original)
                 row.update(patch)
                 if final.approved:
-                    if (
-                        row.get("action") != "AUTO_EPGSHARE"
-                        or row.get("source") != "epgshare01"
-                        or row.get("epg_feed") != "ALL_SOURCES1"
-                        or row.get("enabled") != "TRUE"
-                        or not row.get("epg_id")
-                    ):
-                        raise AutoMatchError("An approved match violated the EPGShare-only policy.")
+                    action = row.get("action")
+                    if action == "AUTO_EPGSHARE":
+                        if (
+                            row.get("source") != "epgshare01"
+                            or row.get("epg_feed") != "ALL_SOURCES1"
+                            or row.get("enabled") != "TRUE"
+                            or not row.get("epg_id")
+                        ):
+                            raise AutoMatchError(
+                                "An approved real match violated the EPGShare policy."
+                            )
+                        approved_ids.add(row["epg_id"])
+                    elif action == "AUTO_DUMMY":
+                        if (
+                            row.get("source") != "dummy"
+                            or row.get("enabled") != "TRUE"
+                            or not row.get("epg_id")
+                        ):
+                            raise AutoMatchError(
+                                "An approved placeholder violated the dummy-source policy."
+                            )
+                    else:
+                        raise AutoMatchError(
+                            "An approved match returned an unsupported action."
+                        )
                     approved_count += 1
-                    approved_ids.add(row["epg_id"])
                     approved_by_server[key[0]] += 1
                 else:
-                    row["action"] = "REVIEW"
+                    # Decorative headings are deliberately classified as
+                    # IGNORE so they leave the unresolved queue. Every other
+                    # unapproved proposal remains disabled REVIEW.
+                    if row.get("action") != "IGNORE":
+                        row["action"] = "REVIEW"
                     row["enabled"] = "FALSE"
                 if any(
                     row.get(column, "") != metadata_before[column]
@@ -1732,6 +2769,13 @@ def auto_match_and_spool(
                     unresolved_keys=unresolved_review_keys,
                     programme_gates=gates,
                     resolved_source_ids=result.resolved_source_ids,
+                    checked_at_epoch=now_epoch,
+                    source_sha256=result.source_sha256,
+                    text_catalog_file_sha256=text_catalog_file_sha256,
+                    text_catalog_fingerprint_sha256=(
+                        text_catalog.fingerprint_sha256
+                    ),
+                    text_catalog_generated_token=text_catalog.generated_token,
                 )
             )
             spool.seal(
@@ -1764,11 +2808,17 @@ def auto_match_and_spool(
     provisional_keys = frozenset(
         key
         for key, proposal in proposals.items()
-        if proposal.eligible_for_finalization and proposal.target_epg_id
+        if proposal.eligible_for_finalization
+        and proposal.target_epg_id
+    )
+    real_provisional_keys = frozenset(
+        key
+        for key in provisional_keys
+        if proposals[key].target_source == "epgshare01"
     )
     rejected_gate_keys = frozenset(
         key
-        for key in provisional_keys
+        for key in real_provisional_keys
         for proposal in (proposals[key],)
         if proposal.target_epg_id not in result.programme_gates
         or not result.programme_gates[proposal.target_epg_id].passed
@@ -1783,33 +2833,47 @@ def auto_match_and_spool(
     recheck_approved_count = sum(
         1 for key in review_keys if patched_by_key[key].get("enabled") == "TRUE"
     )
-    matcher_catalog = matcher_catalog_box[0]
+    new_dummy_count = sum(
+        1 for key in new_keys if patched_by_key[key].get("action") == "AUTO_DUMMY"
+    )
+    recheck_dummy_count = sum(
+        1
+        for key in review_keys
+        if patched_by_key[key].get("action") == "AUTO_DUMMY"
+    )
+    new_ignored_count = sum(
+        1 for key in new_keys if patched_by_key[key].get("action") == "IGNORE"
+    )
+    recheck_ignored_count = sum(
+        1 for key in review_keys if patched_by_key[key].get("action") == "IGNORE"
+    )
     verified_placeholder_keys = frozenset(
-        key
-        for key, proposal in proposals.items()
-        if key in review_keys
-        and proposal.matcher_action == "AUTO_DUMMY"
-        and proposal.match_method in DUMMY_REVIEW_METHODS
-        and bool(proposal.target_epg_id)
-        and matcher_catalog.contains_unambiguous_exact(proposal.target_epg_id)
-        and matcher_catalog.target_kinds(proposal.target_epg_id)
-        == frozenset({"dummy"})
+        key for key in review_keys
+        if patched_by_key[key].get("action") in {"AUTO_DUMMY", "IGNORE"}
     )
     return AutoMatchOutcome(
         rows=tuple(patched_rows),
         considered_rows=len(proposals),
         provisional_rows=len(provisional_keys),
         approved_rows=approved_count,
-        review_rows=len(patched_rows) - approved_count,
+        review_rows=sum(
+            1 for row in patched_rows if row.get("action") == "REVIEW"
+        ),
         new_considered_rows=len(new_keys),
         new_provisional_rows=len(provisional_keys.intersection(new_keys)),
         new_approved_rows=new_approved_count,
-        new_review_rows=len(new_keys) - new_approved_count,
+        new_review_rows=sum(
+            1 for key in new_keys if patched_by_key[key].get("action") == "REVIEW"
+        ),
         new_rejected_programme_gates=len(rejected_gate_keys.intersection(new_keys)),
         recheck_considered_rows=len(review_keys),
         recheck_provisional_rows=len(provisional_keys.intersection(review_keys)),
         recheck_approved_rows=recheck_approved_count,
-        recheck_review_rows=len(review_keys) - recheck_approved_count,
+        recheck_review_rows=sum(
+            1
+            for key in review_keys
+            if patched_by_key[key].get("action") == "REVIEW"
+        ),
         recheck_rejected_programme_gates=len(
             rejected_gate_keys.intersection(review_keys)
         ),
@@ -1829,7 +2893,7 @@ def auto_match_and_spool(
         catalog_sha256=result.catalog.fingerprint_sha256,
         text_catalog_generated_token=text_catalog.generated_token,
         text_catalog_fingerprint_sha256=text_catalog.fingerprint_sha256,
-        text_catalog_file_sha256=hashlib.sha256(text_catalog_bytes).hexdigest(),
+        text_catalog_file_sha256=text_catalog_file_sha256,
         matcher_version=runtime.identity.version,
         matcher_build_id=runtime.identity.build_id,
         matcher_sha256=runtime.identity.source_sha256,
@@ -1844,11 +2908,48 @@ def auto_match_and_spool(
         ),
         learned_alias_rejected_groups=learned_alias_memory.rejected_groups,
         learned_alias_sha256=learned_alias_memory.sha256,
+        learned_alias_support_rows=learned_alias_memory.support_rows,
         ai_review_rotation=effective_ai_review_rotation,
         ai_review_attempted_rows=staged_shortlists_box[0].attempted_rows,
         ai_review_comparisons=staged_shortlists_box[0].comparisons,
         ai_review_shortlists=finalized_shortlists_box[0],
+        verification_evidence=CurrentRunVerificationEvidence(
+            source_sha256=result.source_sha256,
+            text_catalog_file_sha256=text_catalog_file_sha256,
+            text_catalog_fingerprint_sha256=text_catalog.fingerprint_sha256,
+            text_catalog_generated_token=text_catalog.generated_token,
+            checked_at_epoch=now_epoch,
+            xml_catalog_ids=frozenset(
+                channel.epg_id for channel in result.catalog.channels
+            ),
+            text_catalog_ids=frozenset(
+                entry.epg_id for entry in text_catalog.entries
+            ),
+            catalog_candidates=verification_candidates_box[0],
+            programme_gates=tuple(
+                VerificationProgrammeGateEvidence(
+                    channel_key=gate.channel_key,
+                    distinct_informative_programmes=(
+                        gate.distinct_informative_programmes
+                    ),
+                    first_start_epoch=gate.first_start_epoch,
+                    latest_stop_epoch=gate.latest_stop_epoch,
+                    checked_at_epoch=now_epoch,
+                    source_sha256=result.source_sha256,
+                    passed=bool(gate.passed),
+                    reason=str(gate.reason),
+                )
+                for _requested_id, gate in sorted(
+                    result.programme_gates.items(),
+                    key=lambda item: (item[0].casefold(), item[0]),
+                )
+            ),
+        ),
         verified_placeholder_keys=verified_placeholder_keys,
+        new_dummy_rows=new_dummy_count,
+        recheck_dummy_rows=recheck_dummy_count,
+        new_ignored_rows=new_ignored_count,
+        recheck_ignored_rows=recheck_ignored_count,
     )
 
 
@@ -1858,7 +2959,11 @@ __all__ = [
     "AiReviewShortlist",
     "AutoMatchError",
     "AutoMatchOutcome",
+    "CurrentRunVerificationEvidence",
     "MatcherRuntime",
+    "VerificationCatalogCandidateEvidence",
+    "VerificationProgrammeGateEvidence",
+    "VerificationSemanticsEvidence",
     "active_combined_source_ids",
     "auto_match_and_spool",
     "prepare_matcher_runtime",

@@ -28,9 +28,11 @@ frozen Smart Rules matcher against the complete EPGShare catalog. It enables a
 row only when there is one exact, region-consistent real channel ID confirmed
 case-sensitively in both the XML and official text catalog, and that same
 downloaded guide contains a useful current/future schedule. All uncertain rows
-are appended disabled for review. An optional manual Workflow 1 recheck can
-retry existing disabled `REVIEW` rows with the same safety rules; ordinary
-runs do not change them. Existing Sheet rows are never deleted or silently
+are appended disabled for review. Separately, a verified placeholder family may
+be enabled as `AUTO_DUMMY`, and a decorative heading may be disabled as
+`IGNORE`; neither exception is treated as a real EPG match. Workflow 1 rechecks
+existing disabled `REVIEW` rows with the same safety rules every day and can
+also be dispatched manually. Existing Sheet rows are never deleted or silently
 remapped. The same single EPGShare parse is reused to build the
 TiviMate XMLTV and app JSON outputs, which are validated and deployed through
 GitHub Pages.
@@ -41,10 +43,10 @@ available to the EPG-building step.
 
 ## Workflows
 
-- `1 - Sync channels to Google Sheet` — manual first-run and on-demand channel
-  inventory check. It can also recheck the existing `REVIEW` backlog with
-  Smart Rules and, optionally, Gemini suggestions. Its safe defaults make no
-  Sheet changes.
+- `1 - Sync channels to Google Sheet` — runs daily at **02:17 Toronto time** and
+  can also be dispatched manually. The scheduled run appends missing channels,
+  applies the existing-`REVIEW` recheck to all servers, and enables strict
+  Gemini verification with a 200-row cap. Smart Rules always run first.
 - `2 - Build and publish EPG` — daily and manual inventory, build, validation,
   and GitHub Pages deployment.
 
@@ -64,47 +66,57 @@ updates. The imported private Google Sheet becomes the live mapping authority.
 The first successful strict inventory sync asks each server for its live list
 and appends every missing valid, uniquely identified row returned in that run.
 Safe exact EPGShare matches with a verified programme guide are enabled
-automatically; the rest use `enabled=FALSE` and `action=REVIEW`. Later runs
-repeat that exact-key comparison automatically.
+automatically. Verified placeholder families may become `AUTO_DUMMY`, and
+decorative headings may become disabled `IGNORE`; the rest use
+`enabled=FALSE` and `action=REVIEW`. Later runs repeat that exact-key comparison
+automatically.
 
 Workflow 1 can also recheck those existing `REVIEW` rows. Smart Rules always
 run first. A match is enabled only after the same exact-ID, region, catalog,
-and programme checks used for a new channel all pass. One apply run changes at
-most 1,000 such verified rows; rerun the workflow to continue a larger backlog.
+and programme checks used for a new channel all pass. The scheduled daily run
+checks all three servers and can apply up to 5,000 deterministic decisions in
+verified batches; no manual loop is required. Any verified remainder is
+continued by the next daily run.
 For Server 2 and Server 3, the same run may also recover an exact native ID
 from current API/M3U evidence, but only after whole-catalog name uniqueness,
 current programme, and immediate pre-write provider checks pass. Server 1
 remains EPGShare-only.
-Optional Gemini review is limited to 50 unresolved rows per run. Gemini can
-never approve or enable a row. A `HIGH` suggestion stores only an exact,
-locally verified EPGShare candidate. An abstention or lower-confidence answer
-stores only an `ai-review-v1` manual-review marker and leaves the existing
-source and ID unchanged. API errors make no row change, so they can be retried.
-Every AI-processed row remains `enabled=FALSE` and `action=REVIEW` until a
-person verifies it. Server 1 suggestions and approvals are EPGShare-only;
-native Server 1 EPG is never used.
+Gemini verification is limited to 200 affected unresolved rows per run. Gemini
+cannot invent an ID: it sees only opaque choices from a
+local shortlist. A row is enabled only when two fixed local rankers independently
+choose the same candidate with strong scores and margins, Gemini returns `HIGH`
+for that exact choice, the current XML/text catalogs and programme gate pass,
+and terminal Sheet, alert, and provider rereads are unchanged. Every other
+answer leaves the row untouched in `REVIEW`; API errors never block deterministic
+work. Server 1 remains EPGShare-only.
 
-Smart Rules can also reuse strong human decisions during that one run. The
-same cleaned channel alias and exact current EPGShare ID must already be
-enabled and human-approved on at least two different servers. Conflicts,
-alerts, dummy IDs, ambiguous IDs, automatic matches, and AI review rows cannot
-teach the rule. The candidate must still pass the normal market, catalog, and
-programme checks. This run-local evidence is rebuilt from the Sheet each time;
-Gemini never writes a permanent rule or a separate knowledge file.
-The run summary records how many evidence rows and alias groups were examined,
-registered, or rejected.
+Smart Rules rebuild durable alias memory from the private Sheet every run. One
+enabled current human `MANUAL`/`APPROVED` row may teach its exact alias, market,
+and EPGShare target. Automatic or `ai-verified-v2` evidence is weaker and must
+agree on the identical target across at least two unchanged servers before it
+can teach. Conflicts, alerts, dummy IDs, ambiguous IDs, and provider drift are
+excluded. Gemini never edits matcher code or a public knowledge file; its
+strictly verified Sheet decisions can become reusable evidence only on a later
+run after the cross-server threshold is met.
+The detailed `summary.json` records how many evidence rows and alias groups were
+examined, registered, or rejected.
 
-The workflow summary reports the actual eligible, verified, unresolved,
-skipped, and deferred counts for the selected scope. Gemini `HIGH` findings and
-suggestions actually saved in the Sheet are separate counters, so a dry-run is
-never presented as a write. Do not infer the review backlog by subtracting one
-output count from the provider's total channel count, because disabled,
-missing, ignored, quarantined, and already mapped rows are different states.
+The displayed workflow summary is intentionally compact: one per-server channel
+status table plus the most important results from that run. The downloadable
+`summary.json` artifact keeps the detailed eligible, verified, unresolved,
+skipped, deferred, native, AI, learning, and catalog counters. Gemini `HIGH`
+responses and strictly verified rows actually enabled in the Sheet are separate
+counters, so a dry-run is never presented as a write. Do not infer the review
+backlog by subtracting one output count from the provider's total channel count,
+because disabled, missing, ignored, quarantined, and already mapped rows are
+different states.
 
 New rows contain conservative metadata suggestions for sorting and review.
 Automatic schedule approval does **not** approve personalization metadata:
 `metadata_status=review` remains until a person checks language, region, genre,
-sport, and religion. A fuzzy name match is never approved unattended.
+sport, and religion. A fuzzy-only matcher result is never approved; AI can act
+only as a second verifier for a supplied candidate already supported by two
+independent strong local rankings and all current safety gates.
 Possible stream-ID reuse is recorded in the private `Sync Alerts` tab and stays
 quarantined from builds while the alert status is `OPEN`.
 

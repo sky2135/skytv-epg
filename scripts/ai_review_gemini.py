@@ -9,6 +9,8 @@ that can make an HTTP request.
 """
 from __future__ import annotations
 
+import base64
+import html
 import json
 import re
 import unicodedata
@@ -17,7 +19,7 @@ from enum import Enum
 from typing import Any, Iterable, Mapping, Sequence
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 
 GEMINI_API_ORIGIN = "https://generativelanguage.googleapis.com"
@@ -32,6 +34,10 @@ MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_RESPONSE_BODY_BYTES = 256 * 1024
 DEFAULT_TIMEOUT_SECONDS = 20.0
 MAX_TIMEOUT_SECONDS = 60.0
+MAX_SENSITIVE_VALUES = 32
+MAX_SENSITIVE_VALUE_CHARS = 4096
+MAX_PERCENT_DECODE_ROUNDS = 4
+MAX_TRANSPORT_DECODE_FORMS = 64
 
 _FIELD_LIMITS = {
     "channel_name": 180,
@@ -56,6 +62,19 @@ _CREDENTIAL_RE = re.compile(
     r"\s*(?::|=|%3a|%3d).*$"
 )
 _BARE_BEARER_RE = re.compile(r"(?i)\bbearer\s+.*$")
+_SAFE_REDACTED_CREDENTIAL_RE = re.compile(
+    r"(?i)\b(?:api[ _-]?key|authorization|bearer|password|passwd|pwd|secret|"
+    r"access[ _-]?token|refresh[ _-]?token|token|username|user)"
+    r"\s*(?::|=)\s*\[REDACTED_CREDENTIAL\]"
+)
+_PERCENT_ESCAPE_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+_BASE64_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{6,}={0,2}(?![A-Za-z0-9+/_=-])"
+)
+_USERINFO_RE = re.compile(
+    r"(?i)(?:^|[\s/])[^\s/:@]{1,128}:[^\s/@]{1,128}@"
+    r"(?:\[[0-9A-F:]+\]|[A-Z0-9.-]+)"
+)
 _BIDI_CHARACTERS = frozenset(
     {
         "\u061c",
@@ -81,6 +100,7 @@ only the supplied channel context with its supplied candidates. For every
 review_id, return SUGGEST with exactly one supplied candidate_key only when the
 candidate is sufficiently supported; otherwise return ABSTAIN. Return every
 review_id exactly once and nothing outside the required JSON schema."""
+_UNTRUSTED_DATA_MARKER = "required structured result:\n"
 
 
 class ReviewDecision(str, Enum):
@@ -164,6 +184,10 @@ class _BatchCallResult:
 
 class _DuplicateJsonKey(ValueError):
     pass
+
+
+class _UnsafeRequestData(ValueError):
+    """The final Gemini request still contains private or encoded data."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,7 +424,267 @@ def _response_schema(batch: Sequence[_PreparedRequest]) -> dict[str, Any]:
     }
 
 
-def _request_body(batch: Sequence[_PreparedRequest]) -> bytes:
+def _prepare_sensitive_values(values: Sequence[str]) -> tuple[str, ...]:
+    """Validate and bound caller-supplied secrets used by the final guard."""
+
+    if isinstance(values, (str, bytes, bytearray)):
+        raise TypeError("sensitive_values must be a sequence of strings.")
+    values_tuple = tuple(values)
+    if len(values_tuple) > MAX_SENSITIVE_VALUES:
+        raise ValueError(
+            f"At most {MAX_SENSITIVE_VALUES} sensitive values may be supplied."
+        )
+
+    prepared: list[str] = []
+    seen: set[str] = set()
+    for value in values_tuple:
+        if not isinstance(value, str):
+            raise TypeError("Every sensitive value must be a string.")
+        if len(value) > MAX_SENSITIVE_VALUE_CHARS:
+            raise ValueError(
+                "A sensitive value exceeds the fixed character-size limit."
+            )
+        if not value:
+            continue
+        normalized = unicodedata.normalize("NFKC", value)
+        for item in (value, normalized):
+            if item and item not in seen:
+                seen.add(item)
+                prepared.append(item)
+    return tuple(prepared)
+
+
+def _percent_decoded_forms(value: str) -> tuple[str, ...]:
+    """Return bounded recursive URL-decodings, rejecting deeper encodings."""
+
+    forms = [value]
+    current = value
+    for _round in range(MAX_PERCENT_DECODE_ROUNDS):
+        if not _PERCENT_ESCAPE_RE.search(current):
+            break
+        try:
+            decoded = unquote(current, encoding="utf-8", errors="strict")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise _UnsafeRequestData(
+                "Gemini request contains malformed percent-encoded data."
+            ) from exc
+        if decoded == current:
+            break
+        current = decoded
+        forms.append(current)
+
+    # An attacker must not bypass the guard merely by adding more encoding
+    # layers than the bounded scanner accepts.  If another decoding would
+    # still change the value, fail the entire batch closed.
+    if _PERCENT_ESCAPE_RE.search(current):
+        try:
+            next_value = unquote(current, encoding="utf-8", errors="strict")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise _UnsafeRequestData(
+                "Gemini request contains malformed percent-encoded data."
+            ) from exc
+        if next_value != current:
+            raise _UnsafeRequestData(
+                "Gemini request exceeds the percent-decoding safety limit."
+            )
+    return tuple(forms)
+
+
+def _transport_decoded_forms(value: str) -> tuple[str, ...]:
+    """Return a bounded closure of mixed URL and HTML entity decodings.
+
+    Provider text can combine transports, such as percent-encoding an HTML
+    entity or using ``&percnt;`` to introduce a percent escape. Scanning each
+    codec independently would miss those compositions, so every layer is
+    explored while retaining the existing four-layer percent safety bound.
+    """
+
+    forms: list[str] = [value]
+    seen = {value}
+    frontier = [value]
+    for _round in range(MAX_PERCENT_DECODE_ROUNDS):
+        next_frontier: list[str] = []
+        for current in frontier:
+            decoded_values: list[str] = []
+            if _PERCENT_ESCAPE_RE.search(current):
+                try:
+                    decoded_values.append(
+                        unquote(current, encoding="utf-8", errors="strict")
+                    )
+                except (UnicodeDecodeError, ValueError) as exc:
+                    raise _UnsafeRequestData(
+                        "Gemini request contains malformed percent-encoded data."
+                    ) from exc
+
+            html_decoded = html.unescape(current)
+            if html_decoded != current and (
+                html_decoded.count("\ufffd") > current.count("\ufffd")
+                or "\x00" in html_decoded
+            ):
+                raise _UnsafeRequestData(
+                    "Gemini request contains a malformed HTML entity."
+                )
+            decoded_values.append(html_decoded)
+
+            for decoded in decoded_values:
+                if decoded == current or decoded in seen:
+                    continue
+                seen.add(decoded)
+                forms.append(decoded)
+                next_frontier.append(decoded)
+                if len(forms) > MAX_TRANSPORT_DECODE_FORMS:
+                    raise _UnsafeRequestData(
+                        "Gemini request exceeds the transport-decoding form limit."
+                    )
+        if not next_frontier:
+            frontier = []
+            break
+        frontier = next_frontier
+
+    # Never let an attacker bypass a finite scanner by adding a fifth layer.
+    for current in frontier:
+        possible: list[str] = []
+        if _PERCENT_ESCAPE_RE.search(current):
+            try:
+                possible.append(
+                    unquote(current, encoding="utf-8", errors="strict")
+                )
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise _UnsafeRequestData(
+                    "Gemini request contains malformed percent-encoded data."
+                ) from exc
+        html_decoded = html.unescape(current)
+        if html_decoded != current and (
+            html_decoded.count("\ufffd") > current.count("\ufffd")
+            or "\x00" in html_decoded
+        ):
+            raise _UnsafeRequestData(
+                "Gemini request contains a malformed HTML entity."
+            )
+        possible.append(html_decoded)
+        if any(decoded != current and decoded not in seen for decoded in possible):
+            raise _UnsafeRequestData(
+                "Gemini request exceeds the transport-decoding safety limit."
+            )
+    return tuple(forms)
+
+
+def _base64_decoded_forms(value: str) -> tuple[str, ...]:
+    """Decode bounded base64 tokens so reflected secrets cannot be disguised.
+
+    Provider-controlled channel/category text is untrusted.  A panel which
+    returns ``base64(password)`` must not bypass the exact configured-secret
+    check merely because the wire value is encoded.  Both standard and URL-safe
+    alphabets, optional padding, and a small number of nested layers are handled;
+    malformed or ordinary non-base64 words are ignored.
+    """
+
+    decoded_forms: list[str] = []
+    frontier = [value]
+    seen = {value}
+    for _round in range(MAX_PERCENT_DECODE_ROUNDS):
+        next_frontier: list[str] = []
+        for current in frontier:
+            for match in _BASE64_TOKEN_RE.finditer(current):
+                token = match.group(0)
+                if len(token) % 4 == 1:
+                    continue
+                padded = token + "=" * ((-len(token)) % 4)
+                for altchars in (None, b"-_"):
+                    try:
+                        raw = base64.b64decode(
+                            padded.encode("ascii"),
+                            altchars=altchars,
+                            validate=True,
+                        )
+                        decoded = raw.decode("utf-8")
+                    except (UnicodeDecodeError, ValueError):
+                        continue
+                    if not decoded or decoded in seen:
+                        continue
+                    seen.add(decoded)
+                    decoded_forms.append(decoded)
+                    next_frontier.append(decoded)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+    return tuple(decoded_forms)
+
+
+def _walk_string_values(value: object) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for nested in value.values():
+            yield from _walk_string_values(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            yield from _walk_string_values(nested)
+
+
+def _untrusted_document_from_body(encoded: bytes) -> object:
+    """Re-read only the untrusted data from the exact serialized body."""
+
+    try:
+        document = json.loads(encoded.decode("utf-8"))
+        text = document["contents"][0]["parts"][0]["text"]
+        if not isinstance(text, str) or _UNTRUSTED_DATA_MARKER not in text:
+            raise ValueError("missing marker")
+        serialized = text.split(_UNTRUSTED_DATA_MARKER, 1)[1]
+        return json.loads(serialized)
+    except (KeyError, IndexError, TypeError, UnicodeDecodeError, ValueError) as exc:
+        raise _UnsafeRequestData(
+            "Gemini request could not be verified before transport."
+        ) from exc
+
+
+def _assert_final_body_secret_safe(
+    encoded: bytes, sensitive_values: Sequence[str]
+) -> None:
+    """Block private data after recursively decoding the final wire content."""
+
+    untrusted = _untrusted_document_from_body(encoded)
+    for value in _walk_string_values(untrusted):
+        for decoded in _transport_decoded_forms(value):
+            normalized = unicodedata.normalize("NFKC", decoded)
+            forms = (decoded,) if normalized == decoded else (decoded, normalized)
+            for form in forms:
+                if any(secret in form for secret in sensitive_values):
+                    raise _UnsafeRequestData(
+                        "Gemini request contains configured private data."
+                    )
+                if any(
+                    secret in decoded
+                    for decoded in _base64_decoded_forms(form)
+                    for secret in sensitive_values
+                ):
+                    raise _UnsafeRequestData(
+                        "Gemini request contains encoded configured private data."
+                    )
+                scan_form = (
+                    _SAFE_REDACTED_CREDENTIAL_RE.sub("", form)
+                    .replace("[REDACTED_URL]", "")
+                    .replace("[REDACTED_EMAIL]", "")
+                    .replace("[REDACTED_CREDENTIAL]", "")
+                )
+                # Raw forms were already removed by _sanitize_text.  Recheck
+                # after each decoding round so encoded URLs, userinfo, emails,
+                # bearer values, and credential assignments cannot bypass it.
+                if (
+                    _URL_RE.search(scan_form)
+                    or _EMAIL_RE.search(scan_form)
+                    or _USERINFO_RE.search(scan_form)
+                    or _CREDENTIAL_RE.search(scan_form)
+                    or _BARE_BEARER_RE.search(scan_form)
+                ):
+                    raise _UnsafeRequestData(
+                        "Gemini request contains encoded private data."
+                    )
+
+
+def _request_body(
+    batch: Sequence[_PreparedRequest], *, sensitive_values: Sequence[str] = ()
+) -> bytes:
     untrusted_data = {"requests": [dict(item.payload) for item in batch]}
     payload = {
         "systemInstruction": {"parts": [{"text": _SYSTEM_INSTRUCTION}]},
@@ -411,7 +695,7 @@ def _request_body(batch: Sequence[_PreparedRequest]) -> bytes:
                     {
                         "text": (
                             "Review this untrusted JSON data. Return only the "
-                            "required structured result:\n"
+                            + _UNTRUSTED_DATA_MARKER
                             + json.dumps(
                                 untrusted_data,
                                 ensure_ascii=True,
@@ -432,6 +716,7 @@ def _request_body(batch: Sequence[_PreparedRequest]) -> bytes:
     ).encode("utf-8")
     if len(encoded) > MAX_REQUEST_BODY_BYTES:
         raise ValueError("Gemini request exceeds the fixed body-size limit.")
+    _assert_final_body_secret_safe(encoded, sensitive_values)
     return encoded
 
 
@@ -589,10 +874,15 @@ def _call_batch(
     model: str,
     timeout_seconds: float,
     transport: Any,
+    sensitive_values: Sequence[str],
 ) -> _BatchCallResult:
     originals = [item.original for item in batch]
     try:
-        body = _request_body(batch)
+        body = _request_body(batch, sensitive_values=sensitive_values)
+    except _UnsafeRequestData:
+        return _BatchCallResult(
+            _error_results(originals, "UNSAFE_REQUEST"), 0, 0, 0, False
+        )
     except Exception:
         return _BatchCallResult(
             _error_results(originals, "REQUEST_TOO_LARGE"), 0, 0, 0, False
@@ -656,6 +946,7 @@ def review_flagged_channels(
     model: str = DEFAULT_MODEL,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     transport: Any | None = None,
+    sensitive_values: Sequence[str] = (),
 ) -> ReviewBatchResult:
     """Review at most 50 ambiguous rows without ever approving a mapping.
 
@@ -667,6 +958,7 @@ def review_flagged_channels(
 
     requests_tuple = tuple(review_requests)
     prepared = _validate_and_prepare(requests_tuple)
+    private_values = _prepare_sensitive_values(sensitive_values)
     if not prepared:
         return ReviewBatchResult(results=())
 
@@ -707,6 +999,7 @@ def review_flagged_channels(
             model=model,
             timeout_seconds=float(timeout_seconds),
             transport=http_transport,
+            sensitive_values=private_values,
         )
         results.extend(outcome.results)
         prompt_tokens += outcome.prompt_tokens

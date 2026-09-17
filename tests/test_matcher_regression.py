@@ -29,6 +29,7 @@ BACKLOG_ANALYZER_WORKFLOW_PATH = (
 )
 NATIVE_REVIEW_PATH = REPO_ROOT / "scripts" / "native_epg_review.py"
 AI_REVIEW_PATH = REPO_ROOT / "scripts" / "ai_review_gemini.py"
+AI_REVIEW_POLICY_PATH = REPO_ROOT / "scripts" / "ai_review_policy.py"
 EPG_CATALOG_STREAM_PATH = REPO_ROOT / "scripts" / "epg_catalog_stream.py"
 EPG_SELECTION_SPOOL_PATH = REPO_ROOT / "scripts" / "epg_selection_spool.py"
 CHANNEL_INVENTORY_RUNNER_PATH = (
@@ -192,7 +193,9 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertIn("read-only token", decision_boundary)
         self.assertIn("aggregate counts", decision_boundary)
         self.assertIn("server-local review clusters", decision_boundary)
-        self.assertIn("two-server human-approved alias memory", decision_boundary)
+        self.assertIn("durable alias memory", decision_boundary)
+        self.assertIn("automatic evidence", decision_boundary)
+        self.assertIn("terminal Sheet", decision_boundary)
         self.assertIn("exact numeric-stream and exact-name M3U join", decision_boundary)
         self.assertIn("every KEEP_PANEL write", decision_boundary)
         self.assertNotIn("published Google Sheet CSV", decision_boundary)
@@ -232,6 +235,10 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertEqual(
             manifest["geminiReviewSha256"],
             hashlib.sha256(AI_REVIEW_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["aiReviewPolicySha256"],
+            hashlib.sha256(AI_REVIEW_POLICY_PATH.read_bytes()).hexdigest(),
         )
         self.assertEqual(
             manifest["epgCatalogStreamSha256"],

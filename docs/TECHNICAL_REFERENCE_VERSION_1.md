@@ -20,7 +20,7 @@ branch. It does not need a second repository or a `gh-pages` branch.
    rollover, so Version 1 uses
    only their exact, case-sensitive intersection and accepts only the small,
    bounded rollover described below. The pinned matcher proposes an EPG for
-   previously unseen identities. A manual Workflow 1 option may also retry an
+   previously unseen identities. Workflow 1 may also retry an
    explicit set of eligible existing disabled `REVIEW` identities. A proposal
    is activated only after exact-ID, route, and current/future programme-gate
    verification from that same open source file.
@@ -187,11 +187,12 @@ disabled and review-state even when the stored mapping had been active.
 
 ### Newly discovered rows and explicit REVIEW rechecks
 
-An ordinary refresh sends only previously unseen exact
+New-channel discovery sends only previously unseen exact
 `(server_id, stream_id)` keys to automatic matching. Existing rows and manual
-edits are not rematched or rewritten by that path. Workflow 1 has a separate,
-manual `off` / `dry-run` / `apply` control that can submit an explicit allowlist
-of existing disabled `REVIEW` rows. It is off by default.
+edits are not rematched by that path. Workflow 1 has a separate `off` /
+`dry-run` / `apply` control for an explicit allowlist of existing disabled
+`REVIEW` rows. Scheduled runs use `apply` for all three servers; manual runs
+may still select another mode or narrower scope.
 
 A new row is activated as `AUTO_EPGSHARE` only when all of these independent
 checks succeed:
@@ -210,10 +211,13 @@ checks succeed:
   time intervals, its first useful interval starts within six hours, and its
   final useful interval reaches at least six hours beyond the check time.
 
-After the catalog-wide preflight succeeds, every other row-level result is
-appended with `enabled=FALSE` and `action=REVIEW`. A catalog-wide contradiction
-stops the run before any new row is written; it is not converted into one
-particular channel's review result.
+Two explicitly non-real deterministic outcomes are separate from that approval
+path. A verified allowlisted placeholder family may be enabled as
+`AUTO_DUMMY`, and a decorative heading may be disabled as `IGNORE`. Neither is
+reported as a real EPG match. After the catalog-wide preflight succeeds, every
+other row-level result is appended with `enabled=FALSE` and `action=REVIEW`. A
+catalog-wide contradiction stops the run before any new row is written; it is
+not converted into one particular channel's review result.
 Server 1 panel identifiers are stripped before matching and can never be
 activated. Provider icon URLs are discarded because their paths may contain
 account credentials.
@@ -233,11 +237,14 @@ Smart Rules run first against the same corroborated EPGShare catalog and
 same-snapshot programme gate used for new rows. `dry-run` does not write any
 existing `REVIEW` row. The separate new-channel append control remains
 independent, so operators should leave it off for a completely read-only
-preview. `apply` updates at most 1,000 verified matches per run;
-additional verified rows are reported as deferred for a later run. An
+preview. `apply` updates at most 5,000 deterministic decisions per run in
+batches of no more than 500 rows and 2 MiB; additional verified rows are
+reported as deferred for the next scheduled run. An
 accepted row becomes `enabled=TRUE`, `action=AUTO_EPGSHARE`,
 `source=epgshare01`, and `epg_feed=ALL_SOURCES1` with its exact verified ID.
-Server 1 has no panel exception.
+An allowlisted verified placeholder may instead become enabled `AUTO_DUMMY`,
+and a decorative heading may become disabled `IGNORE`; both remain outside the
+real-EPG count. Server 1 has no panel exception.
 
 For Server 2 and Server 3 rechecks, Workflow 1 also runs a separate native-EPG
 lane automatically. It first uses the current API `epg_channel_id`. When that
@@ -258,40 +265,38 @@ and M3U are fetched again; a changed, conflicting, or unavailable identity is
 removed from the write set. Only then may the guarded writer create an enabled
 `KEEP_PANEL` row. The
 writer accepts `KEEP_PANEL` only from the exact in-memory verified allowlist;
-the same 1,000-row deterministic cap, Sheet fingerprint, alert rereads, atomic
+the same 5,000-row deterministic cap, Sheet fingerprint, alert rereads, atomic
 update, post-write verification, and terminal snapshot checks still apply.
 Server 1 never enters this lane and its native XMLTV is never downloaded.
 
-Optional Gemini review occurs only after Smart Rules and is capped at 50
-unresolved rows per run. No fuzzy shortlist work runs when Gemini is off. When
-it is on, shortlist staging rotates fairly across selected servers and has hard
-per-run ceilings of 250 attempted rows and 1,000,000 local comparisons. The
-request contains sanitized channel/category text and a bounded shortlist of
-exact real EPGShare candidates; it never contains
-provider credentials, provider URLs, playlists, or the full guide. The model
-must return schema-valid structured data and can select only a supplied
-candidate. Only a `HIGH` result stores that exact, locally verified candidate
-ID/name. It remains advisory: the row stays `enabled=FALSE` and
-`action=REVIEW` until a person verifies and approves it. An `ABSTAIN` or a
-below-`HIGH` result leaves the existing source/ID unchanged and writes only an
-`ai-review-v1` reason/note. This marks the row for manual review so later rows
-can advance in subsequent bounded runs. Quota exhaustion, malformed output,
-or an API outage makes no row change and remains retryable; it does not fail
-the deterministic recheck or activate a row. The free Gemini API tier may use
+Gemini verification occurs only after Smart Rules and is capped at 200 affected
+rows per run and 50 rows per policy batch. Scheduled Workflow 1 enables it;
+manual dispatch may turn it off, in which case no shortlist work runs. The
+request contains sanitized channel/category text and
+two to eight exact real, same-snapshot programme-verified EPGShare choices; it
+never contains credentials, provider URLs, playlists, or the full guide. Two
+fixed local rankers must independently select the same top candidate, each
+with score at least 96 and margin at least 8. Gemini must return schema-valid
+`HIGH` for the opaque key bound to that exact candidate. The integration then
+rechecks the complete descriptor-bound XML/TXT ID sets, exact real candidate,
+programme horizon, terminal Sheet row, OPEN alerts, and current provider
+identity. Only this full agreement may write enabled `AUTO_EPGSHARE` with an
+`ai-verified-v2` binding. `ABSTAIN`, lower confidence, an invented key, stale
+evidence, quota exhaustion, malformed output, or API outage makes no row
+change and does not block deterministic work. The free Gemini API tier may use
 submitted data to improve Google products.
 
-Before proposals are evaluated, the integration may register run-local
-cross-server aliases from the authoritative mapping snapshot. Evidence is
-limited to enabled human `MANUAL` or `APPROVED` EPGShare rows. One normalized
-alias must resolve to the same exact, currently corroborated, real, non-`ALL`
-EPG ID on at least two distinct server IDs. Any open identity alert, competing
-ID, conflict with the static approved-alias registry, dummy identity, or
-case/Unicode-normalization ambiguity excludes unsafe evidence or rejects the
-group. `AUTO_EPGSHARE` rows and disabled AI `REVIEW` suggestions are never
-evidence. Registration is only a deterministic identity hint: the proposed row
-must still pass its normal market, catalog, and same-snapshot programme gates.
-The aliases are rebuilt for each run and are not written to a knowledge file;
-neither Gemini nor its output writes matcher rules.
+Before proposals are evaluated, the integration rebuilds durable alias memory
+from the authoritative private mapping snapshot. One enabled current human
+`MANUAL` or `APPROVED` EPGShare row may teach an exact alias/market/target.
+Automatic `AUTO_EPGSHARE` evidence is weaker: its immutable `auto-map-v1` or
+tamper-evident `ai-verified-v2` provenance must agree on the identical exact
+current real, non-`ALL` target across at least two distinct unchanged servers.
+Any open identity alert, competing ID, static-rule conflict, dummy identity,
+provider drift, or case/Unicode ambiguity excludes or rejects the group. A
+registered alias remains only a deterministic hint; the proposed row must
+still pass the normal market, catalog, and same-snapshot programme gates. No
+learned file or public mapping data is written.
 
 ### EPGShare XML/text catalog rollover contract
 
@@ -542,7 +547,7 @@ Workflow 1 additionally maps its controls to these optional arguments:
 --review-recheck-mode off|dry-run|apply
 --review-recheck-servers server_1 [server_2 server_3]
 --use-gemini-ai
---ai-review-limit 10|25|50
+--ai-review-limit 10|25|50|100|200
 ```
 
 `--use-gemini-ai` requires `GEMINI_API_KEY` in the environment and a recheck
@@ -564,41 +569,46 @@ mapping_snapshot_manifest.json
 ```
 
 Full inventory and mapping snapshots are not uploaded as public-repository
-artifacts. The manual sync workflow retains only aggregate `summary.json` for
-seven days.
+artifacts. Workflow 1 retains only aggregate `summary.json` for seven days.
+
+The displayed GitHub summary is intentionally compact: a per-server table for
+total, EPGShare-enabled, native-enabled, review, and placeholder/excluded
+channels, followed by the most important results from that run. Detailed
+diagnostic counters live in the downloadable `summary.json` artifact.
 
 Catalog rollover evidence is available without publishing the differing IDs.
-The GitHub run summary shows:
+The detailed artifact records:
 
-| Run-summary label | `summary.json` field | Meaning |
+| Detail | `summary.json` field | Meaning |
 |---|---|---|
 | EPG catalog alignment mode | `epgshare_catalog_corroboration_mode` | `exact` when the ID sets are identical; `bounded-drift` when the small-rollover rules were used. |
 | EPG IDs confirmed in both catalogs | `epgshare_shared_catalog_channels` | Size of the exact, case-sensitive intersection. |
 | XML-only EPG IDs quarantined | `epgshare_xml_only_catalog_channels` | IDs found only in the XML file and excluded from automatic approval. |
 | Text-only EPG IDs quarantined | `epgshare_text_only_catalog_channels` | IDs found only in the text file and excluded from automatic approval. |
 
-The recheck portion of the same summary uses exact counters rather than a
+The recheck portion of `summary.json` uses exact counters rather than a
 provider-total subtraction:
 
-| Run-summary label | `summary.json` field | Meaning |
+| Detail | `summary.json` field | Meaning |
 |---|---|---|
 | Existing REVIEW recheck mode | `review_recheck_mode` | `off`, `dry-run`, or `apply`. |
 | Existing REVIEW channels eligible | `review_recheck_eligible_rows` | Rows that passed the current provider, state, drift, and alert filters. |
 | Existing REVIEW channels checked | `review_recheck_considered_rows` | Eligible rows submitted to Smart Rules. |
-| Existing REVIEW channels safely matched | `review_recheck_safe_matches` | Rows that passed the deterministic matcher and programme gate. |
+| Existing REVIEW channels safely processed | `review_recheck_safe_matches` | Locally safe deterministic EPG, native, placeholder, or heading decisions plus strict AI updates that passed their applicable gates. |
 | Existing channels still requiring review | `review_recheck_still_review_rows` | Checked rows that Smart Rules did not verify. |
 | Existing REVIEW channels skipped by safety checks | `review_recheck_skipped_rows` | Disabled REVIEW rows in the selected scope excluded because they were missing, drifted, alerted, or held an untracked manual candidate. |
-| Safe matches deferred by the write limit | `review_recheck_deferred_rows` | Verified rows held for a later run by the 1,000-row apply cap. |
+| Deterministic decisions deferred by the write limit | `review_recheck_deferred_rows` | Verified EPGShare, native, placeholder, or heading decisions held for the next scheduled run by the shared 5,000-row deterministic cap. |
 | Existing REVIEW rows updated in Google Sheet | `review_recheck_rows_updated` | Exact existing-row updates confirmed by the post-write reread. |
 | Native EPG candidates found | `native_review_candidates` | Eligible Server 2/3 rows with a fresh non-conflicting provider/M3U native ID. |
 | Native EPG matches verified | `native_review_verified` | Candidates that also passed exact XMLTV ID, display-name uniqueness, and current-programme gates. |
 | Native EPG matches persisted | `native_review_persisted` | Verified `KEEP_PANEL` updates confirmed after an apply write. This remains zero in dry-run. |
-| Native EPG matches deferred | `native_review_deferred` | Verified native rows held for the next apply run by the shared 1,000-row deterministic cap. |
+| Native EPG matches deferred | `native_review_deferred` | Verified native rows held for the next run by the shared 5,000-row deterministic cap. |
 | Native EPG sources unavailable | `native_review_source_unavailable` | Server 2/3 native XMLTV sources that could not be safely validated; their rows remain REVIEW. |
 | Channels considered by Gemini | `ai_review_considered_rows` | Unresolved rows included in bounded Gemini review. |
-| Gemini HIGH suggestions found | `ai_review_high_suggestions_found` | Schema-valid `HIGH` suggestions backed by a supplied, locally verified candidate; in dry-run these are findings only. |
-| Gemini HIGH suggestions saved for manual approval | `ai_review_high_suggestions_persisted` | `HIGH` suggestions confirmed in the Sheet after an apply write while still disabled in `REVIEW`. |
-| Gemini reviews left unresolved | `ai_review_abstained_rows` | `ABSTAIN` or below-`HIGH` results marked `ai-review-v1` for manual review without changing source/ID. |
+| Rows deferred from Gemini | `ai_review_deferred_rows` | Otherwise eligible unresolved rows held for a later scheduled run by the 200-row AI cap. |
+| Gemini HIGH responses found | `ai_review_high_suggestions_found` | Schema-valid `HIGH` responses choosing a supplied opaque candidate; this is not yet an approval count. |
+| AI-verified channels enabled | `ai_review_high_suggestions_persisted` | Rows where both local rankers, Gemini HIGH, catalog/programme checks, and terminal Sheet/provider/alert rereads all agreed and the enabled update was confirmed. |
+| Gemini reviews left unresolved | `ai_review_abstained_rows` | Rows that failed or abstained at any strict agreement gate and therefore remained unchanged in `REVIEW`. |
 | Gemini reviews unavailable or rejected | `ai_review_error_rows` | API failures or invalid responses that made no row change and remain retryable. |
 
 `summary.json` also keeps the individual `review_recheck_excluded_*` counts,
@@ -609,10 +619,10 @@ Run-local cross-server learning records these audit counters:
 
 | `summary.json` field | Meaning |
 |---|---|
-| `cross_server_alias_evidence_rows` | Eligible enabled human mapping rows examined as evidence. |
+| `cross_server_alias_evidence_rows` | Eligible current human or provenance-bound automatic mapping rows examined as evidence. |
 | `cross_server_alias_groups_considered` | Normalized alias/market groups evaluated. |
-| `cross_server_aliases_registered` | Non-conflicting aliases supported by at least two distinct servers and added for this run. |
-| `cross_server_alias_groups_rejected` | Evidence groups rejected for fewer than two supporting servers, competing IDs, or a conflicting static rule. |
+| `cross_server_aliases_registered` | Non-conflicting aliases admitted from one human approval or matching automatic evidence on at least two distinct servers. |
+| `cross_server_alias_groups_rejected` | Evidence groups rejected for insufficient provenance/support, competing IDs, drift, alerts, or a conflicting static rule. |
 
 `summary.json` also records `epgshare_catalog_channels`,
 `epgshare_text_catalog_channels`, `epgshare_catalog_drift_channels`, and
@@ -729,13 +739,12 @@ out read-only and generated files are not committed.
 
 ## Workflows and scheduling
 
-- `.github/workflows/channel_inventory_sync.yml` is a manual bootstrap or
-  on-demand inventory check. `update_google_sheet` controls new-row appends.
-  `recheck_existing_review` is independently `off` (default), `dry-run`, or
-  `apply`; `recheck_server` scopes it to one server or all three. Optional
-  `use_gemini_ai` enables advisory suggestions and `ai_review_limit` caps them
-  at 10, 25, or 50 rows. Gemini requires the `GEMINI_API_KEY` repository
-  secret and cannot be enabled when recheck mode is `off`.
+- `.github/workflows/channel_inventory_sync.yml` runs daily at 02:17 in
+  `America/Toronto`, before publication, and can also be dispatched manually.
+  Scheduled/default settings append missing rows, recheck all servers in
+  `apply`, and enable strict Gemini verification. Manual inputs may select
+  `off`, `dry-run`, or `apply`, one server or all, and an AI cap of 10, 25, 50,
+  100, or 200. Gemini requires the `GEMINI_API_KEY` repository secret.
 - `.github/workflows/main.yml` runs daily at 04:37 in `America/Toronto` and may
   also be started manually. It performs a refresh with Sheet writes, builds,
   validates, and deploys.
@@ -862,15 +871,19 @@ hashes are checked before deployment.
   inventory row and a real programme schedule are not the same guarantee.
 - New rows are discovered automatically. Exact, single-candidate,
   region-consistent EPGShare identities with a strong same-snapshot programme
-  guide are activated automatically. All fuzzy, ambiguous, adult, dummy,
-  generic-numbered, or weak-guide matches require human review.
-- Existing `REVIEW` rows are retried only through the manual Workflow 1
-  recheck. One apply run activates at most 1,000 verified matches;
-  reruns continue a larger backlog. Gemini inspects at most 50 unresolved rows
-  and never activates them.
+  guide are activated automatically. Verified placeholder families may receive
+  an approved dummy guide and decorative headings may be disabled as `IGNORE`;
+  ambiguous, adult-real, unsafe numbered, or weak-guide identities remain review.
+- Existing `REVIEW` rows are retried by the daily Workflow 1 recheck. One run
+  may apply 5,000 deterministic decisions and may consider at most 200 affected
+  rows through strict AI verification; any safe remainder continues on the next
+  schedule. AI can activate only the exact target independently selected by
+  both local rankers and must pass every current catalog, programme, provider,
+  Sheet, and alert gate.
 - Provider channel totals, published-output totals, and EPG-covered totals do
-  not define the review backlog. Use the workflow's exact eligible, checked,
-  matched, unresolved, skipped, and deferred counters for the selected scope.
+  not define the review backlog. Use `summary.json` for the exact eligible,
+  checked, matched, unresolved, skipped, and deferred counters for the selected
+  scope.
 - A row-level ambiguous result goes to `REVIEW`; a text catalog that is itself
   contradictory about real/dummy status or country market fails the full
   preflight before rows are written.

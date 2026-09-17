@@ -6,13 +6,15 @@ This module deliberately adds a narrower production boundary around it:
 * the default boundary considers only previously unseen identities;
 * callers may explicitly allowlist existing disabled ``REVIEW`` identities;
 * Server 1's native EPG ID is never supplied to the matcher;
-* only an explicit set of deterministic matcher methods may become automatic;
-* fuzzy and broader inference methods remain disabled REVIEW suggestions;
+* only an explicit set of deterministic structural matcher methods may become
+  automatic; fuzzy, containment, near-exact, and legacy methods remain REVIEW;
 * a candidate is not enabled until the same combined XMLTV source snapshot
   declares the exact case-sensitive ID and its programme gate proves at least
   two informative entries spanning a six-hour future horizon;
 * any second ID blocks automation; and
-* adult, generic-numbered, dummy, and uncertain-market results remain REVIEW;
+* verified adult/24x7/event/numbered-bank classifications may use an exact
+  dummy guide without pretending that the dummy has real programme evidence;
+* decorative headings remain disabled ``IGNORE`` rows;
 * personalization metadata is never approved or changed here.
 
 The adapter is intentionally free of network and Google Sheets code.  Callers
@@ -42,21 +44,35 @@ STRICT_ENGINE_SOURCE_SHA256 = (
 MIN_INFORMATIVE_FUTURE_PROGRAMMES = 2
 MIN_FUTURE_HORIZON_SECONDS = 6 * 60 * 60
 
-# These methods are exact identity operations.  Coarser legacy methods are not
-# included because one shared method label can hide category-language or panel-
-# hint logic that is too broad for unattended Sheet writes.
+# These methods are deterministic structural identity operations.  They still
+# pass the adapter's independent exact-ID, single-market, ambiguity and strong
+# programme gates before a real EPGShare mapping can be written.  Fuzzy,
+# containment, near-exact, and legacy rules are deliberately absent.
 SAFE_REAL_METHODS = frozenset(
     {
         "approved_knowledge",
+        "canonical_identity",
+        "category_language_default",
+        "descriptor_relaxed",
+        "edition_aware",
+        "spacing_compact",
         "strict",
+        "token_multiset",
         "verified_station_identity",
     }
 )
 
-# Dummies do not have a real channel schedule to validate.  Version 1 therefore
-# keeps every AUTO_DUMMY result review-only instead of inventing a weaker second
-# finalization path.
-SAFE_DUMMY_METHODS: frozenset[str] = frozenset()
+# These pinned rules classify streams that intentionally have no stable linear
+# schedule.  Their exact dummy ID and classification family are verified below;
+# they never borrow the real-programme finalization path.
+SAFE_DUMMY_METHODS = frozenset(
+    {
+        "safety_rule",
+        "virtual_360_event_bank",
+        "synthetic_numbered_genre_slot",
+        "inventory_numbered_bank",
+    }
+)
 DUMMY_REVIEW_METHODS = frozenset(
     {
         "safety_rule",
@@ -71,16 +87,10 @@ DUMMY_REVIEW_METHODS = frozenset(
 FORBIDDEN_AUTOMATIC_METHODS = frozenset(
     {
         "contextual_fuzzy",
-        "canonical_identity",
         "regional_context_containment",
         "near_exact_orthography",
         "category_language_equivalence",
-        "category_language_default",
         "regional_catalog_extension",
-        "edition_aware",
-        "descriptor_relaxed",
-        "spacing_compact",
-        "token_multiset",
         "verified_legacy_rule",
         "verified_legacy_exact",
         "panel",
@@ -133,6 +143,28 @@ _ADULT_CONFUSABLE_SKELETON = str.maketrans(
     }
 )
 _DUMMY_ID_RE = re.compile(r"(?:^|[._/\\-])dummy(?:[._/\\-]|$)", re.IGNORECASE)
+_ADULT_DUMMY_IDS = frozenset({"adult.programming.dummy.us"})
+_CONTINUOUS_DUMMY_IDS = frozenset({"24.7.dummy.us", "movie.dummy.us"})
+_EVENT_DUMMY_IDS = frozenset(
+    {
+        "ppv.events.dummy.us",
+        "espn+.dummy.us",
+        "flo.events.dummy.us",
+        "fite.tv.dummy.us",
+        "trillertv.dummy.us",
+    }
+)
+_NUMBERED_BANK_DUMMY_IDS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "virtual_360_event_bank": frozenset({"ppv.events.dummy.us"}),
+        "synthetic_numbered_genre_slot": frozenset(
+            {"movie.dummy.us", "ppv.events.dummy.us"}
+        ),
+        "inventory_numbered_bank": frozenset(
+            {"movie.dummy.us", "ppv.events.dummy.us"}
+        ),
+    }
+)
 _GENERIC_NUMBER_TOKENS = frozenset(
     {
         "channel",
@@ -224,6 +256,84 @@ def _append_note(existing: object, addition: object) -> str:
     return old or new
 
 
+def automatic_mapping_binding_sha256(
+    *,
+    server_id: object,
+    stream_id: object,
+    channel_name: object,
+    category_name: object,
+    epg_id: object,
+    match_method: object,
+    market: object,
+    source_sha256: object,
+) -> str:
+    """Bind deterministic approval provenance to one exact mapping row."""
+
+    fields = (
+        _text(server_id),
+        _text(stream_id),
+        _text(channel_name),
+        _text(category_name),
+        _text(epg_id),
+        _text(match_method).casefold(),
+        _market_code(market),
+        _text(source_sha256).casefold(),
+    )
+    if (
+        not all(fields[index] for index in (0, 1, 2, 4, 5, 6))
+        or not _valid_sha256(fields[7])
+        or fields[6] in {"ALL", "UNKNOWN", "AMBIGUOUS"}
+    ):
+        raise ValueError("automatic mapping provenance fields are invalid")
+    digest = hashlib.sha256()
+    for value in (
+        "auto-map-v2",
+        *fields,
+        STRICT_MATCHER_VERSION,
+        STRICT_MATCHER_BUILD_ID,
+        STRICT_MATCHER_SOURCE_SHA256,
+        STRICT_ENGINE_SOURCE_SHA256,
+    ):
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def automatic_mapping_provenance_note(
+    *,
+    server_id: object,
+    stream_id: object,
+    channel_name: object,
+    category_name: object,
+    epg_id: object,
+    match_method: object,
+    market: object,
+    source_sha256: object,
+) -> str:
+    """Return compact target-bound v2 provenance plus the legacy sync marker."""
+
+    method = _text(match_method).casefold()
+    normalized_market = _market_code(market)
+    source_hash = _text(source_sha256).casefold()
+    binding = automatic_mapping_binding_sha256(
+        server_id=server_id,
+        stream_id=stream_id,
+        channel_name=channel_name,
+        category_name=category_name,
+        epg_id=epg_id,
+        match_method=method,
+        market=normalized_market,
+        source_sha256=source_hash,
+    )
+    # ``auto-map-v1`` remains as a compatibility token for the existing Sheet
+    # write boundary.  Learned memory accepts only the complete bound v2 record.
+    return (
+        f"auto-map-v2 method={method}; market={normalized_market}; "
+        f"source_sha256={source_hash}; binding_sha256={binding} | auto-map-v1"
+    )
+
+
 def _stream_sort_key(value: object) -> tuple[int, int | str, str]:
     text = _text(value)
     if text.isdigit():
@@ -239,6 +349,54 @@ def _has_adult_evidence(channel_name: str, category_name: str) -> bool:
         _STRONG_ADULT_EVIDENCE_RE.search(context)
         or re.search(r"\badults?\b", bare_adult_evidence, re.IGNORECASE)
     )
+
+
+def _safe_dummy_classification(
+    *,
+    method: str,
+    epg_id: str,
+    matcher_reason: str,
+    channel_name: str,
+    category_name: str,
+) -> bool:
+    """Verify a pinned no-schedule classification without programme fiction.
+
+    Dummy guides are useful only when the matcher has established *why* a real
+    one-to-one schedule cannot exist.  Bind every accepted method to the exact
+    dummy family it is allowed to produce.  ``safety_rule`` covers several
+    unrelated pinned rules, so its target and evidence are narrowed again here.
+    """
+
+    normalized_method = _text(method).casefold()
+    normalized_id = _text(epg_id).casefold()
+    if normalized_method not in SAFE_DUMMY_METHODS:
+        return False
+
+    numbered_targets = _NUMBERED_BANK_DUMMY_IDS.get(normalized_method)
+    if numbered_targets is not None:
+        return normalized_id in numbered_targets
+
+    if normalized_method != "safety_rule":
+        return False
+    if normalized_id in _ADULT_DUMMY_IDS:
+        return _has_adult_evidence(channel_name, category_name)
+    if normalized_id in _EVENT_DUMMY_IDS:
+        return bool(
+            re.search(
+                r"\b(?:event|events|slot|slots|ppv|sports\s+pass|whip[- ]around)\b",
+                matcher_reason,
+                re.IGNORECASE,
+            )
+        )
+    if normalized_id in _CONTINUOUS_DUMMY_IDS:
+        return bool(
+            re.search(
+                r"\b(?:24\s*[/x.-]\s*7|24[- ]hour|continuous)\b",
+                matcher_reason,
+                re.IGNORECASE,
+            )
+        )
+    return False
 
 
 def _is_generic_numbered_or_blank(channel_name: str) -> bool:
@@ -474,7 +632,9 @@ class ScheduleEvidence:
             epg_id = _text(raw_id)
             if not epg_id:
                 continue
-            count = int(raw_count)
+            if isinstance(raw_count, bool) or not isinstance(raw_count, int):
+                raise ValueError("informative future programme counts must be integers")
+            count = raw_count
             if count < 0:
                 raise ValueError("informative future programme counts cannot be negative")
             counts[epg_id] = count
@@ -483,16 +643,25 @@ class ScheduleEvidence:
             epg_id = _text(raw_id)
             if not epg_id:
                 continue
-            stop = int(raw_stop)
+            if isinstance(raw_stop, bool) or not isinstance(raw_stop, int):
+                raise ValueError("informative future stop epochs must be integers")
+            stop = raw_stop
             if stop < 0:
                 raise ValueError("informative future stop epochs cannot be negative")
             horizons[epg_id] = stop
-        gates = {
-            _text(raw_id): bool(passed)
-            for raw_id, passed in self.gate_passed_by_id.items()
-            if _text(raw_id)
-        }
-        checked_at = int(self.checked_at_epoch)
+        gates: dict[str, bool] = {}
+        for raw_id, passed in self.gate_passed_by_id.items():
+            epg_id = _text(raw_id)
+            if not epg_id:
+                continue
+            if not isinstance(passed, bool):
+                raise ValueError("programme gate results must be booleans")
+            gates[epg_id] = passed
+        if isinstance(self.checked_at_epoch, bool) or not isinstance(
+            self.checked_at_epoch, int
+        ):
+            raise ValueError("checked_at_epoch must be an integer")
+        checked_at = self.checked_at_epoch
         if checked_at < 0:
             raise ValueError("checked_at_epoch cannot be negative")
         object.__setattr__(self, "declared_ids", declared)
@@ -571,8 +740,11 @@ class FinalizedMatch:
     def sheet_patch(self, *, existing_notes: object = "") -> dict[str, str]:
         proposal = self.proposal
         has_target = bool(proposal.target_epg_id)
+        inactive_action = (
+            "IGNORE" if proposal.matcher_action == "IGNORE" else "REVIEW"
+        )
         patch: dict[str, str] = {
-            "action": proposal.matcher_action if self.approved else "REVIEW",
+            "action": proposal.matcher_action if self.approved else inactive_action,
             "enabled": "TRUE" if self.approved else "FALSE",
             "reason": _bounded(self.reason),
         }
@@ -585,16 +757,28 @@ class FinalizedMatch:
             patch["epg_feed"] = proposal.target_feed or "ALL_SOURCES1"
             patch["epg_id"] = proposal.target_epg_id
 
-        provenance = (
-            f"auto-map-v1 method={proposal.match_method or 'none'}; "
-            f"market={proposal.explicit_market or 'unknown'}; "
-            f"matcher={proposal.matcher_identity.version}; "
-            f"matcher_build={proposal.matcher_identity.build_id}; "
-            f"matcher_sha256={proposal.matcher_identity.source_sha256}; "
-            f"engine_sha256={proposal.matcher_identity.engine_source_sha256}; "
-            f"catalog_sha256={proposal.catalog_source_sha256 or 'unavailable'}; "
-            f"source_sha256={self.schedule_source_sha256 or 'not-finalized'}"
-        )
+        if self.approved and proposal.matcher_action == "AUTO_EPGSHARE":
+            provenance = automatic_mapping_provenance_note(
+                server_id=proposal.server_id,
+                stream_id=proposal.stream_id,
+                channel_name=proposal.channel_name,
+                category_name=proposal.category_name,
+                epg_id=proposal.target_epg_id,
+                match_method=proposal.match_method,
+                market=proposal.explicit_market,
+                source_sha256=self.schedule_source_sha256,
+            )
+        else:
+            provenance = (
+                f"auto-map-v1 method={proposal.match_method or 'none'}; "
+                f"market={proposal.explicit_market or 'unknown'}; "
+                f"matcher={proposal.matcher_identity.version}; "
+                f"matcher_build={proposal.matcher_identity.build_id}; "
+                f"matcher_sha256={proposal.matcher_identity.source_sha256}; "
+                f"engine_sha256={proposal.matcher_identity.engine_source_sha256}; "
+                f"catalog_sha256={proposal.catalog_source_sha256 or 'unavailable'}; "
+                f"source_sha256={self.schedule_source_sha256 or 'not-finalized'}"
+            )
         patch["notes"] = _append_note(existing_notes, provenance)
         if not set(patch).issubset(_SHEET_PATCH_COLUMNS):
             raise AssertionError("auto-map adapter attempted to alter unsupported columns")
@@ -848,8 +1032,16 @@ def _proposal_from_match(
     )
     eligible = True
     rejection = ""
+    sheet_action = action if action in {"AUTO_EPGSHARE", "AUTO_DUMMY"} else "REVIEW"
 
-    if action == "AUTO_EPGSHARE":
+    if action == "AUTO_DUMMY" and method == "heading_placeholder":
+        # Decorative headings are inventory furniture, not channels.  Preserve
+        # the classification while keeping them permanently disabled and out of
+        # the unresolved mapping queue.
+        eligible = False
+        sheet_action = "IGNORE"
+        rejection = "Decorative heading/placeholder is disabled and ignored"
+    elif action == "AUTO_EPGSHARE":
         if method not in SAFE_REAL_METHODS:
             eligible = False
             rejection = f"Matcher method {method or 'unknown'} is review-only"
@@ -857,8 +1049,18 @@ def _proposal_from_match(
             eligible = False
             rejection = "EPGShare action did not return an EPGShare target"
     elif action == "AUTO_DUMMY":
-        eligible = False
-        rejection = "AUTO_DUMMY is review-only in Version 1"
+        if target_source != "dummy":
+            eligible = False
+            rejection = "AUTO_DUMMY did not return a dummy target"
+        elif not _safe_dummy_classification(
+            method=method,
+            epg_id=target_epg_id,
+            matcher_reason=matcher_reason,
+            channel_name=channel_name,
+            category_name=category_name,
+        ):
+            eligible = False
+            rejection = "Dummy classification is not in an approved no-schedule family"
     else:
         eligible = False
         rejection = (
@@ -887,24 +1089,30 @@ def _proposal_from_match(
         elif len(target_regions) != 1 or _market_code(explicit_market) not in target_regions:
             eligible = False
             rejection = "Target catalog region does not match the explicit channel market"
+    elif action == "AUTO_DUMMY":
+        target_kinds = catalog.target_kinds(target_epg_id)
+        if target_kinds != frozenset({"dummy"}):
+            eligible = False
+            rejection = "Target lacks unambiguous dummy-catalog type evidence"
     if second_epg_id:
         eligible = False
         rejection = "A second EPG ID makes the match ambiguous"
-    if not route_explicit or explicit_market in {"", "ALL", "UNKNOWN", "AMBIGUOUS"}:
-        eligible = False
-        rejection = "Market is unknown or was not established by explicit evidence"
-    elif (
-        len(route_plan) != 1
-        or _market_code(route_plan[0]) != _market_code(explicit_market)
-    ):
-        eligible = False
-        rejection = "Market route is ambiguous and requires review"
-    if _is_generic_numbered_or_blank(channel_name):
-        eligible = False
-        rejection = "Blank or generic numbered channel identity requires review"
-    if _has_adult_evidence(channel_name, category_name):
-        eligible = False
-        rejection = "Adult category/name evidence always requires review"
+    if action == "AUTO_EPGSHARE":
+        if not route_explicit or explicit_market in {"", "ALL", "UNKNOWN", "AMBIGUOUS"}:
+            eligible = False
+            rejection = "Market is unknown or was not established by explicit evidence"
+        elif (
+            len(route_plan) != 1
+            or _market_code(route_plan[0]) != _market_code(explicit_market)
+        ):
+            eligible = False
+            rejection = "Market route is ambiguous and requires review"
+        if _is_generic_numbered_or_blank(channel_name):
+            eligible = False
+            rejection = "Blank or generic numbered channel identity requires review"
+        if _has_adult_evidence(channel_name, category_name):
+            eligible = False
+            rejection = "Adult category/name evidence cannot receive a real EPG mapping"
     if server_id == "server_1" and (
         action == "KEEP_PANEL"
         or _text(match.get("source")).casefold() == "panel"
@@ -919,7 +1127,7 @@ def _proposal_from_match(
         stream_id=stream_id,
         channel_name=channel_name,
         category_name=category_name,
-        matcher_action=action if action in {"AUTO_EPGSHARE", "AUTO_DUMMY"} else "REVIEW",
+        matcher_action=sheet_action,
         target_source=target_source,
         target_feed=target_feed,
         target_epg_id=target_epg_id,
@@ -1119,7 +1327,14 @@ def finalize_proposal(
     proposal: MatchProposal,
     evidence: ScheduleEvidence,
 ) -> FinalizedMatch:
-    """Enable a proposal only after exact, informative XMLTV verification."""
+    """Finalize a real schedule or a verified no-schedule classification.
+
+    Real EPGShare targets require exact, informative XMLTV evidence below.
+    Exact dummy classifications deliberately bypass that programme gate: a
+    dummy exists precisely because the stream has no stable real schedule.
+    Their method, ID, catalog type and classification evidence were already
+    independently checked while constructing the immutable proposal.
+    """
 
     if not proposal.eligible_for_finalization:
         return FinalizedMatch(
@@ -1127,6 +1342,20 @@ def finalize_proposal(
             approved=False,
             reason=proposal.decision_reason,
             schedule_source_sha256=evidence.source_sha256 if evidence.usable else "",
+        )
+    if proposal.matcher_action == "AUTO_DUMMY":
+        return FinalizedMatch(
+            proposal=proposal,
+            approved=True,
+            reason=_bounded(
+                "Automatically classified as a no-schedule stream: "
+                f"method={proposal.match_method}; dummy_id={proposal.target_epg_id}; "
+                f"matcher={proposal.matcher_identity.version}; "
+                f"catalog_sha256={proposal.catalog_source_sha256}"
+            ),
+            # This is catalog provenance, not a claim that a real programme
+            # schedule was validated for the dummy channel.
+            schedule_source_sha256=proposal.catalog_source_sha256,
         )
     if not evidence.usable:
         return FinalizedMatch(
@@ -1222,6 +1451,8 @@ __all__ = [
     "STRICT_MATCHER_BUILD_ID",
     "STRICT_MATCHER_SOURCE_SHA256",
     "STRICT_MATCHER_VERSION",
+    "automatic_mapping_binding_sha256",
+    "automatic_mapping_provenance_note",
     "finalize_proposal",
     "prepare_resolver_strict",
     "propose_new_channel_matches",

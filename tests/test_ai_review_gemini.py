@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import unittest
@@ -311,6 +312,138 @@ class GeminiReviewTests(unittest.TestCase):
         rows = untrusted_rows(transport.post.call_args)
         self.assertIn("[REDACTED_CREDENTIAL]", rows[0]["channel_name"])
         self.assertEqual(rows[0]["category"], "[REDACTED_URL]")
+
+    def test_double_encoded_configured_password_is_blocked_before_network(self) -> None:
+        transport = mock.Mock()
+        item = review(
+            "local",
+            name="Ordinary channel old%252Fsecret with encoded private value",
+        )
+
+        outcome = ai.review_flagged_channels(
+            (item,),
+            api_key="key",
+            sensitive_values=("old/secret",),
+            transport=transport,
+        )
+
+        self.assertEqual(outcome.results[0].decision, ai.ReviewDecision.ERROR)
+        self.assertEqual(outcome.results[0].error_code, "UNSAFE_REQUEST")
+        self.assertEqual(outcome.batches_attempted, 1)
+        self.assertEqual(outcome.batches_succeeded, 0)
+        transport.post.assert_not_called()
+
+    def test_base64_encoded_configured_password_is_blocked_before_network(self) -> None:
+        transport = mock.Mock()
+        password = "Sup3rSecret-Passw0rd!"
+        reflected = base64.urlsafe_b64encode(password.encode("utf-8")).decode(
+            "ascii"
+        ).rstrip("=")
+        item = review(
+            "local",
+            name=f"Ordinary channel {reflected} with encoded private value",
+        )
+
+        outcome = ai.review_flagged_channels(
+            (item,),
+            api_key="key",
+            sensitive_values=(password,),
+            transport=transport,
+        )
+
+        self.assertEqual(outcome.results[0].decision, ai.ReviewDecision.ERROR)
+        self.assertEqual(outcome.results[0].error_code, "UNSAFE_REQUEST")
+        transport.post.assert_not_called()
+
+    def test_html_entity_encoded_password_is_blocked_before_network(self) -> None:
+        transport = mock.Mock()
+        password = "S3cr&t!"
+        item = review(
+            "local",
+            name="Ordinary channel S3cr%26amp%3Bt! with encoded private value",
+        )
+
+        outcome = ai.review_flagged_channels(
+            (item,),
+            api_key="key",
+            sensitive_values=(password,),
+            transport=transport,
+        )
+
+        self.assertEqual(outcome.results[0].decision, ai.ReviewDecision.ERROR)
+        self.assertEqual(outcome.results[0].error_code, "UNSAFE_REQUEST")
+        transport.post.assert_not_called()
+
+    def test_over_nested_html_entities_fail_closed_before_network(self) -> None:
+        transport = mock.Mock()
+        item = review(
+            "local",
+            name="Channel &amp;amp;amp;amp;amp; private",
+        )
+
+        outcome = ai.review_flagged_channels(
+            (item,),
+            api_key="key",
+            sensitive_values=("not-present",),
+            transport=transport,
+        )
+
+        self.assertEqual(outcome.results[0].error_code, "UNSAFE_REQUEST")
+        transport.post.assert_not_called()
+
+    def test_double_encoded_url_and_userinfo_are_blocked_before_network(self) -> None:
+        transport = mock.Mock()
+        item = ai.ReviewRequest(
+            review_id="local",
+            channel_name="Ordinary channel",
+            category=(
+                "https%253A%252F%252Fpanel-user%253Apanel-pass%2540"
+                "panel.invalid%252Flive"
+            ),
+            market="US",
+            candidates=(candidate("c1"), candidate("c2")),
+        )
+
+        outcome = ai.review_flagged_channels(
+            (item,),
+            api_key="key",
+            sensitive_values=("panel-user", "panel-pass"),
+            transport=transport,
+        )
+
+        self.assertEqual(outcome.results[0].decision, ai.ReviewDecision.ERROR)
+        self.assertEqual(outcome.results[0].error_code, "UNSAFE_REQUEST")
+        transport.post.assert_not_called()
+
+    def test_benign_percent_encoded_channel_name_preserves_normal_review(self) -> None:
+        transport = mock.Mock()
+        transport.post.return_value = response(success_for_wire_ids(["r000001"]))
+
+        outcome = ai.review_flagged_channels(
+            (review("local", name="Sports%20Plus HD"),),
+            api_key="key",
+            sensitive_values=("old/secret",),
+            transport=transport,
+        )
+
+        self.assertEqual(outcome.results[0].decision, ai.ReviewDecision.ABSTAIN)
+        self.assertEqual(outcome.batches_succeeded, 1)
+        transport.post.assert_called_once()
+        self.assertEqual(untrusted_rows(transport.post.call_args)[0]["channel_name"], "Sports%20Plus HD")
+
+    def test_over_nested_percent_encoding_fails_closed(self) -> None:
+        transport = mock.Mock()
+        deeply_encoded_slash = "%252525252F"
+
+        outcome = ai.review_flagged_channels(
+            (review("local", name=f"Channel {deeply_encoded_slash} private"),),
+            api_key="key",
+            sensitive_values=("not-present",),
+            transport=transport,
+        )
+
+        self.assertEqual(outcome.results[0].error_code, "UNSAFE_REQUEST")
+        transport.post.assert_not_called()
 
     def test_duplicate_local_review_ids_are_rejected(self) -> None:
         transport = mock.Mock()

@@ -328,10 +328,11 @@ For `GOOGLE_SERVICE_ACCOUNT_JSON`:
 4. Paste the complete text into the GitHub secret value box.
 5. Click **Add secret**.
 
-### 9C. Optional: add Gemini for unresolved suggestions
+### 9C. Add Gemini for strict unresolved-channel verification
 
-Smart Rules work without Gemini. Add Gemini only if you want Workflow 1 to
-suggest possible EPGShare names for rows that Smart Rules cannot verify.
+Smart Rules work without Gemini, but the automatic backlog workflow uses
+Gemini as a strict second verifier for only the strongest unresolved local
+candidates. Add this key to use the supplied scheduled defaults.
 
 1. Open [Google AI Studio](https://aistudio.google.com/app/apikey).
 2. Sign in and create a Gemini API key.
@@ -342,10 +343,12 @@ suggest possible EPGShare names for rows that Smart Rules cannot verify.
 6. Paste the API key as the value, then click **Add secret**.
 
 Never paste the key into the Sheet, repository, workflow input, issue, or chat.
-The Gemini option is off by default. Google's free tier may use submitted data
-to improve Google products. Version 1 therefore sends only cleaned channel and
-category text plus a short list of real EPGShare candidates—never provider
-credentials, playlist URLs, the full channel list, or the full guide.
+Google's free tier may use submitted data to improve Google products. Version 1
+sends only cleaned channel/category text and opaque choices for two to eight
+real EPGShare candidates—never credentials, provider URLs, playlists, the full
+channel list, or the full guide. Gemini cannot invent an ID. A row is enabled
+only when two fixed local rankers, Gemini `HIGH`, current catalog/programme
+evidence, and terminal Sheet/provider/alert rereads all agree.
 
 Server 1 credentials are used only to discover Server 1's channel list. The EPG
 builder still forces Server 1 programme data to EPGShare and does not download
@@ -379,28 +382,26 @@ object storage and a CDN.
 2. In the left sidebar, click **1 - Sync channels to Google Sheet**.
 3. Click **Run workflow**.
 4. Confirm the branch is **main**.
-5. Leave **Add missing channels to Google Sheet** turned off. It is off by
-   default, which makes this first run report-only.
-6. Leave **Recheck channels already marked REVIEW** set to **off** and leave
-   **Ask Gemini about unresolved recheck candidates** turned off.
+5. Turn **Add missing channels to Google Sheet** off for this preview.
+6. Set **Recheck channels already marked REVIEW** to **dry-run**, choose
+   **all**, and turn Gemini off for this first safety preview.
 7. Click the green **Run workflow** button.
 8. Refresh the page if necessary, then click the new run.
 9. Wait for the run to finish with a green check mark.
-10. Read the run's summary. Confirm **Channels found at providers** is not zero
-   and the run has no warning about a failed server.
-11. The run summary shows how many channels were found, how many are new, how
-    many existing channels were not seen, and whether the EPGShare XML/text
-    catalogs were exactly aligned or in a safe `bounded-drift` rollover.
-12. If you want a copy of those counts, download the artifact whose name begins
+10. Read the compact channel table in the run summary. Confirm each expected
+    server is available and has a nonzero **Total channels** value.
+11. Read **This run** for the safe preview count, native-source availability,
+    Gemini status when enabled, and safety-alert totals.
+12. For every detailed count—including eligible, unresolved, skipped, deferred,
+    catalog-alignment, native, AI, and learning counters—download the artifact whose name begins
     with `skytv-channel-sync-summary-`. It contains only `summary.json` and is
     kept for seven days.
 
 This first run is a safety check. It does not write to Google Sheets. It still
 downloads and streams the large combined EPG file and checks its official ID
 list so that the automatic-match result shown in the report is the same
-decision the write-enabled run will use. The summary labels **EPG IDs confirmed
-in both catalogs**, **XML-only EPG IDs quarantined**, and **Text-only EPG IDs
-quarantined** show the rollover decision without exposing the individual IDs.
+decision the write-enabled run will use. Detailed catalog rollover counts are in
+`summary.json`; the individual differing IDs are never included in the artifact.
 
 ## 12. Run the inventory again and add newly returned channels
 
@@ -412,18 +413,16 @@ queued or running.
 2. Click **Run workflow**.
 3. Confirm the branch is **main**.
 4. Turn on **Add missing channels to Google Sheet** for this second run.
-5. Leave **Recheck channels already marked REVIEW** set to **off** and leave
-   the Gemini option off. This keeps the new-channel import separate from the
-   backlog recheck.
+5. Set **Recheck channels already marked REVIEW** to **apply**, choose **all**,
+   turn Gemini on, and choose the **200** limit. This one run handles new
+   channels and the existing backlog together.
 6. Click **Run workflow**.
 7. Wait for the green check mark.
-8. Open the run summary and note:
-   - **New channels safely matched automatically**;
-   - **New channels left for review**;
-   - **EPG catalog alignment mode** and the shared/XML-only/text-only EPG ID
-     counts;
-   - **Rows added to Google Sheet**; and
-   - **Open alerts awaiting review**.
+8. Open the compact run summary. Check the per-server **Total channels**,
+   **EPGShare enabled**, **Server EPG enabled**, **To review**, and
+   **Other / placeholder** columns, then read **This run** for the applied and
+   alert counts. Download `summary.json` only when you need the complete
+   diagnostic counters.
 9. Return to the Google Sheet and reload the page.
 10. Open the `Mappings` tab.
 11. Filter `action` for `AUTO_EPGSHARE` to see safe exact matches that were
@@ -435,9 +434,9 @@ If the workflow says that the automatic-approval batch exceeded its Version 1
 safety limit, do not bypass the limit. No Sheet write has occurred. Copy the
 exact error and provide it for a one-time review of the unusually large batch.
 
-The ordinary sync never edits or deletes an existing mapping row. It appends
-only a previously unseen `(server_id, stream_id)` pair. The separate, opt-in
-backlog recheck below can update only a small set of schedule fields on eligible
+The new-channel sync never edits or deletes an existing mapping row. It appends
+only a previously unseen `(server_id, stream_id)` pair. The separate backlog
+recheck can update only a small set of schedule fields on eligible
 disabled `REVIEW` rows. A channel that disappears from a provider is counted in
 the workflow summary but is not automatically removed.
 
@@ -452,9 +451,11 @@ same run:
 - the first useful programme starts within six hours and the guide extends at
   least six hours ahead.
 
-Fuzzy, dummy, generic-numbered, adult, ambiguous, or weak-guide results remain
-disabled in `REVIEW`. Server 1 is always matched only to EPGShare; its native
-EPG ID is never used.
+Fuzzy, ambiguous, adult-real, unsafe-numbered, or weak-guide results remain
+disabled in `REVIEW`. Two narrow non-real exceptions are allowed: a verified
+placeholder family may become enabled `AUTO_DUMMY`, and a decorative heading
+may become disabled `IGNORE`. Server 1 is always matched only to EPGShare for
+real programme data; its native EPG ID is never used.
 
 There is one important difference between a channel-level uncertainty and a
 bad source catalog. If the official text catalog labels the same ID as both
@@ -473,74 +474,69 @@ can still serve an exact existing mapping. If it has the same strong station
 identity as a routed new proposal, that new proposal stays disabled in
 `REVIEW`.
 
-### 12A. Recheck channels already waiting in REVIEW
+### 12A. Let the daily workflow reduce channels waiting in REVIEW
 
-Use this after the new-channel sync succeeds. It is also the safe way to work
-through an old `REVIEW` backlog. **Do not edit, sort, insert, or delete rows in
-`Mappings` while an apply run is queued or running.**
+The Section 12 apply run starts the backlog process. After that, Workflow 1
+runs daily before Workflow 2, so you do not need to repeat manual backlog
+runs. **Do not edit, sort, insert, or delete rows in `Mappings` while an apply
+run is queued or running.**
 
-First preview the result without changing the Sheet:
+For any later read-only preview:
 
 1. Open **Actions** → **1 - Sync channels to Google Sheet** → **Run workflow**.
 2. Leave **Add missing channels to Google Sheet** turned off.
 3. Set **Recheck channels already marked REVIEW** to **dry-run**.
-4. Choose **server_1** under **Server backlog to recheck**. Use **all** only
-   after one-server runs behave as expected.
+4. Choose **all** under **Server backlog to recheck**.
 5. Leave Gemini off for the first preview, then click **Run workflow**.
-6. Open the summary. Use the displayed **Existing REVIEW** counts; do not
+6. Open the compact summary. Use the **To review** column for the current broad
+   state, and use the downloaded `summary.json` for exact eligible, checked,
+   safely processed, still-review, skipped, and deferred counters. Do not
    estimate the backlog by subtracting an EPG count from the provider total.
-   The summary separates eligible, checked, safely matched, still-review,
-   skipped, and deferred rows.
 7. A recheck dry-run never edits existing `REVIEW` rows. Keep **Add missing
    channels to Google Sheet** off as shown above so this first preview makes no
    mapping changes of either kind.
 
-Then apply verified Smart Rules matches:
+For an immediate apply outside the daily schedule:
 
 1. Run the same workflow again.
 2. Set **Recheck channels already marked REVIEW** to **apply**.
 3. Keep the same server choice. Turn Gemini on only if `GEMINI_API_KEY` was
    added in Section 9C.
-4. If Gemini is on, choose **10**, **25**, or **50** as its per-run maximum.
+4. If Gemini is on, choose up to **200** affected rows per run.
 5. Start the run and do not touch the Sheet until the run has a green check.
-6. Read **Existing REVIEW channels safely matched** and **Existing REVIEW rows
-   updated in Google Sheet** in the summary.
-   If Gemini is on, **Gemini HIGH suggestions found** is the model result and
-   **Gemini HIGH suggestions saved for manual approval** is the smaller number
-   durably stored in the Sheet. Saved suggestions are still disabled.
-7. If **Safe matches deferred by the write limit** is above zero, run the same
-   apply operation again. One run activates at most 1,000 verified EPG matches,
-   so a large backlog is intentionally completed over several runs.
+6. Read **REVIEW rows safely updated** in the summary. If Gemini is on,
+   **Gemini HIGH responses** is the model result and **verified channels
+   enabled** is the smaller number that passed every local and terminal gate
+   and was durably stored.
+7. If a safe remainder is reported, leave it for the next daily run. You may
+   dispatch another apply only if you need it sooner.
 
 Smart Rules and the exact Server 2/3 native validation lane run before Gemini.
 A verified EPGShare match becomes `AUTO_EPGSHARE`; a verified Server 2/3 native
-match becomes `KEEP_PANEL`. Both are enabled. Gemini receives at most 50 unresolved channels
-per run and cannot approve a row. A `HIGH` suggestion saves its exact,
-locally verified EPGShare ID and candidate name, but the row remains
-`enabled=FALSE` and `action=REVIEW`. An abstention or lower-confidence answer
-keeps the row's existing source and ID, adds an `ai-review-v1` note/reason, and
-moves on to later backlog rows; check that row manually using Section 13. An
-API error or outage makes no change to that row, so a later run can retry it.
-Server 1 is always EPGShare-only—this option never restores or consults native
-Server 1 programme data.
+match becomes `KEEP_PANEL`. Both are enabled. Smart Rules may also enable a
+verified placeholder as `AUTO_DUMMY` or disable a decorative heading as
+`IGNORE`. Gemini sees at most 200 affected rows and only supplied opaque
+candidate keys. It becomes an enabled
+`AUTO_EPGSHARE` row only when Gemini `HIGH` agrees with both strong local
+rankings and all catalog, programme, provider, Sheet, and alert gates. Every
+other answer makes no row change and remains retryable. Server 1 is always
+EPGShare-only.
 
-The recheck can learn safely from your own confirmed work during that run. It
-uses a channel alias only when enabled `MANUAL` or `APPROVED` EPGShare rows on
-at least two different servers agree on the same exact current real channel
-ID. It ignores conflicting matches, open alerts, dummy or ambiguous IDs,
-automatic matches, and Gemini review rows. The suggested channel must still
-pass all normal market, catalog, and programme checks. Nothing is added to a
-separate rules file: the evidence is rebuilt from the private Sheet on every
-run, and Gemini cannot teach Smart Rules directly. The workflow summary shows
-how many human evidence rows and alias groups were considered, registered, or
-rejected.
+The recheck learns safely from the private Sheet. One enabled current human
+`MANUAL` or `APPROVED` row may teach its exact alias/market/EPGShare target.
+Automatic or `ai-verified-v2` evidence must agree on the identical target on at
+least two unchanged servers before it can teach. Conflicts, open alerts, dummy
+or ambiguous IDs, and provider drift are rejected. The target must still pass
+normal market, catalog, and programme checks on every future use. Nothing is
+written to a public rules file; verified decisions become durable evidence in
+the private Sheet and are rebuilt into Smart Rule memory each run.
 
 ## 13. Review only the channels that automation could not safely decide
 
 1. Open the `Mappings` tab.
 2. Use the filter on the `action` column and select only `REVIEW`.
-   To find Gemini-completed rows first, also filter `reason` or `notes` for
-   `ai-review-v1`.
+   These are the rows that deterministic rules, native validation, and strict
+   AI agreement could not safely decide.
 3. For each channel you want in the guide:
    - check `channel_name` and `category_name`;
    - check `region_code`, `genre`, `primary_language`, and the other metadata;
@@ -729,18 +725,25 @@ or setup package.
 
 After the first setup, the system runs automatically:
 
-1. Every day at 04:37 Toronto time, the main workflow checks all three servers.
-2. New streams with one safe exact EPGShare match and a verified programme
-   guide are enabled automatically. Uncertain streams are appended with
-   `enabled=FALSE` and `action=REVIEW`.
-3. The daily workflow does not rematch existing rows or overwrite your manual
-   classifications. Only the manual, opt-in Workflow 1 recheck can change the
-   seven schedule fields of an eligible disabled `REVIEW` row.
-4. The same run reads a temporary local snapshot of the private Sheet, builds
-   and validates the guide, and deploys the XML and JSON outputs.
-5. The standalone **1 - Sync channels to Google Sheet** workflow is manual-only.
-   Use it for the initial setup or whenever you want an extra inventory check.
-6. The existing live-sports workflow continues independently.
+1. Every day at **02:17 Toronto time**, Workflow 1 checks all three servers,
+   appends missing channels, and rechecks eligible existing `REVIEW` rows in
+   `apply` mode.
+2. Smart Rules may apply up to **5,000 deterministic decisions**. Verified real
+   EPGShare matches become `AUTO_EPGSHARE`, Server 2/3 native matches become
+   `KEEP_PANEL`, verified placeholders may become `AUTO_DUMMY`, and decorative
+   headings may become disabled `IGNORE`.
+3. The scheduled run enables strict Gemini verification for at most **200** of
+   the strongest unresolved rows. Gemini can enable only a supplied candidate
+   that also passes both local rankers and every catalog, programme, provider,
+   Sheet, and alert reread; all other rows remain unchanged in `REVIEW`.
+4. Any verified remainder continues automatically on the next daily Workflow 1
+   run. Manual dispatch remains available for a dry-run or an extra immediate
+   apply.
+5. Every day at **04:37 Toronto time**, Workflow 2 refreshes the private Sheet
+   snapshot, builds and validates the guide, and deploys the XML and JSON
+   outputs.
+6. Existing human `MANUAL`/`APPROVED` classifications are never silently
+   remapped, and the existing live-sports workflow continues independently.
 
 If a provider is temporarily unavailable during the daily run, Version 1 keeps
 the last trusted rows in the Sheet. It does not erase channels because a server
@@ -760,11 +763,11 @@ in the official text catalog also stops the full unattended-matching preflight.
 
 Your regular task is:
 
-1. Run Workflow 1 in `dry-run` recheck mode when you want updated backlog
-   counts, then use `apply` to activate up to 1,000 newly verified EPG matches.
+1. Let scheduled Workflow 1 recheck and safely reduce the backlog each day;
+   use a manual `dry-run` only when you want a read-only preview.
 2. Open the Google Sheet and filter `action` to `REVIEW`.
-3. Manually decide only the remaining uncertain rows, including any Gemini
-   suggestions. Leave anything you cannot verify disabled and in review.
+3. Manually decide only the remaining uncertain rows. Leave anything you
+   cannot verify disabled and in review.
 4. Gradually review the unknown personalization metadata described in Section
    13, starting with the languages and interests your users select.
 5. Open `Sync Alerts`, filter `status` to `OPEN`, and follow the alert-resolution
@@ -936,10 +939,9 @@ the inventory see it as new and add it again. Instead:
 - [ ] GitHub Pages source set to **GitHub Actions**
 - [ ] Inventory report-only run completed successfully
 - [ ] Inventory write run completed successfully
-- [ ] Existing `REVIEW` dry-run checked; apply mode repeated until the intended
-      verified backlog is complete
-- [ ] Optional `GEMINI_API_KEY` stored as a GitHub secret if Gemini suggestions
-      will be used
+- [ ] Existing `REVIEW` dry-run checked; one all-server apply completed and the
+      daily Workflow 1 schedule left enabled for any safe remainder
+- [ ] `GEMINI_API_KEY` stored as a GitHub secret for strict AI verification
 - [ ] Automatic EPG matches reviewed by count; remaining `REVIEW` rows checked
       and uncertain rows left disabled
 - [ ] Important language, region, genre, sport, and religion metadata reviewed;

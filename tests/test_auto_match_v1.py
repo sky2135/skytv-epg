@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from skytv_epg_contextual_v8 import install_contextual_v8  # noqa: E402
 from skytv_epg_auto_match_v1 import (  # noqa: E402
     CatalogSnapshot,
     MatcherIdentity,
@@ -32,6 +34,20 @@ from skytv_epg_auto_match_v1 import (  # noqa: E402
 GOOD_SHA = STRICT_MATCHER_SOURCE_SHA256
 CATALOG_SHA = "b" * 64
 SOURCE_SHA = "c" * 64
+
+
+def real_resolver() -> tuple[object, object]:
+    """Load an isolated copy of the pinned engine plus its real v8 resolver."""
+
+    alias = f"skytv_auto_match_v1_real_engine_{len(sys.modules)}"
+    path = SRC_DIR / "skytv_epg_engine.py"
+    spec = importlib.util.spec_from_file_location(alias, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Could not load the pinned matcher engine")
+    engine = importlib.util.module_from_spec(spec)
+    sys.modules[alias] = engine
+    spec.loader.exec_module(engine)
+    return engine, install_contextual_v8(engine)
 
 
 def identity() -> MatcherIdentity:
@@ -301,7 +317,10 @@ class StrictAutoMatchV1Tests(unittest.TestCase):
         self.assertEqual(patch["epg_id"], "Good.Channel.us2")
         self.assertEqual(patch["enabled"], "TRUE")
         self.assertIn("method=strict", patch["reason"])
+        self.assertIn("auto-map-v2", patch["notes"])
+        self.assertIn("binding_sha256=", patch["notes"])
         self.assertIn(f"source_sha256={CATALOG_SHA}", patch["notes"])
+        self.assertLessEqual(len(patch["notes"]), 500)
         self.assertFalse(any(key.startswith("metadata_") for key in patch))
 
     def test_only_unseen_rows_are_resolved_but_profiles_use_full_lineup(self) -> None:
@@ -365,19 +384,232 @@ class StrictAutoMatchV1Tests(unittest.TestCase):
         resolver._contextual_fuzzy_match(resolver.query)
         self.assertEqual(resolver.scan_calls["_contextual_fuzzy_match"], 1)
 
-    def test_fuzzy_and_broader_inference_methods_never_auto_enable(self) -> None:
-        forbidden = (
+    def test_structural_methods_reach_the_independent_programme_gate(self) -> None:
+        structural = (
             "canonical_identity",
-            "contextual_fuzzy",
-            "regional_context_containment",
-            "near_exact_orthography",
-            "category_language_equivalence",
             "category_language_default",
-            "regional_catalog_extension",
             "edition_aware",
             "descriptor_relaxed",
             "spacing_compact",
             "token_multiset",
+            "strict",
+        )
+        for method in structural:
+            with self.subTest(method=method):
+                resolver = FakeResolver(
+                    {"New Channel": real_match(method=method)}
+                )
+                proposal = proposals_for(resolver)[("server_1", "10")]
+                self.assertTrue(proposal.eligible_for_finalization)
+                patch = finalize_proposal(
+                    proposal, evidence("Good.Channel.us2")
+                ).sheet_patch()
+                self.assertEqual(patch["action"], "AUTO_EPGSHARE")
+                self.assertEqual(patch["enabled"], "TRUE")
+
+    def test_real_resolver_produces_nonzero_structural_approvals_and_safe_negative(self) -> None:
+        engine, resolver = real_resolver()
+        candidates = [
+            {
+                "epg_id": epg_id,
+                "feed": "IN4",
+                "region": "IN",
+                "display_name": engine.epg_id_to_name(epg_id),
+                "normalized": engine.normalize_name(engine.epg_id_to_name(epg_id)),
+            }
+            for epg_id in (
+                "PTC.PUNJABI.in",
+                "Global.Punjab.in",
+                "STAR.SPORTS.1.HD.in",
+                "TLC.HD.in",
+                "mh1.Shraddha.in",
+            )
+        ]
+        dummy_ids = {"blank.dummy.us": "Blank.Dummy.us"}
+        preflight = prepare_resolver_strict(resolver, candidates, dummy_ids)
+        self.assertTrue(preflight.ready, preflight.reason)
+        matcher_identity = MatcherIdentity.from_resolver(
+            resolver,
+            SRC_DIR / "skytv_epg_contextual_v8.py",
+            SRC_DIR / "skytv_epg_engine.py",
+        )
+        declared_ids = [item["epg_id"] for item in candidates]
+        exact_catalog = CatalogSnapshot.from_matcher_catalog(
+            declared_ids,
+            real_candidates=candidates,
+            dummy_ids=dummy_ids,
+            source_sha256=CATALOG_SHA,
+        )
+        channels = [
+            {
+                "stream_id": "1",
+                "name": "PB: PTC PUNJABI",
+                "category_id": "punjabi",
+            },
+            {
+                "stream_id": "2",
+                "name": "PJB - GLOBAL PUNJABI UHD",
+                "category_id": "punjabi",
+            },
+            {
+                "stream_id": "3",
+                "name": "SPORTS - STAR SPORTS 1 ENGLISH UHD",
+                "category_id": "sports",
+            },
+            {
+                "stream_id": "4",
+                "name": "ENG - TLC UHD",
+                "category_id": "english",
+            },
+            {
+                "stream_id": "5",
+                "name": "PJB - MH1 SHARADDHA",
+                "category_id": "punjabi",
+            },
+        ]
+        proposals = propose_new_channel_matches(
+            resolver,
+            server_id="server_1",
+            channels=channels,
+            category_names={
+                "punjabi": "|AS| PUNJABI",
+                "sports": "|AS| SPORTS",
+                "english": "|AS| ENGLISH",
+            },
+            existing_keys=set(),
+            catalog=exact_catalog,
+            matcher_identity=matcher_identity,
+            preflight=preflight,
+        )
+
+        expected_methods = {
+            "1": "canonical_identity",
+            "2": "token_multiset",
+            "3": "category_language_default",
+            "4": "strict",
+        }
+        strong_evidence = evidence(*declared_ids)
+        approved = 0
+        for stream_id, expected_method in expected_methods.items():
+            proposal = proposals[("server_1", stream_id)]
+            self.assertEqual(proposal.match_method, expected_method)
+            self.assertTrue(proposal.eligible_for_finalization)
+            self.assertTrue(finalize_proposal(proposal, strong_evidence).approved)
+            approved += 1
+
+        # This spelling difference is handled only by the review-only
+        # near-exact rule. The production adapter suppresses it and never
+        # silently promotes it to a structural match.
+        negative = proposals[("server_1", "5")]
+        self.assertFalse(negative.eligible_for_finalization)
+        self.assertFalse(finalize_proposal(negative, strong_evidence).approved)
+        self.assertGreater(approved, 0)
+
+    def test_real_resolver_finalizes_verified_dummy_families_but_ignores_heading(self) -> None:
+        engine, resolver = real_resolver()
+        real_id = "TLC.HD.in"
+        candidates = [
+            {
+                "epg_id": real_id,
+                "feed": "IN4",
+                "region": "IN",
+                "display_name": engine.epg_id_to_name(real_id),
+                "normalized": engine.normalize_name(engine.epg_id_to_name(real_id)),
+            }
+        ]
+        dummy_names = (
+            "24.7.Dummy.us",
+            "Adult.Programming.Dummy.us",
+            "Blank.Dummy.us",
+            "Movie.Dummy.us",
+            "PPV.EVENTS.Dummy.us",
+        )
+        dummy_ids = {item.casefold(): item for item in dummy_names}
+        preflight = prepare_resolver_strict(resolver, candidates, dummy_ids)
+        self.assertTrue(preflight.ready, preflight.reason)
+        matcher_identity = MatcherIdentity.from_resolver(
+            resolver,
+            SRC_DIR / "skytv_epg_contextual_v8.py",
+            SRC_DIR / "skytv_epg_engine.py",
+        )
+        exact_catalog = CatalogSnapshot.from_matcher_catalog(
+            (real_id, *dummy_names),
+            real_candidates=candidates,
+            dummy_ids=dummy_ids,
+            source_sha256=CATALOG_SHA,
+        )
+        channels = [
+            {
+                "stream_id": "adult",
+                "name": "+18 | Private",
+                "category_id": "adult",
+            },
+            {
+                "stream_id": "continuous",
+                "name": "Movies 24/7",
+                "category_id": "movies",
+            },
+            {
+                "stream_id": "event",
+                "name": "MLB 01 | Royals x Orioles start:2026-07-12 18:35:00",
+                "category_id": "event",
+            },
+            {
+                "stream_id": "numbered",
+                "name": "MALAYALAM-MOVIES 5 HD",
+                "category_id": "movies",
+            },
+            {
+                "stream_id": "heading",
+                "name": "####### SPORTS HD #######",
+                "category_id": "sports",
+            },
+        ]
+        proposals = propose_new_channel_matches(
+            resolver,
+            server_id="server_1",
+            channels=channels,
+            category_names={
+                "adult": "XXX | Adults",
+                "movies": "|AS| MALAYALAM | MOVIES",
+                "event": "US | MLB",
+                "sports": "US | SPORTS",
+            },
+            existing_keys=set(),
+            catalog=exact_catalog,
+            matcher_identity=matcher_identity,
+            preflight=preflight,
+        )
+        no_real_programmes = ScheduleEvidence(
+            declared_ids=frozenset(),
+            informative_future_programmes={},
+            latest_informative_future_stop={},
+            gate_passed_by_id={},
+            checked_at_epoch=0,
+            source_sha256="",
+        )
+
+        for stream_id in ("adult", "continuous", "event", "numbered"):
+            with self.subTest(stream_id=stream_id):
+                proposal = proposals[("server_1", stream_id)]
+                self.assertTrue(proposal.eligible_for_finalization)
+                patch = finalize_proposal(proposal, no_real_programmes).sheet_patch()
+                self.assertEqual(patch["action"], "AUTO_DUMMY")
+                self.assertEqual(patch["enabled"], "TRUE")
+
+        heading = proposals[("server_1", "heading")]
+        self.assertFalse(heading.eligible_for_finalization)
+        heading_patch = finalize_proposal(heading, no_real_programmes).sheet_patch()
+        self.assertEqual(heading_patch["action"], "IGNORE")
+        self.assertEqual(heading_patch["enabled"], "FALSE")
+
+    def test_fuzzy_containment_near_exact_and_legacy_methods_never_auto_enable(self) -> None:
+        forbidden = (
+            "contextual_fuzzy",
+            "regional_context_containment",
+            "near_exact_orthography",
+            "category_language_equivalence",
+            "regional_catalog_extension",
             "verified_legacy_rule",
             "verified_legacy_exact",
         )
@@ -459,7 +691,24 @@ class StrictAutoMatchV1Tests(unittest.TestCase):
         self.assertFalse(final.approved)
         self.assertIn("ambiguous case variants", final.reason)
 
-    def test_dummy_rule_is_review_only_and_does_not_touch_metadata(self) -> None:
+    def test_serialized_false_programme_gate_is_rejected_at_construction(self) -> None:
+        for hostile_value in ("FALSE", "0", 0, 1, [], {}):
+            with self.subTest(hostile_value=hostile_value):
+                with self.assertRaisesRegex(ValueError, "must be booleans"):
+                    ScheduleEvidence(
+                        declared_ids=frozenset({"Good.Channel.us2"}),
+                        informative_future_programmes={"Good.Channel.us2": 2},
+                        latest_informative_future_stop={
+                            "Good.Channel.us2": 30_000
+                        },
+                        gate_passed_by_id={
+                            "Good.Channel.us2": hostile_value  # type: ignore[dict-item]
+                        },
+                        checked_at_epoch=1_000,
+                        source_sha256=CATALOG_SHA,
+                    )
+
+    def test_verified_event_dummy_bypasses_real_programme_gate(self) -> None:
         resolver = FakeResolver(
             {
                 "New Channel": {
@@ -467,7 +716,7 @@ class StrictAutoMatchV1Tests(unittest.TestCase):
                     "source": "dummy",
                     "epg_id": "PPV.EVENTS.Dummy.us",
                     "epg_feed": "DUMMY_CHANNELS",
-                    "reason": "Event slot",
+                    "reason": "Verified provider event slot",
                     "match_method": "safety_rule",
                 }
             }
@@ -478,16 +727,163 @@ class StrictAutoMatchV1Tests(unittest.TestCase):
                 "PPV.EVENTS.Dummy.us", region="DUMMY", kind="dummy"
             ),
         )[("server_1", "10")]
-        patch = finalize_proposal(
-            proposal, evidence("PPV.EVENTS.Dummy.us")
-        ).sheet_patch()
+        unavailable_programmes = ScheduleEvidence(
+            declared_ids=frozenset(),
+            informative_future_programmes={},
+            latest_informative_future_stop={},
+            gate_passed_by_id={},
+            checked_at_epoch=0,
+            source_sha256="",
+        )
 
-        self.assertEqual(patch["action"], "REVIEW")
+        self.assertTrue(proposal.eligible_for_finalization)
+        patch = finalize_proposal(proposal, unavailable_programmes).sheet_patch()
+
+        self.assertEqual(patch["action"], "AUTO_DUMMY")
         self.assertEqual(patch["source"], "dummy")
         self.assertEqual(patch["epg_feed"], "DUMMY_CHANNELS")
-        self.assertEqual(patch["enabled"], "FALSE")
-        self.assertIn("review-only", patch["reason"])
+        self.assertEqual(patch["enabled"], "TRUE")
+        self.assertIn("no-schedule", patch["reason"])
         self.assertFalse(any(key.startswith("metadata_") for key in patch))
+
+    def test_dummy_allowlist_covers_adult_continuous_event_and_numbered_banks(self) -> None:
+        cases = (
+            (
+                "XXX Private",
+                "Adults",
+                "Adult.Programming.Dummy.us",
+                "safety_rule",
+                "Explicit adult channel",
+            ),
+            (
+                "Movies 24/7",
+                "Movies",
+                "Movie.Dummy.us",
+                "safety_rule",
+                "24/7 continuous channel",
+            ),
+            (
+                "Event Slot 3",
+                "Sports",
+                "PPV.EVENTS.Dummy.us",
+                "virtual_360_event_bank",
+                "Numbered 360 event bank",
+            ),
+            (
+                "Movies 7",
+                "Movies",
+                "Movie.Dummy.us",
+                "synthetic_numbered_genre_slot",
+                "Generic numbered movie bank",
+            ),
+            (
+                "Sky Store 9",
+                "Movies",
+                "Movie.Dummy.us",
+                "inventory_numbered_bank",
+                "Lineup-level numbered movie bank",
+            ),
+        )
+        for channel_name, category_name, epg_id, method, reason in cases:
+            with self.subTest(method=method, epg_id=epg_id):
+                resolver = FakeResolver(
+                    {
+                        channel_name: {
+                            "action": "AUTO_DUMMY",
+                            "source": "dummy",
+                            "epg_id": epg_id,
+                            "epg_feed": "DUMMY_CHANNELS",
+                            "reason": reason,
+                            "match_method": method,
+                        }
+                    },
+                    route_explicit=False,
+                    explicit_market="ALL",
+                    route_plan=("ALL",),
+                )
+                proposal = proposals_for(
+                    resolver,
+                    channels=[
+                        {
+                            "stream_id": "10",
+                            "name": channel_name,
+                            "category_id": "category",
+                        }
+                    ],
+                    exact_catalog=catalog(
+                        epg_id, region="DUMMY", kind="dummy"
+                    ),
+                )[("server_1", "10")]
+                self.assertTrue(proposal.eligible_for_finalization)
+
+    def test_unapproved_dummy_family_remains_review_only(self) -> None:
+        resolver = FakeResolver(
+            {
+                "Music Choice Rock": {
+                    "action": "AUTO_DUMMY",
+                    "source": "dummy",
+                    "epg_id": "Music.Choice.Dummy.us",
+                    "epg_feed": "DUMMY_CHANNELS",
+                    "reason": "Music Choice playlist stream",
+                    "match_method": "safety_rule",
+                }
+            }
+        )
+        proposal = proposals_for(
+            resolver,
+            channels=[
+                {
+                    "stream_id": "10",
+                    "name": "Music Choice Rock",
+                    "category_id": "music",
+                }
+            ],
+            exact_catalog=catalog(
+                "Music.Choice.Dummy.us", region="DUMMY", kind="dummy"
+            ),
+        )[("server_1", "10")]
+
+        self.assertFalse(proposal.eligible_for_finalization)
+        self.assertEqual(
+            finalize_proposal(proposal, evidence("Music.Choice.Dummy.us")).sheet_patch()[
+                "enabled"
+            ],
+            "FALSE",
+        )
+
+    def test_decorative_heading_becomes_disabled_ignore(self) -> None:
+        resolver = FakeResolver(
+            {
+                "######## SPORTS ########": {
+                    "action": "AUTO_DUMMY",
+                    "source": "dummy",
+                    "epg_id": "Blank.Dummy.us",
+                    "epg_feed": "DUMMY_CHANNELS",
+                    "reason": "Decorative heading",
+                    "match_method": "heading_placeholder",
+                }
+            }
+        )
+        proposal = proposals_for(
+            resolver,
+            channels=[
+                {
+                    "stream_id": "10",
+                    "name": "######## SPORTS ########",
+                    "category_id": "sports",
+                }
+            ],
+            exact_catalog=catalog(
+                "Blank.Dummy.us", region="DUMMY", kind="dummy"
+            ),
+        )[("server_1", "10")]
+        patch = finalize_proposal(
+            proposal, evidence("Blank.Dummy.us")
+        ).sheet_patch()
+
+        self.assertFalse(proposal.eligible_for_finalization)
+        self.assertEqual(patch["action"], "IGNORE")
+        self.assertEqual(patch["enabled"], "FALSE")
 
     def test_catalog_and_programme_evidence_require_same_source_sha(self) -> None:
         resolver = FakeResolver({"New Channel": real_match()})
