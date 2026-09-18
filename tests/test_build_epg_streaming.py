@@ -384,6 +384,269 @@ class MappingContractTests(unittest.TestCase):
                     session.assert_not_called()
             self.assertFalse(destination.exists())
 
+    def test_panel_download_follows_only_safe_same_host_redirects(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "http://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+            "ALLOW_INSECURE_PANEL_HTTP": "TRUE",
+        }
+        # A short but valid XMLTV document must not be mistaken for an empty
+        # response merely because it is smaller than an arbitrary byte floor.
+        payload = b'<?xml version="1.0"?><tv/>'
+        redirected = mock.MagicMock()
+        redirected.status_code = 302
+        redirected.headers = {
+            "Location": (
+                "https://panel.example:8443/provider/xmltv.php"
+                "?username=untrusted&password=untrusted#discarded"
+            )
+        }
+        downloaded = mock.MagicMock()
+        downloaded.status_code = 200
+        downloaded.headers = {}
+        downloaded.iter_content.return_value = [payload]
+        session = mock.MagicMock()
+        session.headers = {}
+        session.get.side_effect = [redirected, downloaded]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(runner.os.environ, credentials, clear=True):
+                with mock.patch.object(
+                    runner.requests, "Session", return_value=session
+                ), mock.patch("builtins.print"):
+                    _path, details = runner.download_panel_xmltv(
+                        "server_2", destination
+                    )
+
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(details["bytes"], len(payload))
+            self.assertEqual(
+                session.headers,
+                {
+                    "User-Agent": "SKYTV-EPG-Builder/2.0",
+                    "Accept": runner.PANEL_ACCEPT_HEADER,
+                },
+            )
+            self.assertEqual(session.get.call_count, 2)
+            first, second = session.get.call_args_list
+            self.assertEqual(
+                first.args[0], "http://panel.example/provider/xmltv.php"
+            )
+            self.assertEqual(
+                second.args[0],
+                "https://panel.example:8443/provider/xmltv.php",
+            )
+            for request in (first, second):
+                self.assertEqual(
+                    request.kwargs["params"],
+                    {
+                        "username": "fixture-user",
+                        "password": "fixture-password",
+                    },
+                )
+                self.assertEqual(
+                    request.kwargs["timeout"], runner.PANEL_REQUEST_TIMEOUT
+                )
+                self.assertTrue(request.kwargs["stream"])
+                self.assertFalse(request.kwargs["allow_redirects"])
+            redirected.close.assert_called_once()
+            downloaded.close.assert_called_once()
+            session.close.assert_called_once()
+
+    def test_panel_download_close_errors_cannot_mask_completed_success(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "https://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+        }
+        payload = b'<?xml version="1.0"?><tv/>'
+        response = mock.MagicMock()
+        response.status_code = 200
+        response.headers = {}
+        response.iter_content.return_value = [payload]
+        response.close.side_effect = OSError(
+            "https://panel.example/xmltv.php?"
+            "username=fixture-user&password=fixture-password"
+        )
+        session = mock.MagicMock()
+        session.headers = {}
+        session.get.return_value = response
+        session.close.side_effect = OSError("credential-bearing cleanup failure")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests, "Session", return_value=session
+            ):
+                returned, details = runner.download_panel_xmltv(
+                    "server_2", destination
+                )
+            self.assertEqual(returned, destination)
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(details["bytes"], len(payload))
+        response.close.assert_called_once()
+        session.close.assert_called_once()
+
+    def test_panel_download_rejects_cross_host_and_https_downgrade_redirects(self) -> None:
+        cases = (
+            (
+                "https://panel.example/provider",
+                "https://elsewhere.example/xmltv.php",
+            ),
+            (
+                "https://panel.example/provider",
+                "http://panel.example/xmltv.php",
+            ),
+            # Unicode casefolding must not make two distinct IDNA DNS names
+            # look equal before Requests prepares the redirect target.
+            (
+                "https://strasse.de/provider",
+                "https://straße.de/xmltv.php",
+            ),
+        )
+        for base_url, location in cases:
+            with self.subTest(location=location):
+                credentials = {
+                    "SERVER_2_BASE_URL": base_url,
+                    "SERVER_2_USERNAME": "fixture-user",
+                    "SERVER_2_PASSWORD": "fixture-password",
+                }
+                response = mock.MagicMock()
+                response.status_code = 302
+                response.headers = {"Location": location}
+                session = mock.MagicMock()
+                session.headers = {}
+                session.get.return_value = response
+                with tempfile.TemporaryDirectory() as temporary:
+                    destination = Path(temporary) / "panel.xmltv"
+                    with mock.patch.dict(
+                        runner.os.environ, credentials, clear=True
+                    ), mock.patch.object(
+                        runner.requests, "Session", return_value=session
+                    ):
+                        with self.assertRaisesRegex(
+                            runner.BuildError, "unsafe redirect"
+                        ):
+                            runner.download_panel_xmltv("server_2", destination)
+                    self.assertFalse(destination.exists())
+                    self.assertFalse(
+                        destination.with_suffix(
+                            destination.suffix + ".part"
+                        ).exists()
+                    )
+                self.assertEqual(session.get.call_count, 1)
+            response.close.assert_called_once()
+            session.close.assert_called_once()
+
+    def test_panel_download_stops_after_bounded_same_host_redirects(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "https://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+        }
+        responses = []
+        for redirect_number in range(runner.PANEL_MAX_REDIRECTS + 1):
+            response = mock.MagicMock()
+            response.status_code = 302
+            response.headers = {
+                "Location": f"/provider/redirect-{redirect_number}"
+            }
+            responses.append(response)
+        session = mock.MagicMock()
+        session.headers = {}
+        session.get.side_effect = responses
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests, "Session", return_value=session
+            ):
+                with self.assertRaisesRegex(
+                    runner.BuildError, "exceeded the redirect limit"
+                ):
+                    runner.download_panel_xmltv("server_2", destination)
+            self.assertFalse(destination.exists())
+            self.assertFalse(
+                destination.with_suffix(destination.suffix + ".part").exists()
+            )
+        self.assertEqual(
+            session.get.call_count, runner.PANEL_MAX_REDIRECTS + 1
+        )
+        for response in responses:
+            response.close.assert_called_once()
+        session.close.assert_called_once()
+
+    def test_panel_download_reports_only_safe_http_status(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "https://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+        }
+        responses = []
+        for _attempt in range(3):
+            response = mock.MagicMock()
+            response.status_code = 503
+            response.headers = {}
+            responses.append(response)
+        session = mock.MagicMock()
+        session.headers = {}
+        session.get.side_effect = responses
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests, "Session", return_value=session
+            ), mock.patch.object(runner.time, "sleep"):
+                with self.assertRaises(runner.BuildError) as caught:
+                    runner.download_panel_xmltv("server_2", destination)
+            message = str(caught.exception)
+            self.assertIn("last result: HTTP 503", message)
+            self.assertNotIn("panel.example", message)
+            self.assertNotIn("fixture-user", message)
+            self.assertNotIn("fixture-password", message)
+            self.assertFalse(destination.exists())
+        self.assertEqual(session.get.call_count, 3)
+        for response in responses:
+            response.close.assert_called_once()
+        session.close.assert_called_once()
+
+    def test_panel_download_never_reports_credential_bearing_exception_text(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "https://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+        }
+        leaked = (
+            "https://panel.example/provider/xmltv.php?"
+            "username=fixture-user&password=fixture-password"
+        )
+        session = mock.MagicMock()
+        session.headers = {}
+        session.get.side_effect = runner.requests.ConnectionError(leaked)
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests, "Session", return_value=session
+            ), mock.patch.object(runner.time, "sleep"):
+                with self.assertRaises(runner.BuildError) as caught:
+                    runner.download_panel_xmltv("server_2", destination)
+            message = str(caught.exception)
+            self.assertIn("last result: connection error", message)
+            self.assertNotIn(leaked, message)
+            self.assertNotIn("fixture-user", message)
+            self.assertNotIn("fixture-password", message)
+            self.assertFalse(destination.exists())
+        self.assertEqual(session.get.call_count, 3)
+        session.close.assert_called_once()
+
     def test_xmltv_timezone_rejects_invalid_hour_or_minute_fields(self) -> None:
         self.assertIsNotNone(runner.parse_xmltv_time("20270115093000 +0530"))
         self.assertIsNone(runner.parse_xmltv_time("20270115093000 +0060"))

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "createdUtc": "2026-07-21T22:16:51.259933Z",
-  "updatedUtc": "2026-09-18T15:59:17Z",
+  "updatedUtc": "2026-09-18T21:18:36Z",
   "matcherVersion": "8.4",
   "matcherBuildId": "SKYTV-CONTEXTUAL-RULES-8.4-2026-07-19",
   "builderVersion": "7.1",
@@ -17,7 +17,7 @@
   "iconLayerSha256": "e963b0018b9d8c7bbe1c839194b87b0214cf1f394a021b7ce65a0afbf4af9c58",
   "productionRunnerSha256": "56dbadde8360bd177adfebcbcbe4fecd80044b8c9d6dded3bb06ef9da4a49ea3",
   "legacyProductionRunnerSha256": "56dbadde8360bd177adfebcbcbe4fecd80044b8c9d6dded3bb06ef9da4a49ea3",
-  "streamingRunnerSha256": "a93ad39729a208d7e15761dc56a782ec52aee2d17f75b75dded95c09133bb09f",
+  "streamingRunnerSha256": "ff1236817dd65a9a23239c9cc30d118583d0c254098d94cc2e49a5d96223cf54",
   "autoMatchAdapterSha256": "db49198de05cb6c618ff11a0408081eeba581eb9b9a05f231a0d04a3ce70d7e8",
   "autoMatchIntegrationSha256": "5e88f400c66fd7bcbd8876810660fcd123e78c925f9022faaf7070f7eb81c7a0",
   "backlogAnalyzerSha256": "d5af5112922e4d1a7ce85dd34ceffa3cb732d5680e60fb7e5e6eb2f4550d3ab2",
