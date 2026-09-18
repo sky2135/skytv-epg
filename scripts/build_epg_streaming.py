@@ -35,6 +35,7 @@ from itertools import chain
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urljoin, urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 from lxml import etree
@@ -88,6 +89,13 @@ MAX_CATEGORY_VALUES = 64
 MAX_XML_PROLOG_BYTES = 2 * 1024 * 1024
 SQLITE_BATCH_SIZE = 2_000
 PROGRESS_EVERY_ELEMENTS = 250_000
+# Per-stream schedules are intentionally day-sized by default. At production
+# scale (roughly thirteen thousand placeholder streams), shorter repeated
+# blocks add hundreds of thousands of rows without adding real programme facts.
+DEFAULT_SYNTHETIC_BLOCK_HOURS = 24
+DEFAULT_SYNTHETIC_EVENT_WINDOW_HOURS = 6
+DEFAULT_SYNTHETIC_FUTURE_DAYS = 7
+MAX_SYNTHETIC_PROGRAMME_ROWS = 2_000_000
 
 SHEET_COLUMNS = (
     "server_id",
@@ -282,12 +290,23 @@ class MappingRow:
     def source_key(self) -> str:
         if self.effective_source == "panel":
             return f"panel:{self.server_id}"
+        if self.requested_source == "dummy":
+            # A generic EPGShare dummy ID is shared by thousands of unrelated
+            # channels.  Give every mapped stream its own deterministic source
+            # namespace so a useful channel-derived title cannot bleed into a
+            # different stream which happens to use the same placeholder ID.
+            return f"synthetic:{self.synthetic_identity}"
         return "epgshare01"
+
+    @property
+    def synthetic_identity(self) -> str:
+        identity = f"{self.server_id}\0{self.stream_id}".encode("utf-8")
+        return hashlib.sha256(identity).hexdigest()
 
     @property
     def schedule_key(self) -> str:
         if self.requested_source == "dummy":
-            prefix = "DUMMY_CHANNELS"
+            return f"DUMMY_CHANNELS::{self.synthetic_identity}"
         elif self.effective_source == "panel" or self.source_policy_blocked:
             prefix = "PANEL"
         else:
@@ -1631,6 +1650,630 @@ def bounded_private_file_bytes(
     return content
 
 
+_SYNTHETIC_LANGUAGE_NAMES = (
+    "hindi",
+    "punjabi",
+    "tamil",
+    "telugu",
+    "malayalam",
+    "kannada",
+    "marathi",
+    "bengali",
+    "gujarati",
+    "urdu",
+    "english",
+)
+_SYNTHETIC_ACRONYMS = {
+    "am": "AM",
+    "bbc": "BBC",
+    "ca": "CA",
+    "cfl": "CFL",
+    "chl": "CHL",
+    "ctv": "CTV",
+    "et": "ET",
+    "espn": "ESPN",
+    "f1": "F1",
+    "hbo": "HBO",
+    "itv": "ITV",
+    "lhjmq": "LHJMQ",
+    "mlb": "MLB",
+    "mls": "MLS",
+    "nba": "NBA",
+    "nfl": "NFL",
+    "nhl": "NHL",
+    "ohl": "OHL",
+    "pga": "PGA",
+    "pm": "PM",
+    "ppv": "PPV",
+    "tv": "TV",
+    "tnt": "TNT",
+    "tsn": "TSN",
+    "uae": "UAE",
+    "ufc": "UFC",
+    "uk": "UK",
+    "us": "US",
+    "wsl": "WSL",
+    "wwe": "WWE",
+}
+_SYNTHETIC_GENRE_LABELS = {
+    "adult": "Adult",
+    "documentary": "Documentary",
+    "education": "Education",
+    "entertainment": "Entertainment",
+    "events": "Live Event",
+    "general": "General",
+    "kids": "Kids",
+    "lifestyle": "Lifestyle",
+    "movies": "Movies",
+    "music": "Music",
+    "news": "News",
+    "religion": "Religion",
+    "shopping": "Shopping",
+    "sports": "Sports",
+}
+
+
+def _smart_synthetic_title(value: object) -> str:
+    """Render provider text readably without adding facts not in that text."""
+
+    text = clean_text(value, 180)
+    if not text:
+        return ""
+    titled = text.title()
+    for word, replacement in _SYNTHETIC_ACRONYMS.items():
+        titled = re.sub(
+            rf"(?<![\w]){re.escape(word)}(?![\w])",
+            replacement,
+            titled,
+            flags=re.I,
+        )
+    for connector in (
+        "an", "and", "at", "by", "for", "in", "of", "on", "the", "to",
+        "vs", "with",
+    ):
+        titled = re.sub(
+            rf"(?<=\s){connector}(?=\s)", connector, titled, flags=re.I
+        )
+    return clean_text(titled, 180)
+
+
+def _clean_synthetic_channel_label(value: object) -> str:
+    """Remove provider slot/quality decoration while retaining real event text."""
+
+    text = unicodedata.normalize("NFKC", clean_text(value, 300))
+    text = re.sub(r"[#*_]{2,}", " ", text)
+    text = re.sub(
+        r"\[(?:live[\s_-]*event|event|live|4k|uhd|fhd|hd|sd|hevc|"
+        r"[a-z]{2}|s[ᴛt][ᴠv]\+?)\]",
+        " ",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"\((?:live[\s_-]*event|event|all\s+day\s+one\s+movie|"
+        r"4k|uhd|fhd|hd|sd|hevc)\)",
+        " ",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"^(?:[A-Z]{2}\s*)?\(\s*ESPN\+\s*\d+\s*\)\s*[|:\-]*\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"^(?:PPV\s*)?(?:LIVE\s*)?EVENT(?:\s*(?:NO\.?|#)?\s*\d+)?"
+        r"\s*[|:\-]*\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"^24\s*[/x]\s*7\s*[|:\-]*\s*", "", text, flags=re.I)
+    text = re.sub(
+        r"^(?:US|UK|CA|IN|EN)\s*(?:4K|UHD|FHD|HD|SD)?\s*[|:]\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"[|]+", " ", text)
+    text = re.sub(r"(?<=\w)[_\-](?=\w)", " ", text)
+    text = re.sub(r"\s+[\-–—]\s+", " ", text)
+    text = re.sub(
+        r"(?:\s+|^)(?:(?:4K|UHD|FHD|HD|SD|HEVC|H\.?(?:264|265)|"
+        r"1080P?|2160P?)\s*)+$",
+        "",
+        text,
+        flags=re.I,
+    )
+    return clean_text(text.strip(" |:-–—"), 180)
+
+
+_EASTERN_TIME = ZoneInfo("America/New_York")
+_ISO_EVENT_TIME_RE = re.compile(
+    r"\(\s*(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})"
+    r"[ T](?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?"
+    r"\s*(?P<zone>ET|EST|EDT)?\s*\)",
+    re.I,
+)
+_SHORT_EVENT_TIME_RE = re.compile(
+    r"\(\s*(?P<month>\d{1,2})[./](?P<day>\d{1,2})\s+"
+    r"(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<meridiem>AM|PM)"
+    r"\s*(?P<zone>ET|EST|EDT)?\s*\)",
+    re.I,
+)
+_BLANK_EVENT_LABELS = frozenset(
+    {
+        "",
+        "event",
+        "event tba",
+        "coming soon",
+        "live event",
+        "ppv",
+        "ppv event",
+        "tba",
+        "to be announced",
+    }
+)
+
+
+@dataclass(frozen=True)
+class SyntheticEventTitle:
+    name: str
+    start_epoch: int | None
+    time_label: str
+
+
+def _plausible_event_datetime(
+    *,
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+    second: int = 0,
+    reference_epoch: int,
+    zone_hint: str = "",
+) -> datetime | None:
+    try:
+        naive = datetime(
+            int(year),
+            int(month),
+            int(day),
+            int(hour),
+            int(minute),
+            int(second),
+        )
+    except ValueError:
+        return None
+    candidates: list[datetime] = []
+    for fold in (0, 1):
+        candidate = naive.replace(tzinfo=_EASTERN_TIME, fold=fold)
+        if (
+            candidate.astimezone(timezone.utc)
+            .astimezone(_EASTERN_TIME)
+            .replace(tzinfo=None)
+            == naive
+            and all(
+                existing.utcoffset() != candidate.utcoffset()
+                for existing in candidates
+            )
+        ):
+            candidates.append(candidate)
+    if not candidates:
+        # Reject nonexistent wall-clock times during the spring DST jump.
+        return None
+    hint = str(zone_hint or "").upper()
+    if hint in {"EST", "EDT"}:
+        candidates = [value for value in candidates if value.tzname() == hint]
+        if not candidates:
+            return None
+    elif len(candidates) > 1:
+        # Generic "ET" cannot disambiguate the repeated fall-back hour.
+        return None
+    event = candidates[0]
+    reference = datetime.fromtimestamp(int(reference_epoch), tz=timezone.utc)
+    # Provider placeholder slots commonly carry dates such as 2098-01-01.
+    # A PPV name can remain useful, but that implausible time must never be
+    # presented to a customer as a real scheduled event.
+    if abs(event.astimezone(timezone.utc) - reference) > timedelta(days=550):
+        return None
+    return event
+
+
+def _event_time_label(value: datetime) -> str:
+    return (
+        f"{value.strftime('%b')} {value.day}, "
+        f"{value.strftime('%I').lstrip('0')}:{value.strftime('%M %p %Z')}"
+    )
+
+
+def decode_synthetic_event_title(
+    row: MappingRow,
+    *,
+    reference_epoch: int,
+) -> SyntheticEventTitle | None:
+    """Decode an event name/time only when the approved row supplies them."""
+
+    event_like = (
+        row.metadata.genre == "events"
+        or row.metadata.channel_role in {"event", "ppv"}
+        or "ppv.events" in row.epg_id.casefold()
+        or bool(re.search(r"\bESPN\+\s*\d+\b", row.channel_name, re.I))
+    )
+    if not event_like:
+        return None
+
+    raw_text = unicodedata.normalize("NFKC", clean_text(row.channel_name, 300))
+    match = _ISO_EVENT_TIME_RE.search(raw_text)
+    event_time: datetime | None = None
+    supplied_time_label = ""
+    if match:
+        event_time = _plausible_event_datetime(
+            year=int(match.group("year")),
+            month=int(match.group("month")),
+            day=int(match.group("day")),
+            hour=int(match.group("hour")),
+            minute=int(match.group("minute")),
+            second=int(match.group("second") or 0),
+            reference_epoch=reference_epoch,
+            zone_hint=match.group("zone") or "",
+        )
+        raw_text = raw_text[: match.start()] + " " + raw_text[match.end() :]
+    else:
+        match = _SHORT_EVENT_TIME_RE.search(raw_text)
+        if match:
+            hour = int(match.group("hour"))
+            month = int(match.group("month"))
+            day = int(match.group("day"))
+            minute = int(match.group("minute"))
+            try:
+                # A yearless provider label cannot truthfully be assigned an
+                # instant or called "upcoming". Validate its calendar shape,
+                # then retain generic ET (or its explicit abbreviation).
+                datetime(2000, month, day, hour, minute)
+            except ValueError:
+                supplied_time_label = ""
+            else:
+                if 1 <= hour <= 12:
+                    supplied_time_label = (
+                        f"{datetime(2000, month, day).strftime('%b')} {day}, "
+                        f"{hour}:{minute:02d} {match.group('meridiem').upper()} "
+                        f"{(match.group('zone') or 'ET').upper()}"
+                    )
+                    eastern_reference = datetime.fromtimestamp(
+                        int(reference_epoch), tz=timezone.utc
+                    ).astimezone(_EASTERN_TIME)
+                    local_hour = hour % 12
+                    if match.group("meridiem").casefold() == "pm":
+                        local_hour += 12
+                    candidates = [
+                        candidate
+                        for year in (
+                            eastern_reference.year - 1,
+                            eastern_reference.year,
+                            eastern_reference.year + 1,
+                        )
+                        if (
+                            candidate := _plausible_event_datetime(
+                                year=year,
+                                month=month,
+                                day=day,
+                                hour=local_hour,
+                                minute=minute,
+                                reference_epoch=reference_epoch,
+                                zone_hint=match.group("zone") or "ET",
+                            )
+                        )
+                        is not None
+                    ]
+                    if candidates:
+                        nearest = min(
+                            candidates,
+                            key=lambda value: (
+                                abs(
+                                    value.astimezone(timezone.utc).timestamp()
+                                    - int(reference_epoch)
+                                ),
+                                0
+                                if value.astimezone(timezone.utc).timestamp()
+                                >= int(reference_epoch)
+                                else 1,
+                            ),
+                        )
+                        if abs(
+                            nearest.astimezone(timezone.utc).timestamp()
+                            - int(reference_epoch)
+                        ) <= 183 * 86400:
+                            event_time = nearest
+            raw_text = raw_text[: match.start()] + " " + raw_text[match.end() :]
+
+    text = _clean_synthetic_channel_label(raw_text)
+    text = re.sub(
+        r"^(?:CFL|CHL|MLB|MLS|NBA|NFL|NHL|PPV|UFC|WWE)\s*\d+\s*:\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    normalized_name = _security_normalize_text(text)
+    if re.search(r"\b(?:no event|no scheduled event|no event scheduled)\b", normalized_name):
+        text = "No Event Scheduled"
+        event_time = None
+        supplied_time_label = ""
+    elif re.search(r"\boff air\b", normalized_name):
+        text = "Off Air"
+        event_time = None
+        supplied_time_label = ""
+    elif re.search(r"\b(?:coming soon|tba)\b", normalized_name):
+        text = ""
+    elif raw_text.rstrip().endswith((":", "|")) and re.fullmatch(
+        r"(?:CFL|CHL|MLB|MLS|NBA|NFL|NHL|PPV|UFC|WWE)\s*\d+",
+        text,
+        flags=re.I,
+    ):
+        text = ""
+    name = _smart_synthetic_title(clean_text(text.strip(" |:-–—"), 160))
+    if _security_normalize_text(name) in _BLANK_EVENT_LABELS:
+        name = "Event To Be Announced"
+    if event_time is None:
+        return SyntheticEventTitle(
+            name=name,
+            start_epoch=None,
+            time_label=supplied_time_label,
+        )
+    return SyntheticEventTitle(
+        name=name,
+        start_epoch=int(event_time.timestamp()),
+        time_label=_event_time_label(event_time),
+    )
+
+
+def synthetic_programme_title(
+    row: MappingRow,
+    *,
+    reference_epoch: int | None = None,
+) -> str:
+    """Create a truthful placeholder title from approved channel metadata.
+
+    The function intentionally does not invent episodes, performers, scores,
+    descriptions, dates, or times. Event dates are accepted only from supported
+    provider label formats and bounded relative to this build; slot numbers and
+    technical decoration are removed.
+    """
+
+    if row.metadata.genre == "adult" or row.metadata.content_rating == "adult":
+        return "Adult Programming"
+
+    event = decode_synthetic_event_title(
+        row,
+        reference_epoch=int(reference_epoch or 0),
+    ) if reference_epoch is not None else None
+    if event is not None:
+        if not event.time_label:
+            return event.name
+        prefix = "Upcoming: " if event.start_epoch and event.start_epoch > int(reference_epoch) else ""
+        return clean_text(f"{prefix}{event.name} — {event.time_label}", 180)
+
+    title = _clean_synthetic_channel_label(row.channel_name)
+    category = _security_normalize_text(row.category_name)
+    is_singer_group = bool(re.search(r"\bsingers?\b", category))
+    if is_singer_group:
+        language_pattern = "|".join(_SYNTHETIC_LANGUAGE_NAMES)
+        artist = re.sub(
+            rf"^(?:{language_pattern})\s*[|:\-]*\s*",
+            "",
+            title,
+            flags=re.I,
+        )
+        artist = re.sub(r"\b(?:singer|songs?)\b\s*$", "", artist, flags=re.I)
+        artist = clean_text(artist, 150)
+        if artist:
+            return clean_text(f"{_smart_synthetic_title(artist)} Songs", 180)
+
+    is_movie = row.metadata.genre == "movies" or "movie.dummy" in row.epg_id.casefold()
+    if is_movie and title:
+        generic_numbered = re.fullmatch(
+            rf"({'|'.join(_SYNTHETIC_LANGUAGE_NAMES)})\s+movies?\s+\d+",
+            title,
+            flags=re.I,
+        )
+        if generic_numbered:
+            title = f"{generic_numbered.group(1)} Movies"
+        else:
+            title = re.sub(r"\bmovies?\s+\d+\s*$", "Movies", title, flags=re.I)
+        language_prefix = re.match(
+            rf"^({'|'.join(_SYNTHETIC_LANGUAGE_NAMES)})\s+(.+)$",
+            title,
+            flags=re.I,
+        )
+        if language_prefix and language_prefix.group(2).casefold() not in {
+            "movie",
+            "movie loop",
+            "movies",
+            "movies loop",
+        }:
+            title = language_prefix.group(2)
+        title = re.sub(r"\bmovie\s+loop\b", "Movies", title, flags=re.I)
+        title = re.sub(
+            r"\baction\s+(?:and\s+|&\s*)?adventure\b",
+            "Action & Adventure",
+            title,
+            flags=re.I,
+        )
+
+    rendered = _smart_synthetic_title(title)
+    if rendered:
+        return rendered
+    genre_label = _SYNTHETIC_GENRE_LABELS.get(row.metadata.genre, "")
+    return f"{genre_label} Programming" if genre_label else "Channel Programming"
+
+
+def synthetic_programme_categories(row: MappingRow) -> list[str]:
+    label = _SYNTHETIC_GENRE_LABELS.get(row.metadata.genre, "")
+    return [label] if label else []
+
+
+@dataclass(frozen=True)
+class SyntheticGuideStats:
+    schedules: int
+    programme_rows: int
+    block_hours: int
+    event_window_hours: int
+    window_start: int
+    window_end: int
+
+
+def insert_synthetic_guides(
+    *,
+    connection: sqlite3.Connection,
+    rows: Sequence[MappingRow],
+    window_start: int,
+    window_end: int,
+    block_hours: int = DEFAULT_SYNTHETIC_BLOCK_HOURS,
+    event_window_hours: int = DEFAULT_SYNTHETIC_EVENT_WINDOW_HOURS,
+    reference_epoch: int | None = None,
+) -> SyntheticGuideStats:
+    """Insert deterministic, per-stream guide blocks for approved dummy rows."""
+
+    hours = int(block_hours)
+    if hours < 4 or hours > 24:
+        raise BuildError("Synthetic guide block hours must be between 4 and 24.")
+    event_hours = int(event_window_hours)
+    if event_hours < 1 or event_hours > 24:
+        raise BuildError("Synthetic event window hours must be between 1 and 24.")
+    block_seconds = hours * 3600
+    aligned_start = (int(window_start) // block_seconds) * block_seconds
+    final_end = int(window_end)
+    title_reference_epoch = int(
+        reference_epoch if reference_epoch is not None else window_start
+    )
+    if final_end <= aligned_start:
+        raise BuildError("Synthetic guide window must end after it starts.")
+    synthetic_rows = sorted(
+        (
+            row
+            for row in rows
+            if row.runtime_eligible and row.requested_source == "dummy"
+        ),
+        key=lambda row: (
+            row.server_id,
+            stream_sort_key(row.stream_id),
+            row.channel_name.casefold(),
+            row.channel_name,
+        ),
+    )
+    slots_per_schedule = (
+        final_end - aligned_start + block_seconds - 1
+    ) // block_seconds
+    # Splitting an exact-time event out of the day-aligned grid can add at most
+    # two boundaries per stream.
+    expected_programmes = len(synthetic_rows) * (slots_per_schedule + 2)
+    if expected_programmes > MAX_SYNTHETIC_PROGRAMME_ROWS:
+        raise BuildError(
+            "Synthetic guide would exceed the configured programme-row limit "
+            f"({expected_programmes:,} > {MAX_SYNTHETIC_PROGRAMME_ROWS:,})."
+        )
+    if not synthetic_rows:
+        return SyntheticGuideStats(
+            0, 0, hours, event_hours, aligned_start, final_end
+        )
+
+    connection.executemany(
+        "INSERT INTO channels "
+        "(source_key, channel_key, source_channel_id, display_name, icon_url) "
+        "VALUES (?, ?, ?, ?, '')",
+        (
+            (
+                row.source_key,
+                row.epg_id,
+                f"synthetic:{row.synthetic_identity}",
+                row.channel_name,
+            )
+            for row in synthetic_rows
+        ),
+    )
+    programme_batch: list[tuple[Any, ...]] = []
+    programme_rows = 0
+    insert_sql = (
+        "INSERT INTO programmes "
+        "(source_key, channel_key, start_epoch, stop_epoch, title, subtitle, "
+        "description, categories_json, quality) "
+        "VALUES (?, ?, ?, ?, ?, '', '', ?, 1000)"
+    )
+    for row in synthetic_rows:
+        categories_json = json_compact(synthetic_programme_categories(row))
+        event = None
+        if row.metadata.genre != "adult" and row.metadata.content_rating != "adult":
+            event = decode_synthetic_event_title(
+                row,
+                reference_epoch=title_reference_epoch,
+            )
+        if event is None:
+            regular_title = synthetic_programme_title(
+                row,
+                reference_epoch=title_reference_epoch,
+            )
+        elif event.time_label:
+            regular_title = clean_text(
+                f"{event.name} — {event.time_label}", 180
+            )
+        else:
+            regular_title = event.name
+        if event is not None and event.start_epoch is not None:
+            event_start = event.start_epoch
+            event_end = event_start + event_hours * 3600
+        for base_start in range(aligned_start, final_end, block_seconds):
+            base_stop = base_start + block_seconds
+            split_points = [base_start]
+            if event is not None and event.start_epoch is not None:
+                if base_start < event_start < base_stop:
+                    split_points.append(event_start)
+                if base_start < event_end < base_stop:
+                    split_points.append(event_end)
+            split_points.append(base_stop)
+            split_points.sort()
+            for start, stop in zip(split_points, split_points[1:]):
+                if event is not None and event.start_epoch is not None:
+                    event_label = clean_text(
+                        f"{event.name} — {event.time_label}", 180
+                    )
+                    if stop <= event_start:
+                        title = clean_text(f"Upcoming: {event_label}", 180)
+                    elif start < event_end and stop > event_start:
+                        title = event_label
+                    else:
+                        title = clean_text(
+                            f"Event Information: {event_label}", 180
+                        )
+                else:
+                    title = regular_title
+                programme_batch.append(
+                    (
+                        row.source_key,
+                        row.epg_id,
+                        start,
+                        stop,
+                        title,
+                        categories_json,
+                    )
+                )
+                programme_rows += 1
+                if len(programme_batch) >= SQLITE_BATCH_SIZE:
+                    connection.executemany(insert_sql, programme_batch)
+                    programme_batch.clear()
+    if programme_batch:
+        connection.executemany(insert_sql, programme_batch)
+    connection.commit()
+    return SyntheticGuideStats(
+        schedules=len(synthetic_rows),
+        programme_rows=programme_rows,
+        block_hours=hours,
+        event_window_hours=event_hours,
+        window_start=aligned_start,
+        window_end=final_end,
+    )
+
+
 def create_database(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.unlink(missing_ok=True)
@@ -2600,7 +3243,11 @@ def build_xml_entries(
             return
         key = (row.source_key, row.epg_id)
         quality = schedule_quality(schedule_stats.get(key), row.source_key)
-        entry_priority = 2 if entry_type == "canonical_epg_id" else 1
+        entry_priority = (
+            2
+            if entry_type in {"canonical_epg_id", "synthetic_stream_id"}
+            else (0 if row.requested_source == "dummy" else 1)
+        )
         candidate_names = {
             clean_text(value, 300) for value in display_names if clean_text(value, 300)
         }
@@ -2657,6 +3304,12 @@ def build_xml_entries(
             }
         )
 
+    channel_name_counts = Counter(
+        clean_identifier(row.channel_name, 300)
+        for row in rows
+        if row.runtime_eligible and clean_identifier(row.channel_name, 300)
+    )
+
     # Shared channel-name aliases can point at more than one schedule. Iterate
     # in the same stable identity order used by the mapping hash so equal-
     # quality ties never depend on Google Sheet row order.
@@ -2693,7 +3346,20 @@ def build_xml_entries(
             icon_url,
             "channel_name",
         )
-        if row.requested_source != "dummy":
+        if row.requested_source == "dummy" and channel_name_counts[
+            clean_identifier(row.channel_name, 300)
+        ] > 1:
+            # Duplicate provider names cannot represent two per-stream guides
+            # as one XMLTV ID. Preserve the shared name alias for existing
+            # playlists and add a stable unique ID for each affected stream.
+            register(
+                row.schedule_key,
+                [row.channel_name, row.canonical_name],
+                row,
+                icon_url,
+                "synthetic_stream_id",
+            )
+        elif row.requested_source != "dummy":
             register(
                 row.epg_id,
                 [source_name, row.canonical_name, row.channel_name],
@@ -3056,6 +3722,11 @@ def write_metadata_json(
             payload = {
                 "channelName": row.channel_name,
                 "canonicalName": row.canonical_name,
+                "guideMode": (
+                    "synthetic"
+                    if row.requested_source == "dummy"
+                    else ("panel" if row.effective_source == "panel" else "epgshare")
+                ),
                 "providerCategory": row.category_name,
                 "categoryId": row.category_id,
                 "channelNumber": row.channel_number,
@@ -3413,12 +4084,22 @@ def build_server(
             (item.source_key, item.epg_id): item for item in mapped_rows
         }.values()
     )
-    source_policy = (
-        "EPGSHARE_ALL_ONLY" if server_id == "server_1" else "MAPPING_SELECTED"
-    )
     native_panel_used = any(row.effective_source == "panel" for row in mapped_rows)
     dummy_guide_streams = sum(
         1 for row in mapped_rows if row.requested_source == "dummy"
+    )
+    source_policy = (
+        (
+            "EPGSHARE_ALL_PLUS_CHANNEL_DERIVED"
+            if dummy_guide_streams
+            else "EPGSHARE_ALL_ONLY"
+        )
+        if server_id == "server_1"
+        else (
+            "MAPPING_SELECTED_PLUS_CHANNEL_DERIVED"
+            if dummy_guide_streams
+            else "MAPPING_SELECTED"
+        )
     )
     used_source_keys = {row.source_key for row in mapped_rows}
     server_source_provenance = {
@@ -3426,9 +4107,18 @@ def build_server(
         for key, value in source_provenance.items()
         if key in used_source_keys
     }
+    if "synthetic" in source_provenance and any(
+        row.runtime_eligible and row.requested_source == "dummy"
+        for row in server_rows
+    ):
+        server_source_provenance["synthetic"] = source_provenance["synthetic"]
     unique_schedule_keys = {
         (row.source_key, row.epg_id) for row in mapped_rows
     }
+    downloaded_schedule_keys = {
+        key for key in unique_schedule_keys if not key[0].startswith("synthetic:")
+    }
+    generated_schedule_keys = unique_schedule_keys - downloaded_schedule_keys
     schedules_with_programmes = sum(
         1
         for key in unique_schedule_keys
@@ -3470,6 +4160,15 @@ def build_server(
         "logoPolicy": LOGO_POLICY,
         "panelSourceIconsUsed": False,
         "combinedSourceDummyGuideStreams": dummy_guide_streams,
+        "syntheticGuidePolicy": (
+            server_source_provenance.get("synthetic", {}).get("titlePolicy", "")
+        ),
+        "syntheticGuideBlockHours": (
+            server_source_provenance.get("synthetic", {}).get("blockHours")
+        ),
+        "syntheticEventWindowHours": (
+            server_source_provenance.get("synthetic", {}).get("eventWindowHours")
+        ),
         "server1LegacyPanelRowsQuarantined": quarantined_server_1_panel_rows,
         "dataFile": xml_path.name,
         "dataSha256": sha256_file(xml_path),
@@ -3484,7 +4183,8 @@ def build_server(
         "canonicalEpgIdEntries": xml_result["canonicalEpgChannels"],
         "programmeRows": xml_result["programmeRows"],
         "catalogStreams": len(server_rows),
-        "downloadedUniqueSourceSchedulesRequested": len(unique_schedule_keys),
+        "downloadedUniqueSourceSchedulesRequested": len(downloaded_schedule_keys),
+        "generatedSyntheticSchedules": len(generated_schedule_keys),
         "uniqueSourceSchedulesRequested": len(unique_schedule_keys),
         "uniqueSourceSchedulesWithProgrammes": schedules_with_programmes,
         "epgShareFeeds": epgshare_feed_labels,
@@ -3546,6 +4246,15 @@ def build_server(
         "logoPolicy": LOGO_POLICY,
         "panelSourceIconsUsed": False,
         "combinedSourceDummyGuideStreams": dummy_guide_streams,
+        "syntheticGuidePolicy": (
+            server_source_provenance.get("synthetic", {}).get("titlePolicy", "")
+        ),
+        "syntheticGuideBlockHours": (
+            server_source_provenance.get("synthetic", {}).get("blockHours")
+        ),
+        "syntheticEventWindowHours": (
+            server_source_provenance.get("synthetic", {}).get("eventWindowHours")
+        ),
     }
     write_json(
         staging_public / "EPG" / f"{server_id}_epg_manifest.json",
@@ -3835,6 +4544,34 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--past-days", type=int, default=3)
     parser.add_argument("--app-past-hours", type=int, default=6)
     parser.add_argument("--app-future-hours", type=int, default=72)
+    parser.add_argument(
+        "--synthetic-block-hours",
+        type=int,
+        default=DEFAULT_SYNTHETIC_BLOCK_HOURS,
+        help=(
+            "Duration of channel-derived placeholder guide blocks (4..24, "
+            "subject to the bounded programme-row cap; "
+            f"default: {DEFAULT_SYNTHETIC_BLOCK_HOURS})."
+        ),
+    )
+    parser.add_argument(
+        "--synthetic-future-days",
+        type=int,
+        default=DEFAULT_SYNTHETIC_FUTURE_DAYS,
+        help=(
+            "Future coverage for channel-derived placeholder guides (1..14; "
+            f"default: {DEFAULT_SYNTHETIC_FUTURE_DAYS})."
+        ),
+    )
+    parser.add_argument(
+        "--synthetic-event-window-hours",
+        type=int,
+        default=DEFAULT_SYNTHETIC_EVENT_WINDOW_HOURS,
+        help=(
+            "Bounded presentation window around an exact-time synthetic event "
+            f"(1..24; default: {DEFAULT_SYNTHETIC_EVENT_WINDOW_HOURS})."
+        ),
+    )
     parser.add_argument("--minimum-coverage", type=float, default=0.0)
     parser.add_argument("--now-epoch", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument(
@@ -3870,6 +4607,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise BuildError("At least one server is required.")
     if args.past_days < 0 or args.app_past_hours < 0 or args.app_future_hours <= 0:
         raise BuildError("Guide windows must be non-negative and future hours positive.")
+    if not 4 <= args.synthetic_block_hours <= 24:
+        raise BuildError("--synthetic-block-hours must be between 4 and 24.")
+    if not 1 <= args.synthetic_future_days <= 14:
+        raise BuildError("--synthetic-future-days must be between 1 and 14.")
+    if not 1 <= args.synthetic_event_window_hours <= 24:
+        raise BuildError("--synthetic-event-window-hours must be between 1 and 24.")
     if not 0.0 <= args.minimum_coverage <= 100.0:
         raise BuildError("--minimum-coverage must be between 0 and 100.")
     if args.epgshare_spool_file and not args.all_source_file:
@@ -4185,6 +4928,36 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_provenance[panel_key] = {
                 **panel_details,
                 **panel_stats.public_dict(),
+            }
+
+        synthetic_stats = insert_synthetic_guides(
+            connection=connection,
+            rows=rows,
+            window_start=xml_window_start,
+            window_end=max(
+                app_window_end,
+                generated_at + int(args.synthetic_future_days) * 86400,
+            ),
+            block_hours=args.synthetic_block_hours,
+            event_window_hours=args.synthetic_event_window_hours,
+            reference_epoch=generated_at,
+        )
+        if synthetic_stats.schedules:
+            print(
+                "Generated channel-derived placeholder guides for "
+                f"{synthetic_stats.schedules:,} streams in "
+                f"{synthetic_stats.programme_rows:,} "
+                f"{synthetic_stats.block_hours}-hour blocks.",
+                flush=True,
+            )
+            source_provenance["synthetic"] = {
+                "inputMode": "generated",
+                "titlePolicy": "CHANNEL_DERIVED_NO_INVENTED_PROGRAMME_DETAILS",
+                "blockHours": synthetic_stats.block_hours,
+                "eventWindowHours": synthetic_stats.event_window_hours,
+                "futureDays": int(args.synthetic_future_days),
+                "windowStart": synthetic_stats.window_start,
+                "windowEnd": synthetic_stats.window_end,
             }
 
         connection.execute(

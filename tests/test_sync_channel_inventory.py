@@ -1156,6 +1156,116 @@ class MappingAndComparisonTests(unittest.TestCase):
             sync.possible_id_reuse("CNN TV", "CNN Channel", "News", "News")
         )
 
+    def test_numbered_event_bank_payload_rotation_is_not_stream_reuse(self) -> None:
+        examples = (
+            (
+                "US (ESPN+ 001) | Baseball: Bears vs. Lions (2026-09-18 19:00:00)",
+                "US (ESPN+ 001) | Soccer: City vs. United (2026-09-19 20:00:00)",
+                "|NA| USA ESPN+",
+            ),
+            (
+                "PPV EVENT 05: UFC 322 Prelims (11.15 8:00 PM ET)",
+                "PPV EVENT 05: Boxing Championship (11.22 9:00 PM ET)",
+                "PPV | LIVE EVENTS",
+            ),
+            (
+                "LIVE EVENT 06 - 7:30pm FloRacing Night In America",
+                "LIVE EVENT 06 - NO EVENT",
+                "LIVE | PPV Events",
+            ),
+        )
+        for old_name, new_name, category in examples:
+            with self.subTest(old_name=old_name, new_name=new_name):
+                self.assertFalse(
+                    sync.possible_id_reuse(
+                        old_name, new_name, category, category
+                    )
+                )
+
+        current = table(
+            [
+                mapping_row(
+                    "server_3",
+                    "1324001",
+                    examples[0][0],
+                    category_name=examples[0][2],
+                )
+            ]
+        )
+        inv = inventory(
+            "server_3",
+            [
+                {
+                    "stream_id": "1324001",
+                    "name": examples[0][1],
+                    "category_id": "espn-plus",
+                    "category_name": examples[0][2],
+                }
+            ],
+        )
+        _new, changed, _missing = sync.compare_inventory(
+            current, [inv], discovered_at="2026-09-18T13:17:00Z"
+        )
+        self.assertEqual(changed[0]["risk"], "NAME_OR_CATEGORY_DRIFT")
+        self.assertEqual(
+            sync.pending_sync_alert_rows(
+                changed, [], detected_at="2026-09-18T13:17:00Z"
+            ),
+            [],
+        )
+
+    def test_event_slot_exception_rejects_lookalikes_and_identity_changes(self) -> None:
+        examples = (
+            # A different numbered slot is a different provider identity.
+            (
+                "US (ESPN+ 001) | Baseball Championship",
+                "US (ESPN+ 002) | Soccer Championship",
+                "|NA| USA ESPN+",
+                "|NA| USA ESPN+",
+            ),
+            # Zero padding and canonical punctuation are required.
+            (
+                "US (ESPN+ 1) | Baseball Championship",
+                "US (ESPN+ 1) | Soccer Championship",
+                "|NA| USA ESPN+",
+                "|NA| USA ESPN+",
+            ),
+            (
+                "PPV EVENT 05: Boxing Championship",
+                "PPV EVENT 05 - Wrestling Championship",
+                "PPV | LIVE EVENTS",
+                "PPV | LIVE EVENTS",
+            ),
+            # The same-looking prefix cannot cross provider folders.
+            (
+                "LIVE EVENT 06 - Racing Championship",
+                "LIVE EVENT 06 - Soccer Championship",
+                "LIVE | PPV Events",
+                "Sports",
+            ),
+            # Empty categories are insufficient proof of a stable event bank.
+            (
+                "PPV EVENT 05: Boxing Championship",
+                "PPV EVENT 05: Wrestling Championship",
+                "",
+                "",
+            ),
+            # Merely containing the provider tokens is not a slot identity.
+            (
+                "ESPN+ 001 | Baseball Championship",
+                "ESPN+ 001 | Soccer Championship",
+                "Sports",
+                "Sports",
+            ),
+        )
+        for old_name, new_name, old_category, new_category in examples:
+            with self.subTest(old_name=old_name, new_name=new_name):
+                self.assertTrue(
+                    sync.possible_id_reuse(
+                        old_name, new_name, old_category, new_category
+                    )
+                )
+
     def test_adult_category_boundary_quarantines_even_when_name_is_unchanged(self) -> None:
         self.assertTrue(
             sync.possible_id_reuse(
@@ -3775,6 +3885,8 @@ class ReportsAndSheetsTests(unittest.TestCase):
                 "server_1=4000",
                 "server_2=10000",
                 "server_3=9000",
+                "--coverage-fallback-limit",
+                "2500",
                 "--write-to-sheet",
             ]
         )
@@ -3782,6 +3894,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
         self.assertEqual(len(sync.parse_server_minimums(args.minimum_server_channels)), 3)
         self.assertTrue(args.write_to_sheet)
         self.assertEqual(args.alerts_tab, "Sync Alerts")
+        self.assertEqual(args.coverage_fallback_limit, 2500)
 
     def test_public_repo_workflow_uploads_summary_only(self) -> None:
         workflow = (
@@ -4199,6 +4312,62 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(updates[0]["source"], "panel")
         self.assertEqual(updates[0]["epg_id"], "bbc.one")
         self.assertEqual(summary["native_review_candidates"], 1)
+        self.assertEqual(summary["native_review_verified"], 1)
+
+    def test_verified_native_schedule_overrides_coverage_fallback_proposal(self) -> None:
+        before = mapping_row(
+            "server_2", "101", "UK | BBC One FHD", action="REVIEW", epg_id=""
+        )
+        before["enabled"] = "FALSE"
+        fallback = dict(before)
+        fallback.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_DUMMY",
+                "source": "dummy",
+                "epg_feed": "DUMMY_CHANNELS",
+                "epg_id": "Synthetic.Channel.local",
+                "reason": "coverage-fallback-rollback-v1 10:12:0:epgshare01ALL_SOURCES1",
+                "notes": (
+                    "coverage-fallback-v1 source=local-synthetic; "
+                    "auto-map-v1 method=coverage_fallback"
+                ),
+            }
+        )
+        provider = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": "101",
+                    "name": "UK | BBC One FHD",
+                    "category_name": "UK | General",
+                    "epg_channel_id": "bbc.one",
+                }
+            ],
+        )
+        validation = sync.native_review.NativeValidation(
+            frozenset({"bbc.one"}),
+            1,
+            {"bbc.one": ("BBC One HD",)},
+        )
+
+        with mock.patch.object(
+            sync.streaming,
+            "download_panel_xmltv",
+            return_value=(Path("/tmp/native.xml"), {}),
+        ), mock.patch.object(
+            sync.native_review, "validate_native_xmltv", return_value=validation
+        ):
+            updates, summary = sync._build_verified_native_review_updates(
+                review_input_rows=[before],
+                review_result_rows=[fallback],
+                inventories=[provider],
+                generated_at="2026-09-16T00:00:00Z",
+            )
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0]["action"], "KEEP_PANEL")
+        self.assertEqual(updates[0]["epg_id"], "bbc.one")
         self.assertEqual(summary["native_review_verified"], 1)
 
     def test_native_review_rejects_cross_id_display_name_ambiguity(self) -> None:
@@ -5341,6 +5510,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 epgshare_spool_out=root / "selected.sqlite3",
                 review_recheck_mode="dry-run",
                 review_recheck_servers=("server_1",),
+                coverage_fallback_limit=500,
             )
             effective = streaming.parse_mapping_csv(
                 (root / "effective.csv").read_bytes(),
@@ -5354,6 +5524,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(summary["review_recheck_safe_matches"], 1)
         self.assertEqual(summary["review_recheck_rows_updated"], 0)
         self.assertIs(matcher.call_args.kwargs["enable_ai_review"], False)
+        self.assertEqual(matcher.call_args.kwargs["coverage_fallback_limit"], 500)
         self.assertFalse(effective[0].runtime_eligible)
 
     def test_new_auto_enabled_row_is_provider_revalidated_before_append(self) -> None:

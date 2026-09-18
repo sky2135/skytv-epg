@@ -54,6 +54,33 @@ Both workflows use the same non-cancelling concurrency group, so they cannot
 write to the Sheet at the same time. Neither workflow commits generated output
 or mapping data to a Git branch.
 
+## Matching Lab (proposal-only)
+
+The optional external Matching Lab evaluates the complete disabled `REVIEW`
+backlog without changing either production workflow. It combines bounded
+multi-signal retrieval, symmetric protected-semantics checks, current programme
+validation, optional advisory-only AI, deterministic private proposal bundles,
+and an optional local observation ledger with chain-consistency checks. It has
+no Mapping-write path; even its
+strongest shadow state carries no apply authority. Start with
+[the design decision](docs/MATCHING_LAB_DESIGN.md) and
+[the operating guide](docs/MATCHING_LAB_OPERATIONS.md). The proposed
+[smart guide coverage policy](docs/SMART_GUIDE_COVERAGE_DESIGN.md) describes
+how calibrated real matches, channel-specific synthetic guides, event-slot
+handling, and customer feedback can provide near-complete useful coverage
+without presenting uncertain matches as real schedules. The implemented,
+opt-in [Smart Coverage Fallback](docs/SMART_COVERAGE_FALLBACK.md) explains the
+bounded rollout control and rollback evidence for local synthetic guides. A standalone private
+approval package can bind an owner's decision to one exact unexpired run, and a
+prepare-only command can stage a deterministic canary of at most 25 rows. Both
+artifacts remain non-authoritative and preserve existing automated Mapping notes
+when reviewer notes are blank. A separate manual `apply` subcommand can write
+at most 25 exact approvals only after full approval-ID confirmation and fresh
+catalog, programme, provider, Mapping, and OPEN-alert checks; it performs an
+atomic batch update and authoritative postread. It must run from a secure runner
+holding the same shared lock as the unchanged production workflows. No live
+write was performed as part of implementing or testing this lane.
+
 ## Google Sheet
 
 The supplied workbook and CSV seed both begin with the same 25,170 historical

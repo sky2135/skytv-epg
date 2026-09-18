@@ -177,6 +177,21 @@ def text_catalog_bytes(
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+def current_auto_map_v1_note(
+    *, method: str = "canonical_identity", market: str = "US"
+) -> str:
+    source_sha256 = "c" * 64
+    return (
+        f"auto-map-v1 method={method}; market={market}; "
+        f"matcher={STRICT_MATCHER_VERSION}; "
+        f"matcher_build={STRICT_MATCHER_BUILD_ID}; "
+        f"matcher_sha256={STRICT_MATCHER_SOURCE_SHA256}; "
+        f"engine_sha256={STRICT_ENGINE_SOURCE_SHA256}; "
+        f"catalog_sha256={source_sha256}; source_sha256={source_sha256} | "
+        "Automatically discovered by test"
+    )
+
+
 class FakeEngine:
     def build_inventory_profiles_v8(self, channels, category_names):
         return (
@@ -498,6 +513,235 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(gates[0].source_sha256, outcome.source_sha256)
             self.assertTrue(gates[0].reason)
             self.assertTrue(spool.is_file())
+
+    def test_opt_in_coverage_fallback_uses_truthful_local_synthetic_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(source, xml_bytes(strong=False))
+            text_catalog.write_bytes(text_catalog_bytes("Good.Channel.us2"))
+            original = mapping_row(
+                server_id="server_1",
+                stream_id="new-1",
+                channel_name="Hindi Movies 27 HD",
+                category_name="HINDI | MOVIES 24/7",
+            )
+
+            outcome = auto_match_and_spool(
+                mapping_rows=[],
+                inventories=[
+                    inventory(
+                        server_id="server_1",
+                        stream_id="new-1",
+                        name="Hindi Movies 27 HD",
+                    )
+                ],
+                new_rows=[original],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                coverage_fallback_limit=1,
+                minimum_unique_channels=1,
+                runtime_factory=RuntimeFactory(),
+            )
+
+            row = outcome.rows[0]
+            self.assertEqual(row["action"], "AUTO_DUMMY")
+            self.assertEqual(row["enabled"], "TRUE")
+            self.assertEqual(row["source"], "dummy")
+            self.assertEqual(row["epg_feed"], "DUMMY_CHANNELS")
+            self.assertEqual(row["epg_id"], "Synthetic.Movie.local")
+            self.assertIn("coverage-fallback-v1", row["notes"])
+            self.assertIn("auto-map-v1", row["notes"])
+            self.assertEqual(outcome.coverage_fallback_candidate_rows, 1)
+            self.assertEqual(outcome.coverage_fallback_applied_rows, 1)
+            self.assertEqual(outcome.coverage_fallback_deferred_rows, 0)
+            self.assertEqual(outcome.new_coverage_fallback_rows, 1)
+            self.assertEqual(outcome.approved_rows, 1)
+            self.assertEqual(outcome.review_rows, 0)
+            summary = outcome.summary_fields()
+            self.assertTrue(summary["coverage_fallback_enabled"])
+            self.assertEqual(summary["coverage_fallback_applied_rows"], 1)
+
+    def test_coverage_fallback_replaces_only_strict_machine_prefill_with_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(source, xml_bytes(strong=False))
+            text_catalog.write_bytes(text_catalog_bytes("Good.Channel.us2"))
+            original = mapping_row(
+                server_id="server_1",
+                stream_id="review-1",
+                channel_name="US: Machine Candidate",
+                epg_id="Old.Provisional.us2",
+            )
+            original["notes"] = current_auto_map_v1_note()
+            prior_target = (
+                original["source"],
+                original["epg_feed"],
+                original["epg_id"],
+            )
+
+            outcome = auto_match_and_spool(
+                mapping_rows=[original],
+                inventories=[
+                    inventory(
+                        server_id="server_1",
+                        stream_id="review-1",
+                        name="US: Machine Candidate",
+                    )
+                ],
+                new_rows=(),
+                review_rows=[original],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                coverage_fallback_limit=1,
+                minimum_unique_channels=1,
+                runtime_factory=RuntimeFactory(),
+            )
+
+            row = outcome.rows[0]
+            self.assertEqual(row["action"], "AUTO_DUMMY")
+            self.assertEqual(
+                integration._parse_coverage_fallback_rollback_record(
+                    row["reason"]
+                ),
+                prior_target,
+            )
+            self.assertIn("prior_target_sha256=", row["notes"])
+            self.assertEqual(
+                outcome.coverage_fallback_machine_prefilled_candidate_rows, 1
+            )
+            self.assertEqual(
+                outcome.coverage_fallback_machine_prefilled_applied_rows, 1
+            )
+            self.assertEqual(outcome.coverage_fallback_protected_manual_rows, 0)
+            self.assertEqual(outcome.coverage_fallback_protected_native_rows, 0)
+
+    def test_coverage_fallback_never_overwrites_prefilled_or_quarantined_row(self) -> None:
+        proposal = SimpleNamespace(matcher_action="REVIEW")
+        blank = mapping_row(
+            server_id="server_2",
+            stream_id="review-1",
+            channel_name="Named Channel",
+        )
+        patched = dict(blank)
+        self.assertTrue(
+            integration._coverage_fallback_candidate(
+                key=("server_2", "review-1"),
+                original=blank,
+                patched=patched,
+                proposal=proposal,
+                quarantined_keys=frozenset(),
+            )
+        )
+
+        prefilled = dict(blank)
+        prefilled["epg_id"] = "Operator.Selected.example"
+        self.assertFalse(
+            integration._coverage_fallback_candidate(
+                key=("server_2", "review-1"),
+                original=prefilled,
+                patched=patched,
+                proposal=proposal,
+                quarantined_keys=frozenset(),
+            )
+        )
+        machine_prefilled = dict(prefilled)
+        machine_prefilled["notes"] = current_auto_map_v1_note()
+        self.assertTrue(
+            integration._coverage_fallback_candidate(
+                key=("server_2", "review-1"),
+                original=machine_prefilled,
+                patched=patched,
+                proposal=proposal,
+                quarantined_keys=frozenset(),
+            )
+        )
+        forged_prefill = dict(machine_prefilled)
+        forged_prefill["notes"] = forged_prefill["notes"].replace(
+            STRICT_MATCHER_SOURCE_SHA256, "0" * 64
+        )
+        self.assertFalse(
+            integration._coverage_fallback_candidate(
+                key=("server_2", "review-1"),
+                original=forged_prefill,
+                patched=patched,
+                proposal=proposal,
+                quarantined_keys=frozenset(),
+            )
+        )
+        native_prefill = dict(machine_prefilled)
+        native_prefill.update({"source": "panel", "epg_feed": "panel"})
+        self.assertFalse(
+            integration._coverage_fallback_candidate(
+                key=("server_2", "review-1"),
+                original=native_prefill,
+                patched=patched,
+                proposal=proposal,
+                quarantined_keys=frozenset(),
+            )
+        )
+
+        legacy = dict(prefilled)
+        legacy.update(
+            {
+                "server_id": "server_1",
+                "source": "panel",
+                "epg_feed": "server xmltv.php",
+                "reason": integration._LEGACY_SERVER1_REASON,
+                "notes": sorted(integration._LEGACY_SERVER1_NOTES)[0],
+            }
+        )
+        self.assertTrue(
+            integration._coverage_fallback_candidate(
+                key=("server_1", "review-1"),
+                original=legacy,
+                patched={**patched, "server_id": "server_1"},
+                proposal=proposal,
+                quarantined_keys=frozenset(),
+            )
+        )
+        self.assertFalse(
+            integration._coverage_fallback_candidate(
+                key=("server_2", "review-1"),
+                original=blank,
+                patched=patched,
+                proposal=proposal,
+                quarantined_keys=frozenset({("server_2", "review-1")}),
+            )
+        )
+
+    def test_local_dummy_rows_do_not_request_epgshare_placeholder_ids(self) -> None:
+        real = mapping_row(
+            server_id="server_1",
+            stream_id="real-1",
+            channel_name="Real",
+            action="AUTO_EPGSHARE",
+            epg_id="Real.Channel.us2",
+            enabled="TRUE",
+        )
+        synthetic = mapping_row(
+            server_id="server_1",
+            stream_id="synthetic-1",
+            channel_name="Synthetic",
+            action="AUTO_DUMMY",
+            source="dummy",
+            epg_id="Synthetic.Channel.local",
+            enabled="TRUE",
+        )
+        synthetic["epg_feed"] = "DUMMY_CHANNELS"
+        self.assertEqual(
+            integration.active_combined_source_ids([real, synthetic]),
+            frozenset({"Real.Channel.us2"}),
+        )
 
     def test_provisional_and_rejected_gate_summaries_count_rows_not_unique_ids(
         self,

@@ -1,0 +1,19 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --pull
+      - --file
+      - deploy/matching-lab/Dockerfile
+      - --tag
+      - ${_LOCATION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG}
+      - .
+
+images:
+  - ${_LOCATION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_IMAGE_NAME}:${_TAG}
+
+substitutions:
+  _LOCATION: us-central1
+  _REPOSITORY: skytv
+  _IMAGE_NAME: matching-lab
+  _TAG: manual
