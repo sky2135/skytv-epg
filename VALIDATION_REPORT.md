@@ -1,13 +1,13 @@
 # SKY TV EPG Version 1 — validation report
 
 **Local release status: PASS — affected-files release sealed**  
-Validated through: **2026-09-17 03:35 UTC**
+Validated through: **2026-09-18 15:59 UTC**
 
 The catalog-rollover, Workflow 2 snapshot-guard, native-panel XMLTV, and
 Server 2/3 REVIEW-backlog repairs previously passed focused adversarial
 validation. The current release also adds the scheduled all-server REVIEW
 recheck, durable Smart Rule memory, strict Gemini verification, and deterministic
-`AUTO_DUMMY`/`IGNORE` outcomes. The sealed tree passed all **477** repository
+`AUTO_DUMMY`/`IGNORE` outcomes. The sealed tree passed all **587** repository
 tests, Python compilation, workflow parsing, integrity-hash verification, the
 private-workbook shadow acceptance run, and an independent final audit.
 
@@ -36,9 +36,11 @@ Automatic `KEEP_PANEL` approval now requires all of the following:
 The Sheet writer requires the exact verified native update in a separate
 in-memory allowlist. Forged `KEEP_PANEL` rows, Server 1 native rows, unrelated
 cell changes, concurrent Sheet edits, or alert changes fail before or after the
-single atomic request. EPGShare, native, verified-placeholder, and decorative
-heading decisions share the maximum of **5,000 deterministic updates** per
-apply run. Strict Gemini review is separately capped at **200 affected rows**.
+independently verified batches of at most 500 rows. One explicit cap of `0`,
+`25`, `100`, `500`, `2500`, or
+`5000` covers the total EPGShare, native, synthetic, decorative-heading, and
+strict-AI existing-`REVIEW` writes; its default is `0`. AI receives only the
+capacity remaining under that total and never splits a compatible cluster.
 Dry-run performs every validation but changes no Sheet row.
 
 Adversarial coverage includes conflicting API/M3U IDs, trimmed IDs, duplicate
@@ -171,7 +173,7 @@ verifiable non-atomic source rollout to complete without silently approving the
 
 ## Automated code and workflow checks
 
-The final sealed tree passed **477 of 477** repository tests. The relevant
+The final sealed tree passed **587 of 587** repository tests. The relevant
 Workflow 1 Python modules compile, both workflow YAML files parse, and every
 manifest-bound production file matches its recorded SHA-256. Adversarial tests
 also prove that raw, recursively percent-encoded, base64-reflected, HTML-entity,
@@ -318,22 +320,23 @@ the owner's private Sheet remains part of the documented OFF-then-ON test.
 | Sealed production file | SHA-256 |
 |---|---|
 | `src/skytv_epg_auto_match_v1.py` | `db49198de05cb6c618ff11a0408081eeba581eb9b9a05f231a0d04a3ce70d7e8` |
-| `scripts/auto_match_inventory.py` | `03e04d99d66b34ad8d79f5a9164167bab62ea23880e20c4d9e1e7f267140501d` |
+| `scripts/auto_match_inventory.py` | `5e88f400c66fd7bcbd8876810660fcd123e78c925f9022faaf7070f7eb81c7a0` |
 | `scripts/ai_review_gemini.py` | `b2cb275375f77648dad8bf9572eb299b42876a80d53fa405a1fd862ed244c1ca` |
 | `scripts/ai_review_policy.py` | `c398297cbf4eabef74c8a02af2a567d78724505b26779904ecdf96fe58442000` |
-| `scripts/sync_channel_inventory.py` | `09e1998ea0f462e5ea4beb3ad27995fa9bc2365d6dad92e318776aec32d2c312` |
-| `.github/workflows/channel_inventory_sync.yml` | `5c4f4e6d5783a02559c839eaae2504823d8f13a3f1314b3b11616217a8532800` |
+| `scripts/sync_channel_inventory.py` | `e91476606f3770063fca7c060d1cbd716040edfa1b5ceccbf034bfbdc48d6253` |
+| `.github/workflows/channel_inventory_sync.yml` | `239ca26c1fbd5c62668dd4609db786ee12da09d2dc9eebf34f5766ff3c74f72f` |
 
 ## External validation still required
 
 This local repair did not use the owner's provider credentials, Google service
 account, private Sheet, or GitHub Pages environment. Keep the current Sheet,
 repository, `main` branch, and Pages setup. Install the affected replacement
-files, confirm the existing `GEMINI_API_KEY` repository secret, then run
-Workflow 1 once with its defaults: Sheet writes on, REVIEW mode `apply`, server
-scope `all`, Gemini on, and the 200-row limit. A run may apply up to 5,000
-deterministic decisions; any verified remainder continues automatically at
-**02:17 Toronto time** on the next daily Workflow 1 schedule. The displayed
+files, confirm the existing `GEMINI_API_KEY` repository secret only if AI will
+be used, then run Workflow 1 first with its safe defaults: no new-row write,
+REVIEW `dry-run`, Gemini off, and total REVIEW apply cap `0`. After reviewing
+that result, use `apply` with a 25-row canary. Scheduled REVIEW writes remain
+off until `EPG_REVIEW_APPLY_LIMIT` is set to a nonzero allowed value, and
+scheduled Gemini remains off until `EPG_USE_GEMINI_AI=true`. The displayed
 summary stays compact; use its downloaded
 `summary.json` for detailed eligible, skipped, deferred, native, AI, learning,
 and catalog counters. Do not bulk-mark open alerts `RESOLVED` and do not enable

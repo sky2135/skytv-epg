@@ -440,6 +440,7 @@ class AutoMatchOutcome:
     coverage_fallback_applied_rows: int = 0
     coverage_fallback_deferred_rows: int = 0
     coverage_fallback_ai_deferred_rows: int = 0
+    coverage_fallback_suppressed_unwritten_new_rows: int = 0
     new_coverage_fallback_rows: int = 0
     recheck_coverage_fallback_rows: int = 0
     coverage_fallback_machine_prefilled_candidate_rows: int = 0
@@ -480,6 +481,9 @@ class AutoMatchOutcome:
             ),
             "coverage_fallback_ai_deferred_rows": (
                 self.coverage_fallback_ai_deferred_rows
+            ),
+            "coverage_fallback_suppressed_unwritten_new_rows": (
+                self.coverage_fallback_suppressed_unwritten_new_rows
             ),
             "new_channel_coverage_fallback_rows": (
                 self.new_coverage_fallback_rows
@@ -1616,6 +1620,32 @@ def _rotated_round_robin_review_keys(
     return tuple(ordered)
 
 
+def _interleave_coverage_fallback_lanes(
+    new_keys: Sequence[tuple[str, str]],
+    review_keys: Sequence[tuple[str, str]],
+    *,
+    rotation: int,
+) -> tuple[tuple[str, str], ...]:
+    """Fairly merge new and existing-REVIEW fallback queues.
+
+    Each input is already rotated and round-robin across servers. Alternating
+    the two populations prevents a large new-channel discovery from consuming
+    every shared synthetic slot. The first population also rotates by day so a
+    one-row allowance cannot permanently favor the same lane.
+    """
+
+    lanes = [tuple(new_keys), tuple(review_keys)]
+    if rotation % 2:
+        lanes.reverse()
+    ordered: list[tuple[str, str]] = []
+    maximum = max((len(lane) for lane in lanes), default=0)
+    for index in range(maximum):
+        for lane in lanes:
+            if index < len(lane):
+                ordered.append(lane[index])
+    return tuple(ordered)
+
+
 def _stage_ai_review_shortlists_with_metrics(
     *,
     resolver: Any | None = None,
@@ -2609,6 +2639,7 @@ def auto_match_and_spool(
     enable_ai_review: bool = False,
     ai_review_rotation: int | None = None,
     coverage_fallback_limit: int = 0,
+    include_new_coverage_fallback: bool = True,
     minimum_unique_channels: int = MINIMUM_CORROBORATED_CATALOG_IDS,
     runtime_factory: MatcherRuntimeFactory = prepare_matcher_runtime,
 ) -> AutoMatchOutcome:
@@ -2620,6 +2651,10 @@ def auto_match_and_spool(
     """
     if not isinstance(enable_ai_review, bool):
         raise AutoMatchError("enable_ai_review must be exactly true or false.")
+    if not isinstance(include_new_coverage_fallback, bool):
+        raise AutoMatchError(
+            "include_new_coverage_fallback must be exactly true or false."
+        )
     if (
         isinstance(coverage_fallback_limit, bool)
         or not isinstance(coverage_fallback_limit, int)
@@ -2743,6 +2778,9 @@ def auto_match_and_spool(
     coverage_fallback_candidate_keys: frozenset[tuple[str, str]] = frozenset()
     coverage_fallback_keys: frozenset[tuple[str, str]] = frozenset()
     coverage_fallback_ai_deferred_keys: frozenset[tuple[str, str]] = frozenset()
+    coverage_fallback_suppressed_new_keys: frozenset[
+        tuple[str, str]
+    ] = frozenset()
     coverage_fallback_machine_prefilled_keys: frozenset[
         tuple[str, str]
     ] = frozenset()
@@ -3118,21 +3156,30 @@ def auto_match_and_spool(
                     )
                     for key in rows_by_key
                 }
-                candidate_keys = frozenset(
+                all_candidate_keys = frozenset(
                     key
                     for key, classification in fallback_classifications.items()
                     if classification
                     in {"blank", "machine_prefilled", "legacy_server1"}
                 )
+                coverage_fallback_suppressed_new_keys = (
+                    frozenset()
+                    if include_new_coverage_fallback
+                    else all_candidate_keys.intersection(new_keys)
+                )
+                candidate_keys = all_candidate_keys.difference(
+                    coverage_fallback_suppressed_new_keys
+                )
                 coverage_fallback_machine_prefilled_keys = frozenset(
                     key
                     for key, classification in fallback_classifications.items()
-                    if classification in {"machine_prefilled", "legacy_server1"}
+                    if key in candidate_keys
+                    and classification in {"machine_prefilled", "legacy_server1"}
                 )
                 coverage_fallback_legacy_server1_keys = frozenset(
                     key
                     for key, classification in fallback_classifications.items()
-                    if classification == "legacy_server1"
+                    if key in candidate_keys and classification == "legacy_server1"
                 )
                 coverage_fallback_protected_manual_keys = frozenset(
                     key
@@ -3156,13 +3203,14 @@ def auto_match_and_spool(
                     coverage_fallback_ai_deferred_keys
                 )
                 rotation = now_epoch // 86400
-                ordered_fallback_keys = (
-                    *_rotated_round_robin_review_keys(
+                ordered_fallback_keys = _interleave_coverage_fallback_lanes(
+                    _rotated_round_robin_review_keys(
                         selectable.intersection(new_keys), rotation=rotation
                     ),
-                    *_rotated_round_robin_review_keys(
+                    _rotated_round_robin_review_keys(
                         selectable.intersection(review_keys), rotation=rotation
                     ),
+                    rotation=rotation,
                 )
                 coverage_fallback_keys = frozenset(
                     ordered_fallback_keys[:coverage_fallback_limit]
@@ -3426,6 +3474,9 @@ def auto_match_and_spool(
         ),
         coverage_fallback_ai_deferred_rows=len(
             coverage_fallback_ai_deferred_keys
+        ),
+        coverage_fallback_suppressed_unwritten_new_rows=len(
+            coverage_fallback_suppressed_new_keys
         ),
         new_coverage_fallback_rows=len(
             coverage_fallback_keys.intersection(new_keys)

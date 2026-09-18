@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import dataclasses
 import gzip
 import io
 import json
@@ -3887,6 +3888,8 @@ class ReportsAndSheetsTests(unittest.TestCase):
                 "server_3=9000",
                 "--coverage-fallback-limit",
                 "2500",
+                "--review-apply-limit",
+                "100",
                 "--write-to-sheet",
             ]
         )
@@ -3895,6 +3898,8 @@ class ReportsAndSheetsTests(unittest.TestCase):
         self.assertTrue(args.write_to_sheet)
         self.assertEqual(args.alerts_tab, "Sync Alerts")
         self.assertEqual(args.coverage_fallback_limit, 2500)
+        self.assertEqual(args.review_apply_limit, 100)
+        self.assertEqual(sync.parse_args([]).review_apply_limit, 0)
 
     def test_public_repo_workflow_uploads_summary_only(self) -> None:
         workflow = (
@@ -3922,6 +3927,9 @@ class ReportsAndSheetsTests(unittest.TestCase):
             "To review",
             "Other / placeholder",
             "REVIEW rows safely updated",
+            "Total existing-REVIEW apply cap",
+            "Selected lanes",
+            "Persisted lanes",
             "Safe matches waiting for the next apply run",
             "Native EPG candidates found",
             "Native EPG matches verified",
@@ -3946,7 +3954,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
             with self.subTest(removed=removed):
                 self.assertNotIn(removed, summary_section)
 
-    def test_workflow_one_daily_apply_and_ai_defaults_are_pinned(self) -> None:
+    def test_workflow_one_safe_defaults_and_scheduled_caps_are_pinned(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "channel_inventory_sync.yml"
         ).read_text(encoding="utf-8")
@@ -3956,26 +3964,33 @@ class ReportsAndSheetsTests(unittest.TestCase):
         for required in (
             'cron: "17 2 * * *"',
             'timezone: "America/Toronto"',
-            "default: apply",
+            "default: dry-run",
             "default: all",
             'default: "200"',
+            'default: "0"',
             '- "100"',
             '- "200"',
+            '- "5000"',
             "Maximum unresolved rows considered by Gemini",
+            "Maximum TOTAL REVIEW rows selected/written",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, workflow)
-        self.assertGreaterEqual(dispatch_section.count("default: true"), 2)
+        self.assertGreaterEqual(dispatch_section.count("default: false"), 2)
+        self.assertNotIn("default: true", dispatch_section)
         for scheduled_value in (
             "github.event_name == 'schedule' && 'true' || inputs.update_google_sheet",
             "github.event_name == 'schedule' && 'apply' || inputs.recheck_existing_review",
             "github.event_name == 'schedule' && 'all' || inputs.recheck_server",
-            "github.event_name == 'schedule' && 'true' || inputs.use_gemini_ai",
+            "github.event_name == 'schedule' && (vars.EPG_USE_GEMINI_AI == 'true' && 'true' || 'false') || inputs.use_gemini_ai",
             "github.event_name == 'schedule' && '200' || inputs.ai_review_limit",
+            "github.event_name == 'schedule' && (vars.EPG_REVIEW_APPLY_LIMIT || '0') || inputs.review_apply_limit",
         ):
             with self.subTest(scheduled_value=scheduled_value):
                 self.assertIn(scheduled_value, workflow)
         self.assertIn("tests.test_ai_review_policy", workflow)
+        self.assertIn("New-channel mappings proposed", workflow)
+        self.assertNotIn("New channels safely enabled", workflow)
 
     def test_workflow_native_review_is_automatic_and_safely_scoped(self) -> None:
         workflow = (
@@ -4253,6 +4268,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 "Mappings",
                 table([before]),
                 [after],
+                maximum_rows=25,
             )
 
         count, final_table = sync.update_google_sheet_review_rows(
@@ -4262,6 +4278,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             table([before]),
             [after],
             verified_native_rows=[after],
+            maximum_rows=25,
         )
         self.assertEqual(count, 1)
         self.assertEqual(final_table.rows[0]["action"], "KEEP_PANEL")
@@ -4616,6 +4633,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             table([review, unaffected]),
             [desired],
             pre_write_check=lambda: pre_write_post_counts.append(len(session.posts)),
+            maximum_rows=25,
         )
 
         self.assertEqual(count, 1)
@@ -4648,6 +4666,116 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(final_table.rows[1], unaffected)
         self.assertEqual(session.values_reads, 2)
 
+    def test_review_writer_rejects_total_cap_before_any_google_post(self) -> None:
+        review = self.disabled_review("review-cap")
+        desired = dict(review)
+        desired.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_EPGSHARE",
+                "epg_id": "Good.Channel.us2",
+                "reason": "Verified",
+            }
+        )
+        session = ReviewUpdateSession([review])
+
+        with self.assertRaisesRegex(sync.SyncError, "authorized run maximum"):
+            sync.update_google_sheet_review_rows(
+                session,
+                "a" * 30,
+                "Mappings",
+                table([review]),
+                [desired],
+                maximum_rows=0,
+            )
+
+        self.assertEqual(session.posts, [])
+        self.assertEqual(session.values_reads, 0)
+
+    def test_historical_ai_note_does_not_reclassify_deterministic_update(self) -> None:
+        review = self.disabled_review(
+            "review-history", notes="historical ai-verified-v2 decision"
+        )
+        desired = dict(review)
+        desired.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare01",
+                "epg_feed": "ALL_SOURCES1",
+                "epg_id": "Good.Channel.us2",
+                "reason": "Verified exact Smart Rules match",
+                "notes": "historical ai-verified-v2 decision; auto-map-v1 verified",
+            }
+        )
+        session = ReviewUpdateSession([review])
+
+        count, _final_table = sync.update_google_sheet_review_rows(
+            session,
+            "a" * 30,
+            "Mappings",
+            table([review]),
+            [desired],
+            maximum_rows=25,
+        )
+        metrics = sync._review_apply_lane_metrics(
+            [desired], state="persisted", ai_rows=()
+        )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(metrics["review_apply_persisted_deterministic_rows"], 1)
+        self.assertEqual(metrics["review_apply_persisted_ai_rows"], 0)
+
+    def test_ai_allowlist_requires_exact_ai_action_and_marker(self) -> None:
+        review = self.disabled_review("review-ai-boundary")
+        ai_allowed = dict(review)
+        ai_allowed.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare01",
+                "epg_feed": "ALL_SOURCES1",
+                "epg_id": "Good.Channel.us2",
+                "reason": "Gemini HIGH agreement passed local policy",
+                "notes": "ai-verified-v2 exact policy fixture",
+            }
+        )
+        missing_marker = dict(ai_allowed)
+        missing_marker["notes"] = "auto-map-v1 deterministic marker only"
+        different_action = dict(review)
+        different_action.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_DUMMY",
+                "source": "dummy",
+                "epg_feed": "DUMMY_CHANNELS",
+                "epg_id": "Synthetic.Channel.local",
+                "reason": "Verified local no-schedule classification",
+                "notes": "auto-map-v1 verified placeholder",
+            }
+        )
+
+        for desired, expected_message in (
+            (missing_marker, "lacks its exact verified policy allowlist"),
+            (different_action, "does not exactly match AI-assisted updates"),
+        ):
+            with self.subTest(action=desired["action"]):
+                session = ReviewUpdateSession([review])
+                with self.assertRaisesRegex(sync.SyncError, expected_message):
+                    sync.update_google_sheet_review_rows(
+                        session,
+                        "a" * 30,
+                        "Mappings",
+                        table([review]),
+                        [desired],
+                        verified_ai_rows=[
+                            missing_marker if desired is missing_marker else ai_allowed
+                        ],
+                        maximum_rows=25,
+                    )
+                self.assertEqual(session.posts, [])
+                self.assertEqual(session.values_reads, 0)
+
     def test_review_updates_use_verified_500_row_batches(self) -> None:
         reviews = [self.disabled_review(f"batch-{index:04d}") for index in range(501)]
         desired_rows: list[dict[str, str]] = []
@@ -4673,6 +4801,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             table(reviews),
             desired_rows,
             pre_write_check=lambda: alert_checks.append(len(session.posts)),
+            maximum_rows=5000,
         )
 
         self.assertEqual(count, 501)
@@ -4734,6 +4863,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             [desired],
             batch_pre_write_check=provider_check,
             pre_write_check=lambda: events.append("alerts"),
+            maximum_rows=25,
         )
 
         self.assertEqual(count, 1)
@@ -4760,7 +4890,12 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         session = ReviewUpdateSession(reviews)
 
         count, _final_table = sync.update_google_sheet_review_rows(
-            session, "a" * 30, "Mappings", table(reviews), desired_rows
+            session,
+            "a" * 30,
+            "Mappings",
+            table(reviews),
+            desired_rows,
+            maximum_rows=500,
         )
 
         self.assertEqual(count, 500)
@@ -4798,7 +4933,12 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         session = FailSecondBatch(reviews)
         with self.assertRaises(sync.SheetWriteError) as raised:
             sync.update_google_sheet_review_rows(
-                session, "a" * 30, "Mappings", table(reviews), desired_rows
+                session,
+                "a" * 30,
+                "Mappings",
+                table(reviews),
+                desired_rows,
+                maximum_rows=501,
             )
 
         self.assertEqual(raised.exception.appended_count, 500)
@@ -4824,7 +4964,12 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(sync.SyncError, "changed before REVIEW updates"):
             sync.update_google_sheet_review_rows(
-                session, "a" * 30, "Mappings", table([review]), [desired]
+                session,
+                "a" * 30,
+                "Mappings",
+                table([review]),
+                [desired],
+                maximum_rows=25,
             )
 
         self.assertEqual(session.posts, [])
@@ -4856,6 +5001,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 "Mappings",
                 table([review, unaffected]),
                 [desired],
+                maximum_rows=25,
             )
         self.assertEqual(raised.exception.appended_count, 1)
 
@@ -4878,7 +5024,12 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 session = ReviewUpdateSession([review], **kwargs)
                 count, final_table = sync.update_google_sheet_review_rows(
-                    session, "a" * 30, "Mappings", table([review]), [desired]
+                    session,
+                    "a" * 30,
+                    "Mappings",
+                    table([review]),
+                    [desired],
+                    maximum_rows=25,
                 )
                 self.assertEqual(count, 1)
                 self.assertEqual(final_table.rows[0]["epg_id"], "Good.Channel.us2")
@@ -4899,7 +5050,12 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         session = ReviewUpdateSession([review], status_code=503, commit=True)
 
         count, final_table = sync.update_google_sheet_review_rows(
-            session, "a" * 30, "Mappings", table([review]), [desired]
+            session,
+            "a" * 30,
+            "Mappings",
+            table([review]),
+            [desired],
+            maximum_rows=25,
         )
 
         self.assertEqual(count, 1)
@@ -4935,6 +5091,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 "Mappings",
                 table([review]),
                 [desired],
+                maximum_rows=25,
             )
 
         # The request did commit in this test double, but without an
@@ -4984,6 +5141,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                     table([review, unaffected]),
                     [desired],
                     verified_native_rows=[desired],
+                    maximum_rows=25,
                 )
 
                 self.assertEqual(count, 1)
@@ -5249,6 +5407,47 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(summary["ai_review_error_rows"], 0)
         self.assertEqual(summary["ai_review_total_tokens"], 15)
 
+    def test_gemini_remaining_capacity_defers_whole_cluster(self) -> None:
+        first = self.disabled_review("review-1")
+        second = self.disabled_review("review-2")
+        second.update(
+            {
+                "server_id": "server_2",
+                "server_label": "Server 2",
+                "channel_name": first["channel_name"],
+                "canonical_name": first["canonical_name"],
+            }
+        )
+        first_shortlist = self.ai_shortlist("review-1")
+        second_shortlist = dataclasses.replace(
+            first_shortlist,
+            server_id="server_2",
+            stream_id="review-2",
+        )
+        outcome = SimpleNamespace(
+            ai_review_shortlists=(first_shortlist, second_shortlist),
+            ai_review_rotation=0,
+            source_sha256="a" * 64,
+            verification_evidence=self.ai_verification_evidence(),
+        )
+
+        with mock.patch.object(
+            sync.gemini_review, "review_flagged_channels"
+        ) as review_call:
+            updates, summary = sync._gemini_review_updates(
+                outcome=outcome,
+                authoritative_table=table([first, second]),
+                api_key="test-key",
+                limit=1,
+            )
+
+        self.assertEqual(updates, [])
+        review_call.assert_not_called()
+        self.assertEqual(summary["ai_review_considered_rows"], 0)
+        self.assertEqual(summary["ai_review_deferred_clusters"], 1)
+        self.assertEqual(summary["ai_review_deferred_rows"], 2)
+        self.assertEqual(summary["ai_review_status"], "no_safe_clusters")
+
     def test_gemini_provider_values_are_exact_bounded_and_deduplicated(self) -> None:
         values = sync.gemini_provider_sensitive_values(
             (
@@ -5341,33 +5540,47 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             (
                 sync.gemini_review.ReviewDecision.SUGGEST,
                 sync.gemini_review.ReviewConfidence.MEDIUM,
+                None,
+                False,
             ),
             (
                 sync.gemini_review.ReviewDecision.SUGGEST,
                 sync.gemini_review.ReviewConfidence.LOW,
+                None,
+                False,
             ),
             (
                 sync.gemini_review.ReviewDecision.ABSTAIN,
                 sync.gemini_review.ReviewConfidence.NONE,
+                None,
+                False,
             ),
             (
                 sync.gemini_review.ReviewDecision.ERROR,
                 sync.gemini_review.ReviewConfidence.NONE,
+                "fixture",
+                True,
+            ),
+            (
+                sync.gemini_review.ReviewDecision.SUGGEST,
+                sync.gemini_review.ReviewConfidence.HIGH,
+                "fixture",
+                True,
             ),
         )
-        for decision, confidence in cases:
-            with self.subTest(decision=decision, confidence=confidence):
+        for decision, confidence, error_code, is_error in cases:
+            with self.subTest(
+                decision=decision,
+                confidence=confidence,
+                error_code=error_code,
+            ):
                 with mock.patch.object(
                     sync.gemini_review,
                     "review_flagged_channels",
                     side_effect=self.gemini_result_for(
                         decision=decision,
                         confidence=confidence,
-                        error_code=(
-                            "fixture"
-                            if decision is sync.gemini_review.ReviewDecision.ERROR
-                            else None
-                        ),
+                        error_code=error_code,
                     ),
                 ):
                     updates, summary = sync._gemini_review_updates(
@@ -5382,7 +5595,14 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 self.assertEqual(updates, [])
                 self.assertEqual(summary["ai_review_high_suggestion_updates"], 0)
                 self.assertEqual(summary["ai_review_auto_enabled_rows"], 0)
-                self.assertEqual(summary["ai_review_abstained_rows"], 1)
+                self.assertEqual(
+                    summary["ai_review_abstained_rows"], 0 if is_error else 1
+                )
+                self.assertEqual(summary["ai_review_error_rows"], int(is_error))
+                self.assertEqual(
+                    summary["ai_review_status"],
+                    "partial_failed_closed" if is_error else "completed",
+                )
 
     def test_gemini_verified_row_is_not_reprocessed(self) -> None:
         review = self.disabled_review("review-1")
@@ -5525,6 +5745,9 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(summary["review_recheck_rows_updated"], 0)
         self.assertIs(matcher.call_args.kwargs["enable_ai_review"], False)
         self.assertEqual(matcher.call_args.kwargs["coverage_fallback_limit"], 500)
+        self.assertIs(
+            matcher.call_args.kwargs["include_new_coverage_fallback"], False
+        )
         self.assertFalse(effective[0].runtime_eligible)
 
     def test_new_auto_enabled_row_is_provider_revalidated_before_append(self) -> None:
@@ -5863,6 +6086,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                     epgshare_spool_out=root / "selected.sqlite3",
                     review_recheck_mode="apply",
                     review_recheck_servers=("server_1",),
+                    review_apply_limit=25,
                 )
 
         terminal_fetch.assert_called_once()
@@ -6008,6 +6232,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 epgshare_spool_out=root / "selected.sqlite3",
                 review_recheck_mode="dry-run",
                 review_recheck_servers=("server_1",),
+                review_apply_limit=25,
                 use_gemini_ai=True,
                 gemini_api_key="test-key",
                 google_session=object(),
@@ -6024,6 +6249,51 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(len(report_rows), 1)
         self.assertEqual(report_rows[0]["epg_id"], "Candidate.One.us2")
         self.assertEqual(report_rows[0]["enabled"], "TRUE")
+
+    def test_zero_total_cap_needs_no_gemini_key_and_makes_no_ai_call(self) -> None:
+        review = self.disabled_review("review-1")
+        shortlist = self.ai_shortlist("review-1")
+        outcome = self.fake_recheck_outcome([review], shortlists=(shortlist,))
+        provider = inventory(
+            "server_1",
+            [
+                {
+                    "stream_id": "review-1",
+                    "name": "Channel review-1",
+                    "category_name": "General",
+                }
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            sync.automatch, "auto_match_and_spool", return_value=outcome
+        ) as matcher, mock.patch.object(
+            sync.gemini_review, "review_flagged_channels"
+        ) as gemini_call:
+            root = Path(temporary)
+            summary = sync.run_sync(
+                table=table([review]),
+                inventories=[provider],
+                output_dir=root / "reports",
+                generated_at="2026-09-16T00:00:00Z",
+                snapshot_out=root / "effective.csv",
+                all_source_file=root / "all.xml.gz",
+                all_source_catalog_file=root / "all.txt",
+                epgshare_spool_out=root / "selected.sqlite3",
+                review_recheck_mode="dry-run",
+                review_recheck_servers=("server_1",),
+                review_apply_limit=0,
+                use_gemini_ai=True,
+                gemini_api_key="",
+            )
+
+        self.assertIs(matcher.call_args.kwargs["enable_ai_review"], True)
+        gemini_call.assert_not_called()
+        self.assertEqual(summary["review_apply_limit"], 0)
+        self.assertEqual(summary["review_apply_selected_rows"], 0)
+        self.assertEqual(summary["ai_review_considered_rows"], 0)
+        self.assertEqual(summary["ai_review_deferred_rows"], 1)
+        self.assertEqual(summary["ai_review_status"], "no_safe_clusters")
 
     def test_recheck_apply_rereads_alerts_and_blocks_new_quarantine_race(self) -> None:
         review = self.disabled_review("review-1")
@@ -6088,6 +6358,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                     epgshare_spool_out=root / "selected.sqlite3",
                     review_recheck_mode="apply",
                     review_recheck_servers=("server_1",),
+                    review_apply_limit=25,
                 )
             self.assertFalse((root / "effective.csv").exists())
 
@@ -6164,6 +6435,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                     epgshare_spool_out=root / "selected.sqlite3",
                     review_recheck_mode="apply",
                     review_recheck_servers=("server_1",),
+                    review_apply_limit=25,
                 )
             self.assertFalse((root / "effective.csv").exists())
 
@@ -6212,6 +6484,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             pre_write_check=None,
             batch_pre_write_check=None,
             verified_ai_rows=(),
+            maximum_rows=0,
         ):
             self.assertIsNotNone(pre_write_check)
             pre_write_check()
@@ -6257,6 +6530,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                     epgshare_spool_out=root / "selected.sqlite3",
                     review_recheck_mode="apply",
                     review_recheck_servers=("server_1",),
+                    review_apply_limit=25,
                 )
             self.assertFalse((root / "effective.csv").exists())
 
@@ -6300,6 +6574,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                     epgshare_spool_out=root / "selected.sqlite3",
                     review_recheck_mode="apply",
                     review_recheck_servers=("server_1",),
+                    review_apply_limit=25,
                 )
             self.assertFalse((root / "effective.csv").exists())
 
@@ -6353,6 +6628,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                     epgshare_spool_out=root / "selected.sqlite3",
                     review_recheck_mode="apply",
                     review_recheck_servers=("server_1",),
+                    review_apply_limit=25,
                 )
             for path in (
                 root / "effective.csv",
@@ -6407,6 +6683,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             pre_write_check=None,
             batch_pre_write_check=None,
             verified_ai_rows=(),
+            maximum_rows=0,
         ):
             self.assertEqual(len(base_table.rows), 2)
             self.assertEqual([row["stream_id"] for row in rows], ["review-1"])
@@ -6451,6 +6728,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 epgshare_spool_out=root / "selected.sqlite3",
                 review_recheck_mode="apply",
                 review_recheck_servers=("server_1",),
+                review_apply_limit=25,
             )
             authoritative = streaming.parse_mapping_csv(
                 (root / "authoritative.csv").read_bytes(),
@@ -6490,7 +6768,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertTrue(by_stream["review-1"].runtime_eligible)
         self.assertFalse(by_stream["new-2"].runtime_eligible)
 
-    def test_recheck_apply_caps_smart_rules_and_ai_outage_is_nonblocking(self) -> None:
+    def test_recheck_apply_total_cap_defers_ai_without_calling_it(self) -> None:
         total_rows = sync.MAX_RECHECK_APPLIES_PER_RUN + 2
         originals = [
             self.disabled_review(f"r{index:04d}") for index in range(total_rows)
@@ -6538,6 +6816,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             pre_write_check=None,
             batch_pre_write_check=None,
             verified_ai_rows=(),
+            maximum_rows=0,
         ):
             if pre_write_check is not None:
                 pre_write_check()
@@ -6590,6 +6869,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 epgshare_spool_out=root / "selected.sqlite3",
                 review_recheck_mode="apply",
                 review_recheck_servers=("server_1",),
+                review_apply_limit=5000,
                 use_gemini_ai=True,
                 gemini_api_key="test-key",
             )
@@ -6609,8 +6889,9 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             summary["review_recheck_rows_updated"],
             sync.MAX_RECHECK_APPLIES_PER_RUN,
         )
-        self.assertEqual(summary["ai_review_error_rows"], 1)
-        self.assertEqual(summary["ai_review_status"], "partial_failed_closed")
+        self.assertEqual(summary["ai_review_error_rows"], 0)
+        self.assertEqual(summary["ai_review_deferred_rows"], 1)
+        self.assertEqual(summary["ai_review_status"], "no_safe_clusters")
         self.assertEqual(len(authoritative), total_rows)
         self.assertEqual(
             sum(row.runtime_eligible for row in authoritative),
@@ -6624,6 +6905,91 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             by_stream[f"r{sync.MAX_RECHECK_APPLIES_PER_RUN:04d}"].runtime_eligible
         )
         self.assertFalse(by_stream[f"r{total_rows - 1:04d}"].runtime_eligible)
+
+    def test_partial_review_write_summary_uses_confirmed_prefix_status(self) -> None:
+        originals = [
+            self.disabled_review("partial-1"),
+            self.disabled_review("partial-2"),
+        ]
+        approved_rows: list[dict[str, str]] = []
+        for index, original in enumerate(originals, start=1):
+            approved = dict(original)
+            approved.update(
+                {
+                    "enabled": "TRUE",
+                    "action": "AUTO_EPGSHARE",
+                    "source": "epgshare01",
+                    "epg_feed": "ALL_SOURCES1",
+                    "epg_id": f"Verified.Partial.{index}.us2",
+                    "reason": "Smart Rules verified",
+                    "notes": "auto-map-v1 verified fixture",
+                }
+            )
+            approved_rows.append(approved)
+        provider = inventory(
+            "server_1",
+            [
+                {
+                    "stream_id": row["stream_id"],
+                    "name": row["channel_name"],
+                    "category_name": row["category_name"],
+                }
+                for row in originals
+            ],
+        )
+        outcome = self.fake_recheck_outcome(approved_rows)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            sync, "google_sheet_values", return_value=mapping_values(originals)
+        ), mock.patch.object(
+            sync,
+            "google_sync_alert_values",
+            return_value=[list(sync.ALERT_COLUMNS)],
+        ), mock.patch.object(
+            sync, "append_sync_alert_rows", return_value=0
+        ), mock.patch.object(
+            sync.automatch, "auto_match_and_spool", return_value=outcome
+        ), mock.patch.object(
+            sync,
+            "update_google_sheet_review_rows",
+            side_effect=sync.SheetWriteError("second batch failed", 1),
+        ):
+            root = Path(temporary)
+            with self.assertRaises(sync.SheetWriteError):
+                sync.run_sync(
+                    table=table([]),
+                    inventories=[provider],
+                    output_dir=root / "reports",
+                    generated_at="2026-09-16T00:00:00Z",
+                    snapshot_out=root / "effective.csv",
+                    google_session=object(),
+                    sheet_id="a" * 30,
+                    all_source_file=root / "all.xml.gz",
+                    all_source_catalog_file=root / "all.txt",
+                    epgshare_spool_out=root / "selected.sqlite3",
+                    review_recheck_mode="apply",
+                    review_recheck_servers=("server_1",),
+                    review_apply_limit=25,
+                )
+            summary = json.loads(
+                (root / "reports" / "summary.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(summary["review_recheck_rows_updated"], 1)
+        self.assertEqual(summary["review_apply_persisted_rows"], 1)
+        self.assertEqual(summary["review_recheck_deferred_rows"], 1)
+        self.assertEqual(
+            summary["channel_status_by_server"]["server_1"],
+            {
+                "provider_available": True,
+                "provider_channels": 2,
+                "epgshare_enabled": 1,
+                "native_enabled": 0,
+                "needs_review": 1,
+                "excluded_or_placeholder": 0,
+                "safety_excluded": 0,
+            },
+        )
 
     def test_deterministic_selection_uses_full_run_limit_then_writer_batches(self) -> None:
         rows: list[dict[str, str]] = []
@@ -6649,6 +7015,71 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertGreater(len(selected_epgshare), 0)
         self.assertEqual(
             len(selected_epgshare), sync.MAX_RECHECK_APPLIES_PER_RUN
+        )
+
+    def test_total_selection_cap_counts_synthetic_ignore_and_native_lanes(self) -> None:
+        smart_rows: list[dict[str, str]] = []
+        for index in range(25):
+            row = self.disabled_review(f"mixed-{index:02d}")
+            if index % 3 == 0:
+                row.update(
+                    {
+                        "enabled": "TRUE",
+                        "action": "AUTO_EPGSHARE",
+                        "epg_id": f"Verified.{index}.us2",
+                    }
+                )
+            elif index % 3 == 1:
+                row.update(
+                    {
+                        "enabled": "TRUE",
+                        "action": "AUTO_DUMMY",
+                        "source": "dummy",
+                        "epg_feed": "DUMMY_CHANNELS",
+                        "epg_id": "Synthetic.Channel.local",
+                    }
+                )
+            else:
+                row.update({"enabled": "FALSE", "action": "IGNORE"})
+            smart_rows.append(row)
+        native = self.disabled_review("native-over-cap")
+        native.update(
+            {
+                "enabled": "TRUE",
+                "action": "KEEP_PANEL",
+                "source": "panel",
+                "epg_feed": "panel",
+                "epg_id": "native.one",
+            }
+        )
+
+        selected_smart, selected_native = (
+            sync._bounded_deterministic_review_updates(
+                smart_rows, [native], limit=25
+            )
+        )
+        metrics = sync._review_apply_lane_metrics(
+            selected_smart + selected_native, state="selected"
+        )
+
+        self.assertEqual(len(selected_smart), 24)
+        self.assertEqual(selected_native, [native])
+        self.assertEqual(metrics["review_apply_selected_rows"], 25)
+        self.assertEqual(metrics["review_apply_selected_deterministic_rows"], 9)
+        self.assertEqual(metrics["review_apply_selected_synthetic_rows"], 8)
+        self.assertEqual(metrics["review_apply_selected_ignore_rows"], 7)
+        self.assertEqual(metrics["review_apply_selected_native_rows"], 1)
+        self.assertEqual(
+            [
+                row["action"]
+                for row in sync._prioritized_deterministic_review_rows(
+                    selected_smart + selected_native
+                )
+            ],
+            ["AUTO_EPGSHARE"] * 9
+            + ["KEEP_PANEL"]
+            + ["AUTO_DUMMY"] * 8
+            + ["IGNORE"] * 7,
         )
 
     def test_recheck_apply_caps_mixed_epgshare_and_native_updates(self) -> None:
@@ -6739,6 +7170,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             batch_pre_write_check=None,
             verified_native_rows=(),
             verified_ai_rows=(),
+            maximum_rows=0,
         ):
             if pre_write_check is not None:
                 pre_write_check()
@@ -6800,6 +7232,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 epgshare_spool_out=root / "selected.sqlite3",
                 review_recheck_mode="apply",
                 review_recheck_servers=("server_2",),
+                review_apply_limit=5000,
                 validate_native_review=True,
             )
             by_stream = {
@@ -6835,6 +7268,17 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(summary["native_review_verified"], 20)
         self.assertEqual(summary["native_review_persisted"], 10)
         self.assertEqual(summary["native_review_deferred"], 10)
+        self.assertEqual(summary["review_apply_limit"], 5000)
+        self.assertEqual(summary["review_apply_selected_rows"], 5000)
+        self.assertEqual(
+            summary["review_apply_selected_deterministic_rows"], epgshare_count
+        )
+        self.assertEqual(summary["review_apply_selected_native_rows"], 10)
+        self.assertEqual(summary["review_apply_persisted_rows"], 5000)
+        self.assertEqual(
+            summary["review_apply_persisted_deterministic_rows"], epgshare_count
+        )
+        self.assertEqual(summary["review_apply_persisted_native_rows"], 10)
         self.assertTrue(by_stream[f"r{epgshare_count - 1:04d}"].runtime_eligible)
         self.assertTrue(
             by_stream[f"r{sync.MAX_RECHECK_APPLIES_PER_RUN - 1:04d}"].runtime_eligible
@@ -6941,6 +7385,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             batch_pre_write_check=None,
             verified_native_rows=(),
             verified_ai_rows=(),
+            maximum_rows=0,
         ):
             if pre_write_check is not None:
                 pre_write_check()
@@ -7003,6 +7448,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 epgshare_spool_out=root / "selected.sqlite3",
                 review_recheck_mode="apply",
                 review_recheck_servers=("server_1", "server_2", "server_3"),
+                review_apply_limit=25,
                 validate_native_review=True,
             )
 

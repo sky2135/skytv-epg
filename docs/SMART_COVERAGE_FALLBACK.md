@@ -52,19 +52,32 @@ is the same. Local synthetic rows do not request EPGShare dummy programmes.
 
 ## Run limits
 
-`--coverage-fallback-limit COUNT` enables at most `COUNT` rows in one run.
+`--coverage-fallback-limit COUNT` proposes fallback for at most `COUNT` rows in one run.
 Allowed production values are `0`, `500`, `2500`, and `5000`; `0` is off. New
-channels are handled before the existing REVIEW backlog, and each lane is
-interleaved across servers to avoid starvation. The existing Google writer
-still revalidates provider identity and OPEN-alert state immediately before
-each bounded update batch.
+and existing-`REVIEW` candidates share this proposal cap fairly: the two lanes
+alternate after each has been rotated and interleaved across servers. When new
+channel appends are disabled, new rows are excluded from fallback selection so
+they cannot consume capacity that can never be written. The existing Google
+writer still revalidates provider identity and OPEN-alert state immediately
+before each bounded update batch.
+
+This proposal cap is not authority to edit an existing row. Existing
+`REVIEW` persistence also requires `--review-apply-limit`, whose allowed values
+are `0`, `25`, `100`, `500`, `2500`, and `5000`. Its default `0` forbids every
+existing-`REVIEW` write, and its one total covers real, native, synthetic,
+`IGNORE`, and AI lanes together.
 
 For a manual pilot, run workflow **1 - Sync channels to Google Sheet**, select
 `dry-run`, and choose `500`. Inspect the aggregate workflow summary, then run
-`apply` with the desired limit. To enable recurring runs, set repository
-variable `EPG_COVERAGE_FALLBACK_LIMIT` to an allowed value. Both the channel
-sync and daily build workflow read that variable; removing it or setting it to
-`0` disables new synthetic approvals.
+`apply` with a `review_apply_limit` of `25` for the first canary. To enable
+recurring proposals, set repository variable `EPG_COVERAGE_FALLBACK_LIMIT` to
+an allowed value; set `EPG_REVIEW_APPLY_LIMIT` separately to authorize a
+bounded scheduled existing-row rollout. Workflow 1 reads both rollout
+variables. Workflow 2 reads `EPG_COVERAGE_FALLBACK_LIMIT` when building the
+published guide. Removing the coverage variable or setting it to `0` disables
+new synthetic approvals; removing the apply variable or setting it to `0`
+forbids scheduled existing-`REVIEW` writes and leaves no capacity for Gemini
+review.
 
 ## Metrics
 
@@ -74,6 +87,7 @@ The private sync summary reports:
 - `coverage_fallback_applied_rows`
 - `coverage_fallback_deferred_rows`
 - `coverage_fallback_ai_deferred_rows`
+- `coverage_fallback_suppressed_unwritten_new_rows`
 - separate new-channel and REVIEW-backlog counts
 - machine-prefilled candidate/applied counts
 - exact legacy Server 1 candidate/applied counts

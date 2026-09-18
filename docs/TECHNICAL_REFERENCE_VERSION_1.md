@@ -192,7 +192,8 @@ New-channel discovery sends only previously unseen exact
 edits are not rematched by that path. Workflow 1 has a separate `off` /
 `dry-run` / `apply` control for an explicit allowlist of existing disabled
 `REVIEW` rows. Scheduled runs use `apply` for all three servers; manual runs
-may still select another mode or narrower scope.
+may still select another mode or narrower scope. `apply` alone is not write
+authority: the independent total apply limit defaults to zero.
 
 A new row is activated as `AUTO_EPGSHARE` only when all of these independent
 checks succeed:
@@ -237,9 +238,12 @@ Smart Rules run first against the same corroborated EPGShare catalog and
 same-snapshot programme gate used for new rows. `dry-run` does not write any
 existing `REVIEW` row. The separate new-channel append control remains
 independent, so operators should leave it off for a completely read-only
-preview. `apply` updates at most 5,000 deterministic decisions per run in
-batches of no more than 500 rows and 2 MiB; additional verified rows are
-reported as deferred for the next scheduled run. An
+preview. `apply` persists at most the explicit `review_apply_limit`: one of
+`0`, `25`, `100`, `500`, `2500`, or `5000`, with `0` as the default. The limit
+is shared by deterministic real, native, synthetic, heading/`IGNORE`, and AI
+updates. It limits persistence, not the number of eligible rows Smart Rules may
+analyze. Google batches remain no more than 500 rows and 2 MiB; additional
+verified rows are reported as deferred. An
 accepted row becomes `enabled=TRUE`, `action=AUTO_EPGSHARE`,
 `source=epgshare01`, and `epg_feed=ALL_SOURCES1` with its exact verified ID.
 An allowlisted verified placeholder may instead become enabled `AUTO_DUMMY`,
@@ -265,13 +269,15 @@ and M3U are fetched again; a changed, conflicting, or unavailable identity is
 removed from the write set. Only then may the guarded writer create an enabled
 `KEEP_PANEL` row. The
 writer accepts `KEEP_PANEL` only from the exact in-memory verified allowlist;
-the same 5,000-row deterministic cap, Sheet fingerprint, alert rereads, atomic
-update, post-write verification, and terminal snapshot checks still apply.
+the same explicit total apply cap, Sheet fingerprint, alert rereads, atomic
+per-batch update, post-write verification, and terminal snapshot checks still apply.
 Server 1 never enters this lane and its native XMLTV is never downloaded.
 
-Gemini verification occurs only after Smart Rules and is capped at 200 affected
-rows per run and 50 rows per policy batch. Scheduled Workflow 1 enables it;
-manual dispatch may turn it off, in which case no shortlist work runs. The
+Gemini verification occurs only after Smart Rules and is capped at the smaller
+of 200 affected rows or capacity remaining under the total REVIEW apply limit,
+with at most 50 represented rows per policy batch. A cluster that does not fit
+is deferred whole. Gemini is opt-in for both scheduled and manual Workflow 1
+runs; the API-key secret alone never enables it. The
 request contains sanitized channel/category text and
 two to eight exact real, same-snapshot programme-verified EPGShare choices; it
 never contains credentials, provider URLs, playlists, or the full guide. Two
@@ -382,15 +388,16 @@ exact set of `OPEN` alert identities used by Smart Rules, then rereads
 `OPEN` identity invalidates the complete decision, including learned-alias
 evidence, and blocks the write. Immediately before updating existing rows, it
 also rereads the authoritative mapping table and requires it to match the
-decision snapshot. It then uses one bounded Google Sheets batch update to touch
-only these columns on the explicitly selected rows:
+decision snapshot. It then uses independently verified Google Sheets batch
+updates of at most 500 rows to touch only these columns on the explicitly
+selected rows:
 
 ```text
 enabled, action, source, epg_feed, epg_id, reason, notes
 ```
 
-It rereads the Sheet after the request and verifies both the intended cells and
-all non-target rows. Every apply run performs one final authoritative mapping
+It rereads the Sheet after every request and verifies both the intended cells
+and all non-target rows. Every apply run performs one final authoritative mapping
 reread—even when it had zero updates—and only that terminal table can become
 the build snapshot. Immediately before sealing that snapshot, it rereads
 `Sync Alerts` once more and blocks publication if the exact matcher-time
@@ -546,12 +553,17 @@ Workflow 1 additionally maps its controls to these optional arguments:
 ```text
 --review-recheck-mode off|dry-run|apply
 --review-recheck-servers server_1 [server_2 server_3]
+--review-apply-limit 0|25|100|500|2500|5000
+--coverage-fallback-limit 0|500|2500|5000
 --use-gemini-ai
 --ai-review-limit 10|25|50|100|200
 ```
 
-`--use-gemini-ai` requires `GEMINI_API_KEY` in the environment and a recheck
-mode other than `off`. It does not grant the model approval authority.
+`--use-gemini-ai` requires a recheck mode other than `off`. With a nonzero
+`--review-apply-limit`, it also requires `GEMINI_API_KEY` in the environment;
+an external call occurs only if deterministic decisions leave capacity. A zero
+total cap makes no external AI call and does not require a key. The flag does
+not grant the model approval authority.
 
 The local diagnostic directory contains:
 
@@ -592,20 +604,23 @@ provider-total subtraction:
 | Detail | `summary.json` field | Meaning |
 |---|---|---|
 | Existing REVIEW recheck mode | `review_recheck_mode` | `off`, `dry-run`, or `apply`. |
+| Total existing REVIEW apply cap | `review_apply_limit` | Explicit total persistence cap across every decision lane; allowed values are `0`, `25`, `100`, `500`, `2500`, and `5000`. |
 | Existing REVIEW channels eligible | `review_recheck_eligible_rows` | Rows that passed the current provider, state, drift, and alert filters. |
 | Existing REVIEW channels checked | `review_recheck_considered_rows` | Eligible rows submitted to Smart Rules. |
 | Existing REVIEW channels safely processed | `review_recheck_safe_matches` | Locally safe deterministic EPG, native, placeholder, or heading decisions plus strict AI updates that passed their applicable gates. |
 | Existing channels still requiring review | `review_recheck_still_review_rows` | Checked rows that Smart Rules did not verify. |
 | Existing REVIEW channels skipped by safety checks | `review_recheck_skipped_rows` | Disabled REVIEW rows in the selected scope excluded because they were missing, drifted, alerted, or held an untracked manual candidate. |
-| Deterministic decisions deferred by the write limit | `review_recheck_deferred_rows` | Verified EPGShare, native, placeholder, or heading decisions held for the next scheduled run by the shared 5,000-row deterministic cap. |
+| Verified decisions deferred by the write limit | `review_recheck_deferred_rows` | Verified EPGShare, native, placeholder, or heading decisions not selected under the explicit total cap. |
 | Existing REVIEW rows updated in Google Sheet | `review_recheck_rows_updated` | Exact existing-row updates confirmed by the post-write reread. |
+| Rows selected by lane | `review_apply_selected_*_rows` | Total plus deterministic, native, synthetic, ignore, and AI selections under the one cap. |
+| Rows persisted by lane | `review_apply_persisted_*_rows` | The corresponding exact rows confirmed after the authoritative post-write read. |
 | Native EPG candidates found | `native_review_candidates` | Eligible Server 2/3 rows with a fresh non-conflicting provider/M3U native ID. |
 | Native EPG matches verified | `native_review_verified` | Candidates that also passed exact XMLTV ID, display-name uniqueness, and current-programme gates. |
 | Native EPG matches persisted | `native_review_persisted` | Verified `KEEP_PANEL` updates confirmed after an apply write. This remains zero in dry-run. |
-| Native EPG matches deferred | `native_review_deferred` | Verified native rows held for the next run by the shared 5,000-row deterministic cap. |
+| Native EPG matches deferred | `native_review_deferred` | Verified native rows not selected under the shared total apply cap. |
 | Native EPG sources unavailable | `native_review_source_unavailable` | Server 2/3 native XMLTV sources that could not be safely validated; their rows remain REVIEW. |
 | Channels considered by Gemini | `ai_review_considered_rows` | Unresolved rows included in bounded Gemini review. |
-| Rows deferred from Gemini | `ai_review_deferred_rows` | Otherwise eligible unresolved rows held for a later scheduled run by the 200-row AI cap. |
+| Rows deferred from Gemini | `ai_review_deferred_rows` | Otherwise eligible unresolved rows held because of the AI ceiling or remaining total-cap capacity; clusters are never split. |
 | Gemini HIGH responses found | `ai_review_high_suggestions_found` | Schema-valid `HIGH` responses choosing a supplied opaque candidate; this is not yet an approval count. |
 | AI-verified channels enabled | `ai_review_high_suggestions_persisted` | Rows where both local rankers, Gemini HIGH, catalog/programme checks, and terminal Sheet/provider/alert rereads all agreed and the enabled update was confirmed. |
 | Gemini reviews left unresolved | `ai_review_abstained_rows` | Rows that failed or abstained at any strict agreement gate and therefore remained unchanged in `REVIEW`. |
@@ -707,6 +722,8 @@ explicit REVIEW recheck has current native-ID candidates to validate.
 | `EPG_PUBLIC_BASE_URL` | Recommended | `https://sky2135.github.io/skytv-epg` or an approved custom domain. |
 | `EPG_MINIMUM_COVERAGE` | No | Percentage gate; workflow default is `80`. |
 | `ALLOW_INSECURE_PANEL_HTTP` | No | Set to `true` only if a provider cannot serve HTTPS. |
+| `EPG_REVIEW_APPLY_LIMIT` | No | Scheduled total existing-`REVIEW` apply cap. Unset/`0` means no such writes. |
+| `EPG_USE_GEMINI_AI` | No | `true` (case-insensitive) opts scheduled Workflow 1 into Gemini; unset or any other value means off. A nonzero `EPG_REVIEW_APPLY_LIMIT` is also required before an AI call. |
 
 The obsolete `EPG_MAPPING_CSV_URL` variable is not used by Version 1.
 
@@ -741,10 +758,11 @@ out read-only and generated files are not committed.
 
 - `.github/workflows/channel_inventory_sync.yml` runs daily at 02:17 in
   `America/Toronto`, before publication, and can also be dispatched manually.
-  Scheduled/default settings append missing rows, recheck all servers in
-  `apply`, and enable strict Gemini verification. Manual inputs may select
-  `off`, `dry-run`, or `apply`, one server or all, and an AI cap of 10, 25, 50,
-  100, or 200. Gemini requires the `GEMINI_API_KEY` repository secret.
+  Scheduled settings append missing rows and recheck all servers in `apply`,
+  but the existing-`REVIEW` cap defaults to `0` and Gemini defaults off. Manual
+  dispatch defaults to no new-row write, `dry-run`, a zero REVIEW cap, and
+  Gemini off. Gemini requires both the `GEMINI_API_KEY` secret and an explicit
+  manual opt-in or `EPG_USE_GEMINI_AI=true`.
 - `.github/workflows/main.yml` runs daily at 04:37 in `America/Toronto` and may
   also be started manually. It performs a refresh with Sheet writes, builds,
   validates, and deploys.
@@ -875,9 +893,9 @@ hashes are checked before deployment.
   an approved dummy guide and decorative headings may be disabled as `IGNORE`;
   ambiguous, adult-real, unsafe numbered, or weak-guide identities remain review.
 - Existing `REVIEW` rows are retried by the daily Workflow 1 recheck. One run
-  may apply 5,000 deterministic decisions and may consider at most 200 affected
-  rows through strict AI verification; any safe remainder continues on the next
-  schedule. AI can activate only the exact target independently selected by
+  may persist only the explicit total cap across all lanes; the scheduled cap
+  defaults to zero. Opt-in AI may consider at most 200 affected rows and only
+  remaining total-cap capacity; any safe remainder stays deferred. AI can activate only the exact target independently selected by
   both local rankers and must pass every current catalog, programme, provider,
   Sheet, and alert gate.
 - Provider channel totals, published-output totals, and EPG-covered totals do
