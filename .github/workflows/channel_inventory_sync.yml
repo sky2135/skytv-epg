@@ -51,6 +51,16 @@ on:
           - "50"
           - "100"
           - "200"
+      coverage_fallback_limit:
+        description: "Maximum REVIEW rows given a local synthetic guide (0 = off)"
+        required: true
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "500"
+          - "2500"
+          - "5000"
 
 # This workflow never commits or pushes. Its only optional writes are
 # verified additions or bounded REVIEW-row updates in the Mappings tab, plus
@@ -85,6 +95,8 @@ env:
     ${{ github.event_name == 'schedule' && 'true' || inputs.use_gemini_ai }}
   AI_REVIEW_LIMIT: >-
     ${{ github.event_name == 'schedule' && '200' || inputs.ai_review_limit }}
+  COVERAGE_FALLBACK_LIMIT: >-
+    ${{ github.event_name == 'schedule' && (vars.EPG_COVERAGE_FALLBACK_LIMIT || '0') || inputs.coverage_fallback_limit }}
   EPG_ALL_SOURCE_URL: >-
     https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz
   EPG_ALL_CATALOG_URL: >-
@@ -208,6 +220,12 @@ jobs:
                       "GEMINI_API_KEY is missing or invalid. Add it as a "
                       "GitHub Actions secret; do not paste it into workflow inputs."
                   )
+
+          fallback_limit = required("COVERAGE_FALLBACK_LIMIT")
+          if fallback_limit not in {"0", "500", "2500", "5000"}:
+              raise SystemExit(
+                  "coverage_fallback_limit must be 0, 500, 2500, or 5000."
+              )
 
           source = urlsplit(required("EPG_ALL_SOURCE_URL"))
           if (
@@ -374,6 +392,7 @@ jobs:
                 "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3"
               --review-recheck-mode "$REVIEW_RECHECK_MODE"
               --ai-review-limit "$AI_REVIEW_LIMIT"
+              --coverage-fallback-limit "$COVERAGE_FALLBACK_LIMIT"
               --minimum-server-channels
                 server_1=4000
                 server_2=10500
@@ -903,6 +922,18 @@ jobs:
               if deferred:
                   handle.write(
                       f"- Safe matches waiting for the next apply run: **{deferred:,}**\n"
+                  )
+
+              if bool(payload.get("coverage_fallback_enabled", False)):
+                  synthetic = int(
+                      payload.get("coverage_fallback_applied_rows", 0)
+                  )
+                  synthetic_deferred = int(
+                      payload.get("coverage_fallback_deferred_rows", 0)
+                  )
+                  handle.write(
+                      "- Local channel-derived guides proposed: "
+                      f"**{synthetic:,}**; deferred: **{synthetic_deferred:,}**\n"
                   )
 
               if bool(payload.get("ai_review_enabled", False)):

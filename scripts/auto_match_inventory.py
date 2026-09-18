@@ -56,6 +56,7 @@ from skytv_epg_auto_match_v1 import (  # noqa: E402
     propose_new_channel_matches,
 )
 from skytv_epg_contextual_v8 import (  # noqa: E402
+    _is_decorative_heading_v84 as _matcher_is_decorative_heading,
     install_contextual_v8,
     parse_candidate_context_v8,
     parse_channel_context_v8,
@@ -98,6 +99,11 @@ LARGE_BATCH_THRESHOLD = 100
 MAX_LARGE_BATCH_APPROVAL_FRACTION = 0.35
 MAX_LARGE_BATCH_APPROVALS = 5_000
 MAX_LARGE_BATCH_APPROVALS_PER_SERVER = 2_500
+# A local synthetic guide is materially safer than guessing a real schedule,
+# but it still enables a Mapping row.  Keep the opt-in lane bounded to the
+# same maximum number of deterministic REVIEW updates the sync writer can
+# commit and revalidate in one run.
+MAX_COVERAGE_FALLBACK_ROWS = 5_000
 MAX_AI_REVIEW_SHORTLISTS = 200
 MAX_AI_REVIEW_ATTEMPTED_ROWS = 1_000
 MAX_AI_REVIEW_COMPARISONS = 4_000_000
@@ -110,6 +116,34 @@ _AUTOMATIC_MEMORY_ACTION = "AUTO_EPGSHARE"
 _HUMAN_MEMORY_ACTIONS = frozenset({"MANUAL", "APPROVED"})
 _AI_VERIFIED_V2_GATE = "smart+gemini-high+catalog+programme"
 _AI_VERIFIED_METHODS = SAFE_REAL_METHODS.union({"dual_rank_consensus"})
+_AUTO_MAP_V1_PROVENANCE_RE = re.compile(
+    r"\Aauto-map-v1 method=(?P<method>[a-z0-9][a-z0-9_.+\-]{0,79}); "
+    r"market=(?P<market>[A-Za-z0-9][A-Za-z0-9_\-]{0,31}); "
+    r"matcher=(?P<matcher>[0-9]+(?:\.[0-9]+){1,3}); "
+    r"matcher_build=(?P<matcher_build>[A-Z0-9][A-Z0-9_.+\-]{0,127}); "
+    r"matcher_sha256=(?P<matcher_sha256>[0-9a-f]{64}); "
+    r"engine_sha256=(?P<engine_sha256>[0-9a-f]{64}); "
+    r"catalog_sha256=(?P<catalog_sha256>[0-9a-f]{64}); "
+    r"source_sha256=(?P<source_sha256>[0-9a-f]{64})(?: \| |\Z)"
+)
+_LEGACY_SERVER1_REASON = (
+    "Legacy Server 1 native ID requires reviewed EPGShare replacement"
+)
+_LEGACY_SERVER1_NOTES = frozenset(
+    {
+        (
+            "Legacy reason: Panel XMLTV contains useful current/future programme "
+            "information; Quarantined during the Version 1 migration; replace "
+            "with a reviewed exact EPGShare ALL ID before changing action from REVIEW"
+        ),
+        (
+            "Legacy reason: Panel XMLTV supplies the unsupported market's useful "
+            "current/future schedule; Quarantined during the Version 1 migration; "
+            "replace with a reviewed exact EPGShare ALL ID before changing action "
+            "from REVIEW"
+        ),
+    }
+)
 _METADATA_COLUMNS = frozenset(
     {
         "region_code",
@@ -401,6 +435,19 @@ class AutoMatchOutcome:
     recheck_dummy_rows: int = 0
     new_ignored_rows: int = 0
     recheck_ignored_rows: int = 0
+    coverage_fallback_limit: int = 0
+    coverage_fallback_candidate_rows: int = 0
+    coverage_fallback_applied_rows: int = 0
+    coverage_fallback_deferred_rows: int = 0
+    coverage_fallback_ai_deferred_rows: int = 0
+    new_coverage_fallback_rows: int = 0
+    recheck_coverage_fallback_rows: int = 0
+    coverage_fallback_machine_prefilled_candidate_rows: int = 0
+    coverage_fallback_machine_prefilled_applied_rows: int = 0
+    coverage_fallback_legacy_server1_candidate_rows: int = 0
+    coverage_fallback_legacy_server1_applied_rows: int = 0
+    coverage_fallback_protected_manual_rows: int = 0
+    coverage_fallback_protected_native_rows: int = 0
 
     def summary_fields(self) -> dict[str, Any]:
         return {
@@ -422,6 +469,42 @@ class AutoMatchOutcome:
             "review_recheck_classified_as_placeholders": self.recheck_dummy_rows,
             "new_channel_headings_ignored": self.new_ignored_rows,
             "review_recheck_headings_ignored": self.recheck_ignored_rows,
+            "coverage_fallback_enabled": self.coverage_fallback_limit > 0,
+            "coverage_fallback_limit": self.coverage_fallback_limit,
+            "coverage_fallback_candidate_rows": (
+                self.coverage_fallback_candidate_rows
+            ),
+            "coverage_fallback_applied_rows": self.coverage_fallback_applied_rows,
+            "coverage_fallback_deferred_rows": (
+                self.coverage_fallback_deferred_rows
+            ),
+            "coverage_fallback_ai_deferred_rows": (
+                self.coverage_fallback_ai_deferred_rows
+            ),
+            "new_channel_coverage_fallback_rows": (
+                self.new_coverage_fallback_rows
+            ),
+            "review_recheck_coverage_fallback_rows": (
+                self.recheck_coverage_fallback_rows
+            ),
+            "coverage_fallback_machine_prefilled_candidate_rows": (
+                self.coverage_fallback_machine_prefilled_candidate_rows
+            ),
+            "coverage_fallback_machine_prefilled_applied_rows": (
+                self.coverage_fallback_machine_prefilled_applied_rows
+            ),
+            "coverage_fallback_legacy_server1_candidate_rows": (
+                self.coverage_fallback_legacy_server1_candidate_rows
+            ),
+            "coverage_fallback_legacy_server1_applied_rows": (
+                self.coverage_fallback_legacy_server1_applied_rows
+            ),
+            "coverage_fallback_protected_manual_rows": (
+                self.coverage_fallback_protected_manual_rows
+            ),
+            "coverage_fallback_protected_native_rows": (
+                self.coverage_fallback_protected_native_rows
+            ),
             "ai_review_attempted_rows": self.ai_review_attempted_rows,
             "ai_review_fuzzy_comparisons": self.ai_review_comparisons,
             "ai_review_rotation": self.ai_review_rotation,
@@ -973,7 +1056,10 @@ def active_combined_source_ids(rows: Sequence[Mapping[str, Any]]) -> frozenset[s
             raise AutoMatchError("An existing mapping row has an invalid action/source pair.")
         if server_id == "server_1" and requested_source == "panel":
             continue
-        if requested_source != "panel":
+        # Dummy mappings are now rendered as local, per-stream synthetic
+        # guides.  They must not request or depend on an EPGShare placeholder
+        # ID in the one-pass source spool.
+        if requested_source == "epgshare01":
             result.add(epg_id)
     return frozenset(result)
 
@@ -1207,6 +1293,273 @@ def _enforce_approval_blast_radius(
             "Automatic matching stopped before Sheet writes because the approval "
             f"batch exceeded its Version 1 safety limit: approved={total_approved:,}, "
             f"allowed={total_limit:,}, by_server=[{server_counts}]."
+        )
+
+
+def _coverage_fallback_marker(row: Mapping[str, Any]) -> str:
+    """Return an audit-only local marker for a per-stream synthetic guide.
+
+    The production builder keys synthetic schedules by server/stream identity,
+    not by this value.  A descriptive local marker keeps the Mapping truthful
+    and makes aggregate audits useful without pretending that EPGShare
+    supplied a real schedule.
+    """
+
+    channel_name = streaming.clean_identifier(row.get("channel_name", ""), 300)
+    category_name = streaming.clean_text(row.get("category_name", ""), 200)
+    genre = streaming.clean_text(row.get("genre", ""), 40).casefold()
+    evidence = f"{channel_name}\n{category_name}\n{genre}".casefold()
+    if _matcher_has_adult_evidence(channel_name, category_name):
+        family = "Adult"
+    elif genre == "movies" or re.search(
+        r"\b(?:movie|movies|cinema|films?)\b", evidence
+    ):
+        family = "Movie"
+    elif genre == "music" or re.search(
+        r"\b(?:music|songs?|singer|radio|concert|karaoke)\b", evidence
+    ):
+        family = "Music"
+    elif genre == "kids" or re.search(r"\b(?:kids?|children|cartoon)\b", evidence):
+        family = "Kids"
+    elif genre == "news" or re.search(r"\bnews\b", evidence):
+        family = "News"
+    elif genre == "weather" or re.search(r"\bweather\b", evidence):
+        family = "Weather"
+    elif genre == "religion" or re.search(
+        r"\b(?:religion|religious|faith|church|spiritual)\b", evidence
+    ):
+        family = "Religion"
+    elif genre == "shopping" or re.search(r"\b(?:shopping|shop|retail)\b", evidence):
+        family = "Shopping"
+    elif genre == "sports" or re.search(
+        r"\b(?:sport|sports|ppv|live events?|espn\+|flo(?:sports)?|ufc|wwe)\b",
+        evidence,
+    ):
+        family = "Event"
+    else:
+        family = "Channel"
+    return f"Synthetic.{family}.local"
+
+
+def _strict_auto_map_v1_provenance(row: Mapping[str, Any]) -> bool:
+    """Accept only a complete current-build machine provenance prefix."""
+
+    notes = streaming.clean_text(row.get("notes", ""), 2_000)
+    match = _AUTO_MAP_V1_PROVENANCE_RE.match(notes)
+    if match is None:
+        return False
+    values = match.groupdict()
+    return (
+        values["matcher"] == STRICT_MATCHER_VERSION
+        and values["matcher_build"] == STRICT_MATCHER_BUILD_ID
+        and values["matcher_sha256"] == STRICT_MATCHER_SOURCE_SHA256
+        and values["engine_sha256"] == STRICT_ENGINE_SOURCE_SHA256
+        and values["catalog_sha256"] == values["source_sha256"]
+    )
+
+
+def _exact_legacy_server1_migration(row: Mapping[str, Any]) -> bool:
+    """Recognize only the fixed Version 1 Server 1 migration preimage."""
+
+    return (
+        streaming.normalize_server_id(row.get("server_id", "")) == "server_1"
+        and streaming.clean_text(row.get("source", ""), 40).casefold() == "panel"
+        and streaming.clean_text(row.get("epg_feed", ""), 80).casefold()
+        in {"panel", "server xmltv.php"}
+        and streaming.clean_text(row.get("reason", ""), 500)
+        == _LEGACY_SERVER1_REASON
+        and streaming.clean_text(row.get("notes", ""), 2_000)
+        in _LEGACY_SERVER1_NOTES
+    )
+
+
+def _coverage_fallback_rollback_record(
+    row: Mapping[str, Any],
+) -> str | None:
+    """Encode the exact prior target in at most one 500-character Sheet cell."""
+
+    values = tuple(str(row.get(field, "") or "") for field in (
+        "source",
+        "epg_feed",
+        "epg_id",
+    ))
+    lengths = ":".join(str(len(value)) for value in values)
+    record = f"coverage-fallback-rollback-v1 {lengths}:" + "".join(values)
+    return record if len(record) <= 500 else None
+
+
+def _parse_coverage_fallback_rollback_record(
+    value: object,
+) -> tuple[str, str, str] | None:
+    """Decode a rollback record without delimiter ambiguity."""
+
+    text = str(value or "")
+    prefix = "coverage-fallback-rollback-v1 "
+    if not text.startswith(prefix):
+        return None
+    remainder = text[len(prefix):]
+    parts = remainder.split(":", 3)
+    if len(parts) != 4 or any(not part.isdigit() for part in parts[:3]):
+        return None
+    lengths = tuple(int(part) for part in parts[:3])
+    payload = parts[3]
+    if sum(lengths) != len(payload):
+        return None
+    offset = 0
+    decoded: list[str] = []
+    for length in lengths:
+        decoded.append(payload[offset:offset + length])
+        offset += length
+    return decoded[0], decoded[1], decoded[2]
+
+
+def _coverage_fallback_prior_target_sha256(row: Mapping[str, Any]) -> str:
+    digest = hashlib.sha256()
+    for field in ("source", "epg_feed", "epg_id"):
+        encoded = str(row.get(field, "") or "").encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _coverage_fallback_classification(
+    *,
+    key: tuple[str, str],
+    original: Mapping[str, Any],
+    patched: Mapping[str, Any],
+    proposal: Any,
+    quarantined_keys: frozenset[tuple[str, str]],
+) -> str:
+    """Classify one row at the synthetic fallback safety boundary."""
+
+    original_action = streaming.clean_text(original.get("action", ""), 40).upper()
+    patched_action = streaming.clean_text(patched.get("action", ""), 40).upper()
+    if original_action != "REVIEW" or patched_action != "REVIEW":
+        return "ineligible"
+    if _mapping_is_enabled(original, original_action) or key in quarantined_keys:
+        return "ineligible"
+    channel_name = streaming.clean_identifier(original.get("channel_name", ""), 300)
+    if not channel_name or _matcher_is_decorative_heading(channel_name):
+        return "ineligible"
+    proposal_action = streaming.clean_text(
+        getattr(proposal, "matcher_action", ""), 40
+    ).upper()
+    if proposal_action == "IGNORE":
+        return "ineligible"
+    if _coverage_fallback_rollback_record(original) is None:
+        return "protected_manual"
+
+    epg_id = streaming.clean_identifier(original.get("epg_id", ""), 300)
+    if not epg_id:
+        return "blank"
+    source = streaming.clean_text(original.get("source", ""), 40).casefold()
+    # Rows reaching this boundary through the normal sync selector with a
+    # Server 2/3 panel source are exact current native candidates. They must
+    # remain available to the native schedule verifier and are never replaced.
+    if key[0] in {"server_2", "server_3"} and source == "panel":
+        return "protected_native"
+    if _strict_auto_map_v1_provenance(original):
+        return "machine_prefilled"
+    if _exact_legacy_server1_migration(original):
+        return "legacy_server1"
+    return "protected_manual"
+
+
+def _coverage_fallback_candidate(
+    *,
+    key: tuple[str, str],
+    original: Mapping[str, Any],
+    patched: Mapping[str, Any],
+    proposal: Any,
+    quarantined_keys: frozenset[tuple[str, str]],
+) -> bool:
+    """Return whether a row may receive the opt-in local synthetic guide."""
+
+    return _coverage_fallback_classification(
+        key=key,
+        original=original,
+        patched=patched,
+        proposal=proposal,
+        quarantined_keys=quarantined_keys,
+    ) in {"blank", "machine_prefilled", "legacy_server1"}
+
+
+def _coverage_fallback_binding_sha256(
+    *,
+    key: tuple[str, str],
+    row: Mapping[str, Any],
+    marker: str,
+    source_sha256: str,
+    prior_target_sha256: str,
+) -> str:
+    digest = hashlib.sha256()
+    for value in (
+        "coverage-fallback-v1",
+        key[0],
+        key[1],
+        streaming.clean_identifier(row.get("channel_name", ""), 300),
+        streaming.clean_text(row.get("category_name", ""), 200),
+        marker,
+        source_sha256,
+        prior_target_sha256,
+    ):
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _apply_coverage_fallback(
+    *,
+    key: tuple[str, str],
+    original: Mapping[str, Any],
+    patched: dict[str, str],
+    source_sha256: str,
+) -> None:
+    marker = _coverage_fallback_marker(original)
+    rollback = _coverage_fallback_rollback_record(original)
+    if rollback is None:
+        raise AutoMatchError(
+            "A coverage fallback could not preserve its exact rollback target."
+        )
+    prior_target_sha256 = _coverage_fallback_prior_target_sha256(original)
+    binding = _coverage_fallback_binding_sha256(
+        key=key,
+        row=original,
+        marker=marker,
+        source_sha256=source_sha256,
+        prior_target_sha256=prior_target_sha256,
+    )
+    provenance = (
+        "coverage-fallback-v1 source=local-synthetic; "
+        f"marker={marker}; epg_checked_sha256={source_sha256}; "
+        f"prior_target_sha256={prior_target_sha256}; "
+        f"binding_sha256={binding} | auto-map-v1 method=coverage_fallback"
+    )
+    existing_notes = streaming.clean_text(original.get("notes", ""), 500)
+    patched.update(
+        {
+            "action": "AUTO_DUMMY",
+            "enabled": "TRUE",
+            "source": "dummy",
+            "epg_feed": "DUMMY_CHANNELS",
+            "epg_id": marker,
+            "reason": rollback,
+            # Provenance is retained first if the legacy discovery note would
+            # exceed the Sheet's bounded notes cell.
+            "notes": streaming.clean_text(
+                f"{provenance} | {existing_notes}" if existing_notes else provenance,
+                500,
+            ),
+        }
+    )
+    expected_prior = tuple(
+        str(original.get(field, "") or "")
+        for field in ("source", "epg_feed", "epg_id")
+    )
+    if _parse_coverage_fallback_rollback_record(patched["reason"]) != expected_prior:
+        raise AutoMatchError(
+            "A coverage fallback failed to retain its exact rollback target."
         )
 
 
@@ -2255,6 +2608,7 @@ def auto_match_and_spool(
     generated_at: str,
     enable_ai_review: bool = False,
     ai_review_rotation: int | None = None,
+    coverage_fallback_limit: int = 0,
     minimum_unique_channels: int = MINIMUM_CORROBORATED_CATALOG_IDS,
     runtime_factory: MatcherRuntimeFactory = prepare_matcher_runtime,
 ) -> AutoMatchOutcome:
@@ -2266,6 +2620,15 @@ def auto_match_and_spool(
     """
     if not isinstance(enable_ai_review, bool):
         raise AutoMatchError("enable_ai_review must be exactly true or false.")
+    if (
+        isinstance(coverage_fallback_limit, bool)
+        or not isinstance(coverage_fallback_limit, int)
+        or not 0 <= coverage_fallback_limit <= MAX_COVERAGE_FALLBACK_ROWS
+    ):
+        raise AutoMatchError(
+            "Coverage fallback limit must be an integer from 0 to "
+            f"{MAX_COVERAGE_FALLBACK_ROWS:,}."
+        )
     if ai_review_rotation is not None and (
         isinstance(ai_review_rotation, bool)
         or not isinstance(ai_review_rotation, int)
@@ -2377,6 +2740,21 @@ def auto_match_and_spool(
     verification_candidates_box: list[
         tuple[VerificationCatalogCandidateEvidence, ...]
     ] = []
+    coverage_fallback_candidate_keys: frozenset[tuple[str, str]] = frozenset()
+    coverage_fallback_keys: frozenset[tuple[str, str]] = frozenset()
+    coverage_fallback_ai_deferred_keys: frozenset[tuple[str, str]] = frozenset()
+    coverage_fallback_machine_prefilled_keys: frozenset[
+        tuple[str, str]
+    ] = frozenset()
+    coverage_fallback_legacy_server1_keys: frozenset[
+        tuple[str, str]
+    ] = frozenset()
+    coverage_fallback_protected_manual_keys: frozenset[
+        tuple[str, str]
+    ] = frozenset()
+    coverage_fallback_protected_native_keys: frozenset[
+        tuple[str, str]
+    ] = frozenset()
 
     def select_provisional_ids(
         source_catalog: catalog_stream.CatalogSnapshot,
@@ -2723,8 +3101,96 @@ def auto_match_and_spool(
                     raise AutoMatchError("Automatic EPG matching attempted to approve metadata.")
                 patched_rows.append(row)
 
+            patched_by_key_during_run = {
+                _canonical_key(
+                    row.get("server_id", ""), row.get("stream_id", "")
+                ): row
+                for row in patched_rows
+            }
+            if coverage_fallback_limit:
+                fallback_classifications = {
+                    key: _coverage_fallback_classification(
+                        key=key,
+                        original=rows_by_key[key],
+                        patched=patched_by_key_during_run[key],
+                        proposal=proposals[key],
+                        quarantined_keys=canonical_quarantined_keys,
+                    )
+                    for key in rows_by_key
+                }
+                candidate_keys = frozenset(
+                    key
+                    for key, classification in fallback_classifications.items()
+                    if classification
+                    in {"blank", "machine_prefilled", "legacy_server1"}
+                )
+                coverage_fallback_machine_prefilled_keys = frozenset(
+                    key
+                    for key, classification in fallback_classifications.items()
+                    if classification in {"machine_prefilled", "legacy_server1"}
+                )
+                coverage_fallback_legacy_server1_keys = frozenset(
+                    key
+                    for key, classification in fallback_classifications.items()
+                    if classification == "legacy_server1"
+                )
+                coverage_fallback_protected_manual_keys = frozenset(
+                    key
+                    for key, classification in fallback_classifications.items()
+                    if classification == "protected_manual"
+                )
+                coverage_fallback_protected_native_keys = frozenset(
+                    key
+                    for key, classification in fallback_classifications.items()
+                    if classification == "protected_native"
+                )
+                staged_ai_keys = frozenset(
+                    shortlist.key
+                    for shortlist in staged_shortlists_box[0].shortlists
+                )
+                coverage_fallback_candidate_keys = candidate_keys
+                coverage_fallback_ai_deferred_keys = candidate_keys.intersection(
+                    staged_ai_keys
+                )
+                selectable = candidate_keys.difference(
+                    coverage_fallback_ai_deferred_keys
+                )
+                rotation = now_epoch // 86400
+                ordered_fallback_keys = (
+                    *_rotated_round_robin_review_keys(
+                        selectable.intersection(new_keys), rotation=rotation
+                    ),
+                    *_rotated_round_robin_review_keys(
+                        selectable.intersection(review_keys), rotation=rotation
+                    ),
+                )
+                coverage_fallback_keys = frozenset(
+                    ordered_fallback_keys[:coverage_fallback_limit]
+                )
+                for key in coverage_fallback_keys:
+                    row = patched_by_key_during_run[key]
+                    _apply_coverage_fallback(
+                        key=key,
+                        original=rows_by_key[key],
+                        patched=row,
+                        source_sha256=result.source_sha256,
+                    )
+                    if (
+                        row.get("action") != "AUTO_DUMMY"
+                        or row.get("source") != "dummy"
+                        or row.get("epg_feed") != "DUMMY_CHANNELS"
+                        or row.get("enabled") != "TRUE"
+                        or not row.get("epg_id", "").startswith("Synthetic.")
+                    ):
+                        raise AutoMatchError(
+                            "A coverage fallback violated the local synthetic policy."
+                        )
+                    approved_count += 1
+                    approved_by_server[key[0]] += 1
+
             # Preserve the original new-channel blast-radius policy. Existing
-            # REVIEW approvals are capped independently by the Sheet caller.
+            # REVIEW approvals and the separately bounded local-synthetic lane
+            # are capped independently by the Sheet caller.
             new_approved_by_server = {
                 server_id: sum(
                     1
@@ -2739,6 +3205,7 @@ def auto_match_and_spool(
                     )
                     if key in new_keys
                     and key[0] == server_id
+                    and key not in coverage_fallback_keys
                     and row.get("enabled") == "TRUE"
                 )
                 for server_id in SUPPORTED_SERVERS
@@ -2849,6 +3316,7 @@ def auto_match_and_spool(
     )
     verified_placeholder_keys = frozenset(
         key for key in review_keys
+        if key not in coverage_fallback_keys
         if patched_by_key[key].get("action") in {"AUTO_DUMMY", "IGNORE"}
     )
     return AutoMatchOutcome(
@@ -2950,6 +3418,43 @@ def auto_match_and_spool(
         recheck_dummy_rows=recheck_dummy_count,
         new_ignored_rows=new_ignored_count,
         recheck_ignored_rows=recheck_ignored_count,
+        coverage_fallback_limit=coverage_fallback_limit,
+        coverage_fallback_candidate_rows=len(coverage_fallback_candidate_keys),
+        coverage_fallback_applied_rows=len(coverage_fallback_keys),
+        coverage_fallback_deferred_rows=(
+            len(coverage_fallback_candidate_keys) - len(coverage_fallback_keys)
+        ),
+        coverage_fallback_ai_deferred_rows=len(
+            coverage_fallback_ai_deferred_keys
+        ),
+        new_coverage_fallback_rows=len(
+            coverage_fallback_keys.intersection(new_keys)
+        ),
+        recheck_coverage_fallback_rows=len(
+            coverage_fallback_keys.intersection(review_keys)
+        ),
+        coverage_fallback_machine_prefilled_candidate_rows=len(
+            coverage_fallback_machine_prefilled_keys
+        ),
+        coverage_fallback_machine_prefilled_applied_rows=len(
+            coverage_fallback_keys.intersection(
+                coverage_fallback_machine_prefilled_keys
+            )
+        ),
+        coverage_fallback_legacy_server1_candidate_rows=len(
+            coverage_fallback_legacy_server1_keys
+        ),
+        coverage_fallback_legacy_server1_applied_rows=len(
+            coverage_fallback_keys.intersection(
+                coverage_fallback_legacy_server1_keys
+            )
+        ),
+        coverage_fallback_protected_manual_rows=len(
+            coverage_fallback_protected_manual_keys
+        ),
+        coverage_fallback_protected_native_rows=len(
+            coverage_fallback_protected_native_keys
+        ),
     )
 
 
@@ -2960,6 +3465,7 @@ __all__ = [
     "AutoMatchError",
     "AutoMatchOutcome",
     "CurrentRunVerificationEvidence",
+    "MAX_COVERAGE_FALLBACK_ROWS",
     "MatcherRuntime",
     "VerificationCatalogCandidateEvidence",
     "VerificationProgrammeGateEvidence",

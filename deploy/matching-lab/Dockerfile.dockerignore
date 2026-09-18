@@ -1,0 +1,44 @@
+# Whitelist only the phase-one runtime source. Docker automatically uses this
+# file for deploy/matching-lab/Dockerfile and excludes every unrelated export,
+# virtual environment, credential, artifact, and repository file by default.
+*
+!requirements.txt
+
+!matching_lab/
+!matching_lab/*.py
+!scripts/
+!scripts/ai_review_gemini.py
+!scripts/ai_review_policy.py
+!scripts/auto_match_inventory.py
+!scripts/build_epg_streaming.py
+!scripts/epg_catalog_stream.py
+!scripts/epg_selection_spool.py
+!scripts/native_epg_review.py
+!scripts/sync_channel_inventory.py
+!src/
+!src/skytv_epg_auto_match_v1.py
+!src/skytv_epg_contextual_v8.py
+!src/skytv_epg_engine.py
+!knowledge/
+!knowledge/approved_channel_aliases.csv
+!knowledge/schedule_equivalence_groups.json
+!config/
+!config/channel_icons.csv
+!config/epg_sources.json
+
+!deploy/
+deploy/*
+!deploy/matching-lab/
+deploy/matching-lab/*
+!deploy/matching-lab/Dockerfile
+!deploy/matching-lab/Dockerfile.dockerignore
+
+# These denials remain last and override the source allowlist.
+**/__pycache__/
+**/*.py[cod]
+.env
+.env.*
+*.pem
+*.key
+*credentials*.json
+*service-account*.json

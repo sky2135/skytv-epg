@@ -2298,6 +2298,75 @@ GENERIC_NUMBERED_NAME_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# These are provider-controlled *slot* names rather than durable channel
+# brands. The text following the matched prefix is the event currently
+# assigned to that slot and is expected to rotate. Keep the grammar narrow:
+# only banks observed with an explicit, zero-padded slot number and canonical
+# delimiter qualify. A loose ``ESPN``/``PPV`` token check would hide ordinary
+# channel renames and could publish a stale guide under a recycled stream ID.
+PROVIDER_EVENT_SLOT_PATTERNS = (
+    (
+        "us_espn_plus",
+        re.compile(
+            r"^(?P<prefix>US \(ESPN\+ [0-9]{3}\) \|)(?: .*)?$",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    (
+        "ppv_event",
+        re.compile(
+            r"^(?P<prefix>PPV EVENT [0-9]{2}:)(?: .*)?$",
+            flags=re.IGNORECASE,
+        ),
+    ),
+    (
+        "live_event",
+        re.compile(
+            r"^(?P<prefix>LIVE EVENT [0-9]{2} -)(?: .*)?$",
+            flags=re.IGNORECASE,
+        ),
+    ),
+)
+
+
+def provider_event_slot_identity(value: object) -> tuple[str, str] | None:
+    """Return a strict event-bank slot identity, excluding its event payload.
+
+    Matching uses the complete anchored name grammar, so brand-like names that
+    merely contain ``ESPN+`` or ``PPV`` cannot enter this exception. Unicode,
+    case, and whitespace normalization is limited to comparing the same
+    canonical prefix; the required zero padding and delimiter remain part of
+    the identity.
+    """
+
+    text = unicodedata.normalize(
+        "NFKC", streaming.clean_identifier(value, 300)
+    )
+    for family, pattern in PROVIDER_EVENT_SLOT_PATTERNS:
+        matched = pattern.fullmatch(text)
+        if matched is not None:
+            return family, exact_inventory_name_key(matched.group("prefix"))
+    return None
+
+
+def is_same_provider_event_slot(
+    old_name: object,
+    new_name: object,
+    old_category: object,
+    new_category: object,
+) -> bool:
+    """Whether a name change is only rotating payload on one proven slot."""
+
+    old_category_key = exact_inventory_name_key(old_category)
+    if not old_category_key or old_category_key != exact_inventory_name_key(
+        new_category
+    ):
+        return False
+    old_identity = provider_event_slot_identity(old_name)
+    return old_identity is not None and old_identity == provider_event_slot_identity(
+        new_name
+    )
+
 
 def core_name_tokens(value: object) -> set[str]:
     return {
@@ -2332,6 +2401,14 @@ def possible_id_reuse(old_name: str, new_name: str, old_category: str, new_categ
     ):
         return True
     if old_name_key == new_name_key:
+        return False
+    # Event banks intentionally rotate the event payload while their stable
+    # numbered slot keeps the same stream identity. Treat only an exact
+    # supported prefix in the same non-empty category as ordinary name drift.
+    # Existing OPEN alerts remain authoritative and are not resolved here.
+    if is_same_provider_event_slot(
+        old_name, new_name, old_category, new_category
+    ):
         return False
     old_tokens = core_name_tokens(old_name)
     new_tokens = core_name_tokens(new_name)
@@ -5191,7 +5268,23 @@ def _build_verified_native_review_updates(
         before = before_by_key.get(key)
         if before is None or key[0] not in candidates:
             continue
-        if streaming.clean_text(raw_result.get("action", ""), 40).upper() != "REVIEW":
+        result_action = streaming.clean_text(
+            raw_result.get("action", ""), 40
+        ).upper()
+        is_coverage_fallback = (
+            result_action == "AUTO_DUMMY"
+            and streaming.clean_text(raw_result.get("source", ""), 40).casefold()
+            == "dummy"
+            and streaming.clean_text(raw_result.get("epg_feed", ""), 80).upper()
+            == "DUMMY_CHANNELS"
+            and streaming.clean_text(raw_result.get("notes", ""), 2_000).startswith(
+                "coverage-fallback-v1 "
+            )
+            and streaming.clean_text(raw_result.get("reason", ""), 500).startswith(
+                "coverage-fallback-rollback-v1 "
+            )
+        )
+        if result_action != "REVIEW" and not is_coverage_fallback:
             # A deterministic EPGShare approval wins and is never overwritten.
             continue
         try:
@@ -5202,8 +5295,10 @@ def _build_verified_native_review_updates(
             )
         except streaming.BuildError as exc:
             raise SyncError("A native REVIEW result has invalid enabled state.") from exc
-        if enabled:
+        if enabled and not is_coverage_fallback:
             raise SyncError("A native REVIEW candidate unexpectedly became enabled.")
+        if not enabled and is_coverage_fallback:
+            raise SyncError("A coverage fallback unexpectedly became disabled.")
         channel = channels_by_key.get(key)
         if channel is None:
             continue
@@ -5825,6 +5920,7 @@ def _run_sync_review_mode(
     epgshare_spool_out: Path | None,
     review_recheck_mode: str,
     review_recheck_servers: Sequence[str],
+    coverage_fallback_limit: int,
     use_gemini_ai: bool,
     gemini_api_key: str,
     ai_review_limit: int,
@@ -5940,6 +6036,21 @@ def _run_sync_review_mode(
         "review_recheck_safe_matches": 0,
         "review_recheck_still_review_rows": len(review_recheck_rows),
         "auto_match_rejected_programme_gates": 0,
+        "coverage_fallback_enabled": coverage_fallback_limit > 0,
+        "coverage_fallback_limit": coverage_fallback_limit,
+        "coverage_fallback_candidate_rows": 0,
+        "coverage_fallback_applied_rows": 0,
+        "coverage_fallback_deferred_rows": 0,
+        "coverage_fallback_ai_deferred_rows": 0,
+        "new_channel_coverage_fallback_rows": 0,
+        "review_recheck_coverage_fallback_rows": 0,
+        "coverage_fallback_machine_prefilled_candidate_rows": 0,
+        "coverage_fallback_machine_prefilled_applied_rows": 0,
+        "coverage_fallback_legacy_server1_candidate_rows": 0,
+        "coverage_fallback_legacy_server1_applied_rows": 0,
+        "coverage_fallback_protected_manual_rows": 0,
+        "coverage_fallback_protected_native_rows": 0,
+        "coverage_fallback_replaced_by_native_rows": 0,
     }
     outcome: automatch.AutoMatchOutcome | None = None
     learned_alias_support_rows: tuple[dict[str, str], ...] = ()
@@ -5956,6 +6067,7 @@ def _run_sync_review_mode(
                 spool_out=Path(epgshare_spool_out),
                 generated_at=generated_at,
                 enable_ai_review=bool(use_gemini_ai),
+                coverage_fallback_limit=coverage_fallback_limit,
             )
         except automatch.AutoMatchError as exc:
             raise SyncError(str(exc)) from exc
@@ -6008,6 +6120,31 @@ def _run_sync_review_mode(
             )
         )
 
+    native_verified_keys = {
+        _row_identity(row) for row in native_verified_updates
+    }
+    fallback_replaced_by_native = sum(
+        1
+        for row in safe_review_matches
+        if _row_identity(row) in native_verified_keys
+        and streaming.clean_text(row.get("notes", ""), 2_000).startswith(
+            "coverage-fallback-v1 "
+        )
+    )
+    if native_verified_keys:
+        # Native validation runs after the local coverage proposal. A verified
+        # current Server 2/3 native schedule wins, and the synthetic proposal
+        # for that identity must not enter the deterministic writer as a
+        # duplicate update.
+        safe_review_matches = [
+            row
+            for row in safe_review_matches
+            if _row_identity(row) not in native_verified_keys
+        ]
+    auto_match_summary["coverage_fallback_replaced_by_native_rows"] = (
+        fallback_replaced_by_native
+    )
+
     (
         deterministic_epgshare_updates,
         deterministic_native_updates,
@@ -6032,13 +6169,13 @@ def _run_sync_review_mode(
     # dry-run and is filled only after Google's authoritative post-write read.
     auto_match_summary["review_recheck_safe_matches"] = int(
         auto_match_summary.get("review_recheck_safe_matches", 0)
-    ) + int(
+    ) - fallback_replaced_by_native + int(
         auto_match_summary.get("review_recheck_headings_ignored", 0)
     ) + len(native_verified_updates)
     auto_match_summary["review_recheck_still_review_rows"] = max(
         0,
         int(auto_match_summary.get("review_recheck_still_review_rows", 0))
-        - len(native_verified_updates),
+        - (len(native_verified_updates) - fallback_replaced_by_native),
     )
 
     ai_updates: list[dict[str, str]] = []
@@ -6720,6 +6857,7 @@ def run_sync(
     epgshare_spool_out: Path | None = None,
     review_recheck_mode: str = "off",
     review_recheck_servers: Sequence[str] = (),
+    coverage_fallback_limit: int = 0,
     use_gemini_ai: bool = False,
     gemini_api_key: str = "",
     ai_review_limit: int = 25,
@@ -6732,6 +6870,19 @@ def run_sync(
     ).casefold() or "off"
     if normalized_recheck_mode not in {"off", "dry-run", "apply"}:
         raise SyncError("The REVIEW recheck mode must be off, dry-run, or apply.")
+    if (
+        isinstance(coverage_fallback_limit, bool)
+        or not isinstance(coverage_fallback_limit, int)
+        or not (
+            0
+            <= coverage_fallback_limit
+            <= automatch.MAX_COVERAGE_FALLBACK_ROWS
+        )
+    ):
+        raise SyncError(
+            "Coverage fallback limit must be an integer from 0 to "
+            f"{automatch.MAX_COVERAGE_FALLBACK_ROWS:,}."
+        )
     if validate_native_review and normalized_recheck_mode == "off":
         raise SyncError("Native REVIEW validation requires REVIEW recheck mode.")
     if normalized_recheck_mode != "off" or use_gemini_ai:
@@ -6757,6 +6908,7 @@ def run_sync(
             epgshare_spool_out=epgshare_spool_out,
             review_recheck_mode=normalized_recheck_mode,
             review_recheck_servers=review_recheck_servers,
+            coverage_fallback_limit=coverage_fallback_limit,
             use_gemini_ai=use_gemini_ai,
             gemini_api_key=gemini_api_key,
             ai_review_limit=ai_review_limit,
@@ -6825,6 +6977,21 @@ def run_sync(
         "review_recheck_safe_matches": 0,
         "review_recheck_still_review_rows": 0,
         "auto_match_rejected_programme_gates": 0,
+        "coverage_fallback_enabled": coverage_fallback_limit > 0,
+        "coverage_fallback_limit": coverage_fallback_limit,
+        "coverage_fallback_candidate_rows": 0,
+        "coverage_fallback_applied_rows": 0,
+        "coverage_fallback_deferred_rows": 0,
+        "coverage_fallback_ai_deferred_rows": 0,
+        "new_channel_coverage_fallback_rows": 0,
+        "review_recheck_coverage_fallback_rows": 0,
+        "coverage_fallback_machine_prefilled_candidate_rows": 0,
+        "coverage_fallback_machine_prefilled_applied_rows": 0,
+        "coverage_fallback_legacy_server1_candidate_rows": 0,
+        "coverage_fallback_legacy_server1_applied_rows": 0,
+        "coverage_fallback_protected_manual_rows": 0,
+        "coverage_fallback_protected_native_rows": 0,
+        "coverage_fallback_replaced_by_native_rows": 0,
     }
     learned_alias_support_rows: tuple[dict[str, str], ...] = ()
     auto_match_inputs = (
@@ -6857,6 +7024,7 @@ def run_sync(
                     all_source_catalog_file=Path(all_source_catalog_file),
                     spool_out=Path(epgshare_spool_out),
                     generated_at=generated_at,
+                    coverage_fallback_limit=coverage_fallback_limit,
                 )
             except automatch.AutoMatchError as exc:
                 raise SyncError(str(exc)) from exc
@@ -7303,6 +7471,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Server allowlist for the existing REVIEW recheck.",
     )
     parser.add_argument(
+        "--coverage-fallback-limit",
+        type=int,
+        default=0,
+        metavar="COUNT",
+        help=(
+            "Opt in to at most COUNT local channel-derived synthetic guides "
+            "after verified real matching (0 disables the fallback)."
+        ),
+    )
+    parser.add_argument(
         "--use-gemini-ai",
         action="store_true",
         help=(
@@ -7391,6 +7569,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SyncError("--use-gemini-ai requires REVIEW recheck mode.")
     if args.validate_native_review and args.review_recheck_mode == "off":
         raise SyncError("--validate-native-review requires REVIEW recheck mode.")
+    if not (
+        0
+        <= args.coverage_fallback_limit
+        <= automatch.MAX_COVERAGE_FALLBACK_ROWS
+    ):
+        raise SyncError(
+            "--coverage-fallback-limit must be between 0 and "
+            f"{automatch.MAX_COVERAGE_FALLBACK_ROWS:,}."
+        )
     if (
         args.write_to_sheet or args.review_recheck_mode != "off"
     ) and not args.all_source_file:
@@ -7536,6 +7723,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             epgshare_spool_out=epgshare_spool_out,
             review_recheck_mode=effective_recheck_mode,
             review_recheck_servers=args.review_recheck_servers,
+            coverage_fallback_limit=args.coverage_fallback_limit,
             use_gemini_ai=args.use_gemini_ai and not bootstrap_error,
             gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
             ai_review_limit=args.ai_review_limit,

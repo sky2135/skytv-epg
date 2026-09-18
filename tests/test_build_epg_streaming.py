@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -1647,6 +1648,554 @@ class MappingContractTests(unittest.TestCase):
         self.assertNotIn("3", payload["streamMetadata"])
 
 
+class SyntheticGuideTests(unittest.TestCase):
+    def _dummy_row(
+        self,
+        *,
+        stream_id: str,
+        channel_name: str,
+        category_name: str,
+        epg_id: str,
+    ) -> runner.MappingRow:
+        raw = _mapping_row(
+            server_id="server_1",
+            stream_id=stream_id,
+            channel_name=channel_name,
+            category_name=category_name,
+            epg_id=epg_id,
+            source="dummy",
+            epg_feed="DUMMY_CHANNELS",
+        )
+        raw["action"] = "AUTO_DUMMY"
+        return runner.parse_mapping_csv(
+            _mapping_bytes([raw]), {"server_1"}
+        )[0]
+
+    def test_channel_derived_titles_are_specific_but_do_not_invent_details(self) -> None:
+        reference_epoch = int(
+            datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc).timestamp()
+        )
+        fixtures = (
+            (
+                "HINDI-MOVIES 27 HD",
+                "HINDI | MOVIES 24/7",
+                "Movie.Dummy.us",
+                "Hindi Movies",
+            ),
+            (
+                "HINDI-ACTION ADVENTURE MOVIES HD",
+                "HINDI | MOVIES 24/7",
+                "Movie.Dummy.us",
+                "Action & Adventure Movies",
+            ),
+            (
+                "AKHIL HD",
+                "PUNJABI | SINGERS 24/7",
+                "24.7.Dummy.us",
+                "Akhil Songs",
+            ),
+            (
+                "AMAN HAYER HD",
+                "PUNJABI | SINGERS 24/7",
+                "24.7.Dummy.us",
+                "Aman Hayer Songs",
+            ),
+            (
+                "B PAARK",
+                "PUNJABI | SINGERS 24/7",
+                "24.7.Dummy.us",
+                "B Paark Songs",
+            ),
+            (
+                "PPV EVENT 09: UAE Warriors 65 (11.15 9:00 AM ET)",
+                "PPV (LIVE ONLY MATCH TIME)",
+                "PPV.EVENTS.Dummy.us",
+                "Upcoming: UAE Warriors 65 — Nov 15, 9:00 AM EST",
+            ),
+            (
+                "US (ESPN+ 001) | the Memorial Tournament presented by Workday",
+                "SPORTS | ESPN+",
+                "PPV.EVENTS.Dummy.us",
+                "The Memorial Tournament Presented by Workday",
+            ),
+            (
+                "PPV EVENT 02: Championship Fight (2026-09-18 20:30:00)",
+                "PPV (LIVE ONLY MATCH TIME)",
+                "PPV.EVENTS.Dummy.us",
+                "Upcoming: Championship Fight — Sep 18, 8:30 PM EDT",
+            ),
+            (
+                "PPV EVENT 03: Placeholder Fight (2098-01-01 00:00:00)",
+                "PPV (LIVE ONLY MATCH TIME)",
+                "PPV.EVENTS.Dummy.us",
+                "Placeholder Fight",
+            ),
+            (
+                "PPV EVENT 04",
+                "PPV (LIVE ONLY MATCH TIME)",
+                "PPV.EVENTS.Dummy.us",
+                "Event To Be Announced",
+            ),
+            (
+                "US (ESPN+ 099) |",
+                "SPORTS | ESPN+",
+                "PPV.EVENTS.Dummy.us",
+                "Event To Be Announced",
+            ),
+            (
+                "CA | CFL 01:",
+                "PPV (LIVE ONLY MATCH TIME)",
+                "PPV.EVENTS.Dummy.us",
+                "Event To Be Announced",
+            ),
+            (
+                "LIVE EVENT 01 - NO EVENT",
+                "PPV (LIVE ONLY MATCH TIME)",
+                "PPV.EVENTS.Dummy.us",
+                "No Event Scheduled",
+            ),
+            (
+                "XXX: Fake Taxi FHD",
+                "FOR Adults",
+                "Adult.Programming.Dummy.us",
+                "Adult Programming",
+            ),
+            (
+                "ΡORN Movies HD",
+                "Movies 24/7",
+                "Adult.Programming.Dummy.us",
+                "Adult Programming",
+            ),
+        )
+        for index, (channel, category, epg_id, expected) in enumerate(fixtures):
+            with self.subTest(channel=channel):
+                row = self._dummy_row(
+                    stream_id=str(index + 1),
+                    channel_name=channel,
+                    category_name=category,
+                    epg_id=epg_id,
+                )
+                self.assertEqual(
+                    runner.synthetic_programme_title(
+                        row,
+                        reference_epoch=reference_epoch,
+                    ),
+                    expected,
+                )
+
+    def test_event_time_formatting_is_eastern_and_dst_aware(self) -> None:
+        row = self._dummy_row(
+            stream_id="summer-event",
+            channel_name="PPV EVENT 01: Summer Showcase (07.15 9:00 AM ET)",
+            category_name="PPV (LIVE ONLY MATCH TIME)",
+            epg_id="PPV.EVENTS.Dummy.us",
+        )
+        reference = int(
+            datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc).timestamp()
+        )
+        decoded = runner.decode_synthetic_event_title(
+            row,
+            reference_epoch=reference,
+        )
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertEqual(decoded.name, "Summer Showcase")
+        self.assertEqual(decoded.time_label, "Jul 15, 9:00 AM EDT")
+        self.assertEqual(
+            datetime.fromtimestamp(decoded.start_epoch, tz=timezone.utc),
+            datetime(2026, 7, 15, 13, 0, tzinfo=timezone.utc),
+        )
+
+        explicit_year = self._dummy_row(
+            stream_id="summer-event-with-year",
+            channel_name="PPV EVENT 03: Summer Final (2026-07-15 09:00:00 ET)",
+            category_name="PPV (LIVE ONLY MATCH TIME)",
+            epg_id="PPV.EVENTS.Dummy.us",
+        )
+        decoded_explicit = runner.decode_synthetic_event_title(
+            explicit_year,
+            reference_epoch=reference,
+        )
+        self.assertIsNotNone(decoded_explicit)
+        assert decoded_explicit is not None
+        self.assertEqual(decoded_explicit.time_label, "Jul 15, 9:00 AM EDT")
+        self.assertEqual(
+            datetime.fromtimestamp(decoded_explicit.start_epoch, tz=timezone.utc),
+            datetime(2026, 7, 15, 13, 0, tzinfo=timezone.utc),
+        )
+
+        mismatched_zone = self._dummy_row(
+            stream_id="summer-event-wrong-zone",
+            channel_name="PPV EVENT 04: Bad Clock (2026-07-15 09:00:00 EST)",
+            category_name="PPV (LIVE ONLY MATCH TIME)",
+            epg_id="PPV.EVENTS.Dummy.us",
+        )
+        rejected = runner.decode_synthetic_event_title(
+            mismatched_zone,
+            reference_epoch=reference,
+        )
+        self.assertIsNotNone(rejected)
+        assert rejected is not None
+        self.assertEqual(rejected.name, "Bad Clock")
+        self.assertEqual(rejected.time_label, "")
+        self.assertIsNone(rejected.start_epoch)
+
+        rollover = self._dummy_row(
+            stream_id="new-year-event",
+            channel_name="PPV EVENT 02: New Year Showcase (01.02 8:00 PM ET)",
+            category_name="PPV (LIVE ONLY MATCH TIME)",
+            epg_id="PPV.EVENTS.Dummy.us",
+        )
+        december_reference = int(
+            datetime(2026, 12, 30, 12, 0, tzinfo=timezone.utc).timestamp()
+        )
+        decoded_rollover = runner.decode_synthetic_event_title(
+            rollover,
+            reference_epoch=december_reference,
+        )
+        self.assertIsNotNone(decoded_rollover)
+        assert decoded_rollover is not None
+        self.assertEqual(decoded_rollover.time_label, "Jan 2, 8:00 PM EST")
+        self.assertEqual(
+            datetime.fromtimestamp(decoded_rollover.start_epoch, tz=timezone.utc),
+            datetime(2027, 1, 3, 1, 0, tzinfo=timezone.utc),
+        )
+
+    def test_generic_dummy_id_gets_per_stream_day_blocks_and_xml_safe_title(self) -> None:
+        rows = [
+            self._dummy_row(
+                stream_id="27",
+                channel_name="HINDI-MOVIES 27 HD",
+                category_name="HINDI | MOVIES 24/7",
+                epg_id="Movie.Dummy.us",
+            ),
+            self._dummy_row(
+                stream_id="28",
+                channel_name="Rock & Roll <Live> HD",
+                category_name="PUNJABI | SINGERS 24/7",
+                epg_id="Movie.Dummy.us",
+            ),
+        ]
+        self.assertNotEqual(rows[0].source_key, rows[1].source_key)
+        self.assertNotEqual(rows[0].schedule_key, rows[1].schedule_key)
+        self.assertTrue(rows[0].schedule_key.startswith("DUMMY_CHANNELS::"))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            connection = runner.create_database(root / "synthetic.sqlite3")
+            try:
+                stats = runner.insert_synthetic_guides(
+                    connection=connection,
+                    rows=rows,
+                    window_start=FIXED_NOW - 3600,
+                    window_end=FIXED_NOW + 2 * 86400,
+                )
+                self.assertEqual(stats.schedules, 2)
+                self.assertEqual(stats.block_hours, 24)
+                durations = {
+                    int(stop) - int(start)
+                    for start, stop in connection.execute(
+                        "SELECT start_epoch, stop_epoch FROM programmes"
+                    )
+                }
+                self.assertEqual(durations, {24 * 3600})
+                titles = {
+                    str(source): str(title)
+                    for source, title in connection.execute(
+                        "SELECT source_key, title FROM programmes GROUP BY source_key, title"
+                    )
+                }
+                self.assertEqual(titles[rows[0].source_key], "Hindi Movies")
+                self.assertEqual(
+                    titles[rows[1].source_key], "Rock & Roll <Live> Songs"
+                )
+
+                schedule_stats = runner.load_schedule_stats(connection, FIXED_NOW)
+                entries, streams, conflicts = runner.build_xml_entries(
+                    rows=rows,
+                    connection=connection,
+                    schedule_stats=schedule_stats,
+                    icon_overrides=[],
+                )
+                self.assertEqual(streams, {"27", "28"})
+                self.assertFalse(conflicts)
+                output = root / "synthetic.xml.gz"
+                runner.write_tivimate_xmltv(
+                    destination=output,
+                    entries=entries,
+                    connection=connection,
+                    window_start=FIXED_NOW - 3600,
+                )
+            finally:
+                connection.close()
+
+            with gzip.open(output, "rt", encoding="utf-8") as handle:
+                xml = handle.read()
+            parsed = ET.fromstring(xml)
+            self.assertTrue(parsed.findall("programme"))
+            self.assertIn("Rock &amp; Roll &lt;Live&gt; Songs", xml)
+
+    def test_real_schedule_wins_same_name_collision_with_synthetic_guide(self) -> None:
+        dummy = self._dummy_row(
+            stream_id="dummy",
+            channel_name="Shared Channel",
+            category_name="24/7 Entertainment",
+            epg_id="24.7.Dummy.us",
+        )
+        real = runner.parse_mapping_csv(
+            _mapping_bytes(
+                [
+                    _mapping_row(
+                        server_id="server_1",
+                        stream_id="real",
+                        channel_name="Shared Channel",
+                        category_name="Entertainment",
+                        epg_id="Shared.Real.us2",
+                    )
+                ]
+            ),
+            {"server_1"},
+        )[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            connection = runner.create_database(Path(temporary) / "collision.sqlite3")
+            try:
+                runner.insert_synthetic_guides(
+                    connection=connection,
+                    rows=[dummy],
+                    window_start=FIXED_NOW - 3600,
+                    window_end=FIXED_NOW + 7 * 86400,
+                    reference_epoch=FIXED_NOW,
+                )
+                connection.execute(
+                    "INSERT INTO channels VALUES (?, ?, ?, ?, '')",
+                    (
+                        real.source_key,
+                        real.epg_id,
+                        real.epg_id,
+                        real.channel_name,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO programmes VALUES (?, ?, ?, ?, ?, '', '', '[]', ?)",
+                    (
+                        real.source_key,
+                        real.epg_id,
+                        FIXED_NOW - 1800,
+                        FIXED_NOW + 3600,
+                        "Verified Real Programme",
+                        10,
+                    ),
+                )
+                connection.commit()
+                schedule_stats = runner.load_schedule_stats(connection, FIXED_NOW)
+                entries, streams, _conflicts = runner.build_xml_entries(
+                    rows=[dummy, real],
+                    connection=connection,
+                    schedule_stats=schedule_stats,
+                    icon_overrides=[],
+                )
+            finally:
+                connection.close()
+        self.assertEqual(streams, {"dummy", "real"})
+        self.assertEqual(entries["Shared Channel"].source_key, "epgshare01")
+        self.assertEqual(entries["Shared Channel"].channel_key, "Shared.Real.us2")
+
+    def test_duplicate_dummy_names_keep_unique_xmltv_stream_identities(self) -> None:
+        rows = [
+            self._dummy_row(
+                stream_id=stream_id,
+                channel_name="Duplicate Movie Channel",
+                category_name="Movies 24/7",
+                epg_id="Movie.Dummy.us",
+            )
+            for stream_id in ("one", "two")
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            connection = runner.create_database(Path(temporary) / "duplicates.sqlite3")
+            try:
+                runner.insert_synthetic_guides(
+                    connection=connection,
+                    rows=rows,
+                    window_start=FIXED_NOW - 3600,
+                    window_end=FIXED_NOW + 86400,
+                    reference_epoch=FIXED_NOW,
+                )
+                schedule_stats = runner.load_schedule_stats(connection, FIXED_NOW)
+                entries, streams, _conflicts = runner.build_xml_entries(
+                    rows=rows,
+                    connection=connection,
+                    schedule_stats=schedule_stats,
+                    icon_overrides=[],
+                )
+            finally:
+                connection.close()
+
+        self.assertEqual(streams, {"one", "two"})
+        self.assertIn("Duplicate Movie Channel", entries)
+        for row in rows:
+            self.assertIn(row.schedule_key, entries)
+            self.assertEqual(entries[row.schedule_key].source_key, row.source_key)
+
+    def test_exact_time_event_has_bounded_pre_event_and_post_event_blocks(self) -> None:
+        row = self._dummy_row(
+            stream_id="timed-event",
+            channel_name="PPV EVENT 07: Championship Fight (2026-09-18 20:30:00 ET)",
+            category_name="PPV (LIVE ONLY MATCH TIME)",
+            epg_id="PPV.EVENTS.Dummy.us",
+        )
+        reference = int(
+            datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc).timestamp()
+        )
+        event_start = int(
+            datetime(2026, 9, 19, 0, 30, tzinfo=timezone.utc).timestamp()
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            connection = runner.create_database(Path(temporary) / "event.sqlite3")
+            try:
+                runner.insert_synthetic_guides(
+                    connection=connection,
+                    rows=[row],
+                    window_start=int(
+                        datetime(2026, 9, 18, tzinfo=timezone.utc).timestamp()
+                    ),
+                    window_end=int(
+                        datetime(2026, 9, 21, tzinfo=timezone.utc).timestamp()
+                    ),
+                    reference_epoch=reference,
+                )
+                programmes = connection.execute(
+                    "SELECT start_epoch, stop_epoch, title FROM programmes "
+                    "ORDER BY start_epoch"
+                ).fetchall()
+            finally:
+                connection.close()
+
+        self.assertTrue(programmes)
+        self.assertTrue(
+            all(left[1] == right[0] for left, right in zip(programmes, programmes[1:]))
+        )
+        event_rows = [item for item in programmes if item[0] == event_start]
+        self.assertEqual(
+            event_rows,
+            [
+                (
+                    event_start,
+                    event_start + 6 * 3600,
+                    "Championship Fight — Sep 18, 8:30 PM EDT",
+                )
+            ],
+        )
+        self.assertTrue(
+            all(
+                title.startswith("Upcoming: ")
+                for _start, stop, title in programmes
+                if stop <= event_start
+            )
+        )
+        self.assertTrue(
+            all(
+                title.startswith("Event Information: ")
+                for start, _stop, title in programmes
+                if start >= event_start + 6 * 3600
+            )
+        )
+
+    def test_review_and_disabled_dummy_rows_never_get_synthetic_programmes(self) -> None:
+        active = _mapping_row(
+            server_id="server_1",
+            stream_id="active",
+            channel_name="Active Loop",
+            category_name="24/7 Entertainment",
+            epg_id="24.7.Dummy.us",
+            source="dummy",
+            epg_feed="DUMMY_CHANNELS",
+        )
+        active["action"] = "AUTO_DUMMY"
+        review = {
+            **active,
+            "stream_id": "review",
+            "channel_name": "Private Review Sentinel",
+            "action": "REVIEW",
+            "enabled": "TRUE",
+        }
+        disabled = {
+            **active,
+            "stream_id": "disabled",
+            "channel_name": "Disabled Sentinel",
+            "enabled": "FALSE",
+        }
+        rows = runner.parse_mapping_csv(
+            _mapping_bytes([active, review, disabled]), {"server_1"}
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            connection = runner.create_database(Path(temporary) / "eligibility.sqlite3")
+            try:
+                stats = runner.insert_synthetic_guides(
+                    connection=connection,
+                    rows=rows,
+                    window_start=FIXED_NOW,
+                    window_end=FIXED_NOW + 86400,
+                    reference_epoch=FIXED_NOW,
+                )
+                source_ids = {
+                    value
+                    for (value,) in connection.execute(
+                        "SELECT source_channel_id FROM channels"
+                    )
+                }
+            finally:
+                connection.close()
+        self.assertEqual(stats.schedules, 1)
+        self.assertEqual(source_ids, {f"synthetic:{rows[0].synthetic_identity}"})
+
+    def test_default_blocks_are_bounded_at_production_dummy_scale(self) -> None:
+        base = self._dummy_row(
+            stream_id="0",
+            channel_name="Continuous Loop 0",
+            category_name="24/7 Entertainment",
+            epg_id="24.7.Dummy.us",
+        )
+        rows = [
+            replace(
+                base,
+                row_number=index + 2,
+                stream_id=str(index),
+                channel_name=f"Continuous Loop {index}",
+                canonical_name=f"Continuous Loop {index}",
+            )
+            for index in range(12_879)
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            connection = runner.create_database(Path(temporary) / "scale.sqlite3")
+            try:
+                stats = runner.insert_synthetic_guides(
+                    connection=connection,
+                    rows=rows,
+                    window_start=FIXED_NOW - 3 * 86400,
+                    window_end=FIXED_NOW + 7 * 86400,
+                    reference_epoch=FIXED_NOW,
+                )
+            finally:
+                connection.close()
+        self.assertEqual(stats.schedules, 12_879)
+        self.assertEqual(stats.block_hours, 24)
+        self.assertLess(stats.programme_rows, runner.MAX_SYNTHETIC_PROGRAMME_ROWS)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            connection = runner.create_database(Path(temporary) / "unsafe.sqlite3")
+            try:
+                with self.assertRaisesRegex(runner.BuildError, "between 4 and 24"):
+                    runner.insert_synthetic_guides(
+                        connection=connection,
+                        rows=[base],
+                        window_start=FIXED_NOW,
+                        window_end=FIXED_NOW + 86400,
+                        block_hours=1,
+                    )
+            finally:
+                connection.close()
+
+
 class StreamingBuildIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1837,10 +2386,27 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
         )
 
-        self.assertEqual(server_1_manifest["sourcePolicy"], "EPGSHARE_ALL_ONLY")
+        self.assertEqual(
+            server_1_manifest["sourcePolicy"],
+            "EPGSHARE_ALL_PLUS_CHANNEL_DERIVED",
+        )
         self.assertFalse(server_1_manifest["nativePanelXmltvUsed"])
         self.assertEqual(server_1_manifest["server1LegacyPanelRowsQuarantined"], 2)
         self.assertEqual(server_1_manifest["combinedSourceDummyGuideStreams"], 1)
+        self.assertEqual(server_1_manifest["syntheticGuideBlockHours"], 24)
+        self.assertEqual(server_1_manifest["syntheticEventWindowHours"], 6)
+        self.assertEqual(server_1_manifest["generatedSyntheticSchedules"], 1)
+        self.assertEqual(
+            server_1_manifest["downloadedUniqueSourceSchedulesRequested"], 1
+        )
+        self.assertEqual(
+            server_1_manifest["syntheticGuidePolicy"],
+            "CHANNEL_DERIVED_NO_INVENTED_PROGRAMME_DETAILS",
+        )
+        self.assertEqual(
+            server_1_manifest["sourceProvenance"]["synthetic"]["inputMode"],
+            "generated",
+        )
         server_1_validation = json.loads(
             (
                 public / "reports/server_1/server_1_validation.json"
@@ -1864,7 +2430,8 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
         self.assertNotIn("Native Server One Decoy Programme", server_1_xml)
         self.assertNotIn("Unrelated EPGShare Collision Programme", server_1_xml)
         self.assertNotIn("Native Server One Collision Programme", server_1_xml)
-        self.assertIn("Movie programming", server_1_xml)
+        self.assertIn("Punjabi Movies", server_1_xml)
+        self.assertNotIn("Movie programming", server_1_xml)
         self.assertIn("Native Panel Cricket Programme", server_2_xml)
         self.assertNotIn("EPGShare Cricket Decoy Programme", server_2_xml)
         self.assertNotIn("https://logos.example/willow.png", server_2_xml)
@@ -1898,12 +2465,11 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
                     self.assertLess(programme[0], programme[1])
 
         self.assertEqual(
-            server_1["streamToEpg"],
-            {
-                "101": "ALL_SOURCES1::Gurbani.Punjabi.test",
-                "103": "DUMMY_CHANNELS::Movie.Dummy.us",
-            },
+            server_1["streamToEpg"]["101"],
+            "ALL_SOURCES1::Gurbani.Punjabi.test",
         )
+        dummy_schedule_key = server_1["streamToEpg"]["103"]
+        self.assertRegex(dummy_schedule_key, r"^DUMMY_CHANNELS::[0-9a-f]{64}$")
         self.assertEqual(
             server_2["streamToEpg"],
             {"202": "PANEL::Willow.Punjabi.test"},
@@ -1912,10 +2478,10 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
             server_1["programmes"]["ALL_SOURCES1::Gurbani.Punjabi.test"],
             [[FIXED_NOW - 1_800, FIXED_NOW + 3_600, "EPGShare Sikh Programme"]],
         )
-        self.assertIn("DUMMY_CHANNELS::Movie.Dummy.us", server_1["programmes"])
+        self.assertIn(dummy_schedule_key, server_1["programmes"])
         self.assertEqual(
-            server_1["programmes"]["DUMMY_CHANNELS::Movie.Dummy.us"][0][2],
-            "Movie programming",
+            server_1["programmes"][dummy_schedule_key][0][2],
+            "Punjabi Movies",
         )
         self.assertEqual(
             server_2["programmes"]["PANEL::Willow.Punjabi.test"],
@@ -1928,6 +2494,7 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
         server_2 = _read_gzip_json(public / "EPG/server_2_metadata.json.gz")
 
         sikh = server_1["streamMetadata"]["101"]
+        self.assertEqual(sikh["guideMode"], "epgshare")
         self.assertEqual(sikh["primaryLanguage"], "pa")
         self.assertEqual(sikh["languages"], ["pa"])
         self.assertEqual(sikh["genre"], "religion")
@@ -1939,6 +2506,7 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
         self.assertIn("religions", sikh["personalizationEligibleDimensions"])
 
         cricket = server_2["streamMetadata"]["202"]
+        self.assertEqual(cricket["guideMode"], "panel")
         self.assertEqual(cricket["primaryLanguage"], "pa")
         self.assertEqual(cricket["languages"], ["pa"])
         self.assertEqual(cricket["genre"], "sports")
@@ -1947,6 +2515,9 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
         self.assertTrue(cricket["personalizationEligible"])
         self.assertIn("sports", cricket["personalizationEligibleDimensions"])
         self.assertEqual(cricket["logoUrl"], "")
+
+        movie = server_1["streamMetadata"]["103"]
+        self.assertEqual(movie["guideMode"], "synthetic")
 
         self.assertEqual(server_1["filterSemantics"]["dimensions"], "AND")
         self.assertEqual(server_2["filterSemantics"]["dimensions"], "AND")

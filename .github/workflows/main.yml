@@ -42,6 +42,7 @@ env:
     https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.txt
   EPG_PUBLIC_BASE_URL: ${{ vars.EPG_PUBLIC_BASE_URL }}
   EPG_MINIMUM_COVERAGE: ${{ vars.EPG_MINIMUM_COVERAGE || '80' }}
+  EPG_COVERAGE_FALLBACK_LIMIT: ${{ vars.EPG_COVERAGE_FALLBACK_LIMIT || '0' }}
 
 jobs:
   build:
@@ -130,6 +131,13 @@ jobs:
               raise SystemExit(
                   "EPG_MINIMUM_COVERAGE must be between 0 and 100."
               )
+          fallback_limit = os.environ.get(
+              "EPG_COVERAGE_FALLBACK_LIMIT", ""
+          ).strip()
+          if fallback_limit not in {"0", "500", "2500", "5000"}:
+              raise SystemExit(
+                  "EPG_COVERAGE_FALLBACK_LIMIT must be 0, 500, 2500, or 5000."
+              )
           PY
 
       - name: Install pinned dependencies
@@ -216,6 +224,7 @@ jobs:
                 "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt"
               --epgshare-spool-out
                 "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3"
+              --coverage-fallback-limit "$EPG_COVERAGE_FALLBACK_LIMIT"
               --write-to-sheet
           )
           if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
