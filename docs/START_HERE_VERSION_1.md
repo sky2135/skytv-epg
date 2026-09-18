@@ -286,6 +286,14 @@ Open the **Variables** tab. Click **New repository variable** for each row:
 | `GOOGLE_SHEET_TAB` | `Mappings` |
 | `EPG_PUBLIC_BASE_URL` | `https://sky2135.github.io/skytv-epg` |
 
+Optional scheduled-rollout variables are deliberately unset by default:
+
+| Name | Allowed value | Effect |
+|---|---|---|
+| `EPG_REVIEW_APPLY_LIMIT` | `0`, `25`, `100`, `500`, `2500`, or `5000` | Total existing-`REVIEW` rows that one scheduled run may persist. Unset/`0` means none. |
+| `EPG_COVERAGE_FALLBACK_LIMIT` | `0`, `500`, `2500`, or `5000` | Maximum local synthetic-guide proposals per scheduled run. Unset/`0` disables new fallback proposals. |
+| `EPG_USE_GEMINI_AI` | `true` (case-insensitive) | Enables scheduled Gemini review. Unset or any other value means off; the API-key secret alone does not enable it. A nonzero `EPG_REVIEW_APPLY_LIMIT` is also required before any rows are sent for AI review. |
+
 If an old variable named `EPG_MAPPING_CSV_URL` exists, delete it. Version 1
 reads the private Sheet directly and does not use that URL.
 
@@ -330,9 +338,10 @@ For `GOOGLE_SERVICE_ACCOUNT_JSON`:
 
 ### 9C. Add Gemini for strict unresolved-channel verification
 
-Smart Rules work without Gemini, but the automatic backlog workflow uses
-Gemini as a strict second verifier for only the strongest unresolved local
-candidates. Add this key to use the supplied scheduled defaults.
+Smart Rules work without Gemini. Gemini is an optional strict second verifier
+for only the strongest unresolved local candidates. Adding the secret does not
+turn it on: use the manual input for one run or set `EPG_USE_GEMINI_AI=true`
+for scheduled runs.
 
 1. Open [Google AI Studio](https://aistudio.google.com/app/apikey).
 2. Sign in and create a Gemini API key.
@@ -414,8 +423,9 @@ queued or running.
 3. Confirm the branch is **main**.
 4. Turn on **Add missing channels to Google Sheet** for this second run.
 5. Set **Recheck channels already marked REVIEW** to **apply**, choose **all**,
-   turn Gemini on, and choose the **200** limit. This one run handles new
-   channels and the existing backlog together.
+   set **Maximum TOTAL REVIEW rows selected/written** to **25** for the canary,
+   and leave Gemini off. This one run handles new channels and a bounded part
+   of the existing backlog together.
 6. Click **Run workflow**.
 7. Wait for the green check mark.
 8. Open the compact run summary. Check the per-server **Total channels**,
@@ -476,10 +486,12 @@ identity as a routed new proposal, that new proposal stays disabled in
 
 ### 12A. Let the daily workflow reduce channels waiting in REVIEW
 
-The Section 12 apply run starts the backlog process. After that, Workflow 1
-runs daily before Workflow 2, so you do not need to repeat manual backlog
-runs. **Do not edit, sort, insert, or delete rows in `Mappings` while an apply
-run is queued or running.**
+The Section 12 apply run starts the backlog process. Workflow 1 then runs daily
+before Workflow 2, but it reduces the existing backlog only after you set
+`EPG_REVIEW_APPLY_LIMIT` to a verified nonzero cap. With that variable unset or
+`0`, the schedule analyzes and defers existing rows without changing them.
+**Do not edit, sort, insert, or delete rows in `Mappings` while an apply run is
+queued or running.**
 
 For any later read-only preview:
 
@@ -500,15 +512,18 @@ For an immediate apply outside the daily schedule:
 
 1. Run the same workflow again.
 2. Set **Recheck channels already marked REVIEW** to **apply**.
-3. Keep the same server choice. Turn Gemini on only if `GEMINI_API_KEY` was
-   added in Section 9C.
-4. If Gemini is on, choose up to **200** affected rows per run.
-5. Start the run and do not touch the Sheet until the run has a green check.
-6. Read **REVIEW rows safely updated** in the summary. If Gemini is on,
+3. Set the total existing-`REVIEW` apply limit. Start with **25**; `0` performs
+   no existing-`REVIEW` writes even when the mode says `apply`.
+4. Keep the same server choice. Turn Gemini on only if `GEMINI_API_KEY` was
+   added in Section 9C. Gemini uses only capacity remaining under the total cap.
+5. If Gemini is on, choose up to **200** affected rows per run.
+6. Start the run and do not touch the Sheet until the run has a green check.
+7. Read **REVIEW rows safely updated** in the summary. If Gemini is on,
    **Gemini HIGH responses** is the model result and **verified channels
    enabled** is the smaller number that passed every local and terminal gate
    and was durably stored.
-7. If a safe remainder is reported, leave it for the next daily run. You may
+8. If a safe remainder is reported, leave it for the next scheduled run after
+   setting a nonzero `EPG_REVIEW_APPLY_LIMIT`. You may
    dispatch another apply only if you need it sooner.
 
 Smart Rules and the exact Server 2/3 native validation lane run before Gemini.
@@ -728,17 +743,21 @@ After the first setup, the system runs automatically:
 1. Every day at **02:17 Toronto time**, Workflow 1 checks all three servers,
    appends missing channels, and rechecks eligible existing `REVIEW` rows in
    `apply` mode.
-2. Smart Rules may apply up to **5,000 deterministic decisions**. Verified real
+2. Smart Rules analyzes eligible rows, but the scheduled job persists no
+   existing-`REVIEW` decision unless `EPG_REVIEW_APPLY_LIMIT` is explicitly
+   nonzero. That one cap covers deterministic, native, synthetic, heading, and
+   AI decisions together. Verified real
    EPGShare matches become `AUTO_EPGSHARE`, Server 2/3 native matches become
    `KEEP_PANEL`, verified placeholders may become `AUTO_DUMMY`, and decorative
    headings may become disabled `IGNORE`.
-3. The scheduled run enables strict Gemini verification for at most **200** of
-   the strongest unresolved rows. Gemini can enable only a supplied candidate
+3. Scheduled Gemini is off unless `EPG_USE_GEMINI_AI=true`; when enabled it can
+   consider at most **200** of the strongest unresolved rows and only the
+   capacity remaining under the total apply cap. Gemini can enable only a supplied candidate
    that also passes both local rankers and every catalog, programme, provider,
    Sheet, and alert reread; all other rows remain unchanged in `REVIEW`.
-4. Any verified remainder continues automatically on the next daily Workflow 1
-   run. Manual dispatch remains available for a dry-run or an extra immediate
-   apply.
+4. Any verified remainder stays deferred until a later run with nonzero apply
+   capacity. Manual dispatch remains available for a dry-run or a bounded
+   immediate apply.
 5. Every day at **04:37 Toronto time**, Workflow 2 refreshes the private Sheet
    snapshot, builds and validates the guide, and deploys the XML and JSON
    outputs.
@@ -763,8 +782,10 @@ in the official text catalog also stops the full unattended-matching preflight.
 
 Your regular task is:
 
-1. Let scheduled Workflow 1 recheck and safely reduce the backlog each day;
-   use a manual `dry-run` only when you want a read-only preview.
+1. After a successful canary, set `EPG_REVIEW_APPLY_LIMIT` to the intended
+   nonzero scheduled cap and let Workflow 1 safely reduce the backlog each day;
+   leave it unset/`0` for analysis-only runs and use a manual `dry-run` when you
+   want a read-only preview.
 2. Open the Google Sheet and filter `action` to `REVIEW`.
 3. Manually decide only the remaining uncertain rows. Leave anything you
    cannot verify disabled and in review.
@@ -939,9 +960,10 @@ the inventory see it as new and add it again. Instead:
 - [ ] GitHub Pages source set to **GitHub Actions**
 - [ ] Inventory report-only run completed successfully
 - [ ] Inventory write run completed successfully
-- [ ] Existing `REVIEW` dry-run checked; one all-server apply completed and the
-      daily Workflow 1 schedule left enabled for any safe remainder
-- [ ] `GEMINI_API_KEY` stored as a GitHub secret for strict AI verification
+- [ ] Existing `REVIEW` dry-run checked and one all-server 25-row canary apply
+      completed; `EPG_REVIEW_APPLY_LIMIT` set to the intended scheduled cap
+      only after the canary result was verified
+- [ ] If Gemini will be used, `GEMINI_API_KEY` stored as a GitHub secret
 - [ ] Automatic EPG matches reviewed by count; remaining `REVIEW` rows checked
       and uncertain rows left disabled
 - [ ] Important language, region, genre, sport, and religion metadata reviewed;

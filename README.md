@@ -45,8 +45,11 @@ available to the EPG-building step.
 
 - `1 - Sync channels to Google Sheet` — runs daily at **02:17 Toronto time** and
   can also be dispatched manually. The scheduled run appends missing channels,
-  applies the existing-`REVIEW` recheck to all servers, and enables strict
-  Gemini verification with a 200-row cap. Smart Rules always run first.
+  rechecks existing `REVIEW` rows on all servers, but writes none of those rows
+  unless `EPG_REVIEW_APPLY_LIMIT` is explicitly set to an allowed nonzero
+  value. Gemini is also off unless `EPG_USE_GEMINI_AI=true`. Smart Rules always
+  run first. Manual dispatch defaults to no new-row write, `dry-run`, Gemini
+  off, and a zero REVIEW apply limit.
 - `2 - Build and publish EPG` — daily and manual inventory, build, validation,
   and GitHub Pages deployment.
 
@@ -100,15 +103,17 @@ automatically.
 
 Workflow 1 can also recheck those existing `REVIEW` rows. Smart Rules always
 run first. A match is enabled only after the same exact-ID, region, catalog,
-and programme checks used for a new channel all pass. The scheduled daily run
-checks all three servers and can apply up to 5,000 deterministic decisions in
-verified batches; no manual loop is required. Any verified remainder is
-continued by the next daily run.
+and programme checks used for a new channel all pass. Smart Rules may analyze
+the whole eligible scope, but one explicit `review_apply_limit` of `0`, `25`,
+`100`, `500`, `2500`, or `5000` caps the total existing-`REVIEW` rows persisted
+across deterministic, native, synthetic, heading, and AI lanes. The default is
+`0`, which guarantees no existing-`REVIEW` mutation.
 For Server 2 and Server 3, the same run may also recover an exact native ID
 from current API/M3U evidence, but only after whole-catalog name uniqueness,
 current programme, and immediate pre-write provider checks pass. Server 1
 remains EPGShare-only.
-Gemini verification is limited to 200 affected unresolved rows per run. Gemini
+Gemini verification is opt-in and limited to the smaller of 200 affected rows
+or the capacity remaining under the total REVIEW apply limit. Gemini
 cannot invent an ID: it sees only opaque choices from a
 local shortlist. A row is enabled only when two fixed local rankers independently
 choose the same candidate with strong scores and margins, Gemini returns `HIGH`

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "createdUtc": "2026-07-21T22:16:51.259933Z",
-  "updatedUtc": "2026-09-18T14:02:25Z",
+  "updatedUtc": "2026-09-18T15:59:17Z",
   "matcherVersion": "8.4",
   "matcherBuildId": "SKYTV-CONTEXTUAL-RULES-8.4-2026-07-19",
   "builderVersion": "7.1",
@@ -19,7 +19,7 @@
   "legacyProductionRunnerSha256": "56dbadde8360bd177adfebcbcbe4fecd80044b8c9d6dded3bb06ef9da4a49ea3",
   "streamingRunnerSha256": "a93ad39729a208d7e15761dc56a782ec52aee2d17f75b75dded95c09133bb09f",
   "autoMatchAdapterSha256": "db49198de05cb6c618ff11a0408081eeba581eb9b9a05f231a0d04a3ce70d7e8",
-  "autoMatchIntegrationSha256": "4c9e7713fb477d0cc48177d35dec58511763f4f64155d99d34b64e7fd151d8f3",
+  "autoMatchIntegrationSha256": "5e88f400c66fd7bcbd8876810660fcd123e78c925f9022faaf7070f7eb81c7a0",
   "backlogAnalyzerSha256": "d5af5112922e4d1a7ce85dd34ceffa3cb732d5680e60fb7e5e6eb2f4550d3ab2",
   "backlogAnalyzerWorkflowSha256": "4a935bb7f4211fde9b41abc1c506ec6a9262b2dcc2321c717a1eaddc846dbcb1",
   "nativeReviewSha256": "89e6145f2b855b6cbab43b32582985b68af3365b7cbc9e5c0232ce23bb274fee",
@@ -29,8 +29,8 @@
   "epgSelectionSpoolSha256": "c0ad4e485972b206515f2205e37cf056593cb1105035a6031ef95b5371cd1336",
   "sheetSeedExporterSha256": "c5530d0a2dd63c62b8ffafed102651859e0155fe9ba5b731d5ced1ab6e17d80b",
   "workflowSha256": "a56c0ddc8cbbb675590b25d04ff432dac4b117d6d88a780b79f6752822de7aa4",
-  "channelInventoryRunnerSha256": "08520ee390ae7bc75568b0b30d7561a97178047d44ced813cf73e1b7d82a77fc",
-  "channelInventoryWorkflowSha256": "7734ac511b2c4ede898a127625c9d905adda9ec2bc799168fba5a1037fb4f3f3",
+  "channelInventoryRunnerSha256": "e91476606f3770063fca7c060d1cbd716040edfa1b5ceccbf034bfbdc48d6253",
+  "channelInventoryWorkflowSha256": "239ca26c1fbd5c62668dd4609db786ee12da09d2dc9eebf34f5766ff3c74f72f",
   "channelInventoryRequirementsSha256": "cb80ac4377fa3656ea135c65273fdc1b6ba7f5ce198f1f14ccb13de0e3ed593f",
   "approvedAliasesSha256": "f99a1d53ecfb2487d441aabe720f62f458299751de49f2d63b779bdf4c5b83e1",
   "scheduleEquivalencesSha256": "a0de16a12d00d6aca96c7f7a54ed444a47467115266f467521880cc8a56b6edc",
@@ -79,6 +79,6 @@
     "The app guide retains schema v1 required fields and three-item programme tuples; personalization is emitted in a companion metadata file.",
     "The icon layer is separate from channel matching and uses exact mapping, exact configured override, or exact EPGShare source XMLTV ID only.",
     "Logo filenames are never fuzzy matched automatically.",
-    "Workflow 1 applies at most 5,000 deterministic REVIEW decisions and 200 strict AI-verification decisions per run in independently reread and provider-revalidated Google batches; Workflow 2 refreshes afterward and deploys only fully validated staged output."
+    "Workflow 1 analyzes the eligible REVIEW scope but persists at most one explicit total cap of 0, 25, 100, 500, 2,500, or 5,000 rows across deterministic, native, synthetic, IGNORE, and strict AI lanes; the scheduled cap defaults to zero, Gemini is explicit opt-in, AI receives only remaining whole-cluster capacity, and every Google batch is independently reread and provider-revalidated. Workflow 2 refreshes afterward and deploys only fully validated staged output."
   ]
 }

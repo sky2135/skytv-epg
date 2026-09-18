@@ -566,6 +566,79 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertTrue(summary["coverage_fallback_enabled"])
             self.assertEqual(summary["coverage_fallback_applied_rows"], 1)
 
+    def test_coverage_fallback_excludes_new_lane_when_append_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "all.xml.gz"
+            text_catalog = base / "all.txt"
+            spool = base / "selected.sqlite3"
+            write_gzip(source, xml_bytes(strong=False))
+            text_catalog.write_bytes(text_catalog_bytes("Good.Channel.us2"))
+            new = mapping_row(
+                server_id="server_1",
+                stream_id="new-1",
+                channel_name="Hindi Movies New",
+            )
+            review = mapping_row(
+                server_id="server_1",
+                stream_id="review-1",
+                channel_name="Hindi Movies Review",
+            )
+            provider = inventory(server_id="server_1")
+            provider.channels.append(
+                {
+                    **provider.channels[0],
+                    "stream_id": "review-1",
+                    "name": "Hindi Movies Review",
+                }
+            )
+
+            outcome = auto_match_and_spool(
+                mapping_rows=[review],
+                inventories=[provider],
+                new_rows=[new],
+                review_rows=[review],
+                all_source_file=source,
+                all_source_catalog_file=text_catalog,
+                spool_out=spool,
+                generated_at=GENERATED_AT,
+                coverage_fallback_limit=1,
+                include_new_coverage_fallback=False,
+                minimum_unique_channels=1,
+                runtime_factory=RuntimeFactory(),
+            )
+
+            by_id = {row["stream_id"]: row for row in outcome.rows}
+            self.assertEqual(by_id["new-1"]["action"], "REVIEW")
+            self.assertEqual(by_id["review-1"]["action"], "AUTO_DUMMY")
+            self.assertEqual(outcome.new_coverage_fallback_rows, 0)
+            self.assertEqual(outcome.recheck_coverage_fallback_rows, 1)
+            self.assertEqual(
+                outcome.coverage_fallback_suppressed_unwritten_new_rows, 1
+            )
+
+    def test_coverage_fallback_fairly_interleaves_new_and_review_lanes(self) -> None:
+        ordered = integration._interleave_coverage_fallback_lanes(
+            (("server_1", "new-1"), ("server_1", "new-2")),
+            (("server_2", "review-1"), ("server_2", "review-2")),
+            rotation=0,
+        )
+        self.assertEqual(
+            ordered,
+            (
+                ("server_1", "new-1"),
+                ("server_2", "review-1"),
+                ("server_1", "new-2"),
+                ("server_2", "review-2"),
+            ),
+        )
+        self.assertEqual(
+            integration._interleave_coverage_fallback_lanes(
+                ordered[::2], ordered[1::2], rotation=1
+            )[0],
+            ("server_2", "review-1"),
+        )
+
     def test_coverage_fallback_replaces_only_strict_machine_prefill_with_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

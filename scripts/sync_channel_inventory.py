@@ -71,14 +71,14 @@ MAX_SYNC_ALERT_BYTES = 8 * 1024 * 1024
 # hard memory/CPU bound while allowing the workflow's explicit ``all`` scope
 # to analyze that backlog in one pass.
 MAX_RECHECK_CANDIDATES = 30_000
-# Deterministic approvals are resumable, so one run may drain a substantial
-# verified backlog without relying on repeated manual workflow dispatches.
-# Google mutations remain independently bounded below: no request may carry
-# more than 500 rows or exceed the encoded 2 MiB ceiling.
-MAX_RECHECK_APPLIES_PER_RUN = 5_000
+# Existing-REVIEW writes require an explicit total run cap.  This cap is shared
+# by deterministic real matches, native matches, synthetic guides, ignored
+# headings, and strict AI approvals; no lane receives an extra allowance.
+REVIEW_APPLY_LIMIT_CHOICES = (0, 25, 100, 500, 2_500, 5_000)
+MAX_RECHECK_APPLIES_PER_RUN = max(REVIEW_APPLY_LIMIT_CHOICES)
 MAX_RECHECK_UPDATE_ROWS_PER_BATCH = 500
 MAX_AI_REVIEW_ROWS = 200
-MAX_RECHECK_TOTAL_UPDATES = MAX_RECHECK_APPLIES_PER_RUN + MAX_AI_REVIEW_ROWS
+MAX_RECHECK_TOTAL_UPDATES = MAX_RECHECK_APPLIES_PER_RUN
 MAX_RECHECK_UPDATE_REQUEST_BYTES = 2 * 1024 * 1024
 # Retained as a public compatibility name for tests/integrations which inspect
 # the conservative request ceiling. The limit now applies to every batch, not
@@ -4554,9 +4554,9 @@ def _validate_review_update(
         if not after_enabled:
             raise SyncError("A verified Smart-Rules approval must be enabled.")
         notes = streaming.clean_text(after.get("notes", ""), 2000).casefold()
-        if "ai-verified-v2" in notes:
-            expected_ai = (verified_ai_updates or {}).get(key)
-            if expected_ai is None or any(
+        expected_ai = (verified_ai_updates or {}).get(key)
+        if expected_ai is not None:
+            if "ai-verified-v2" not in notes or any(
                 str(expected_ai.get(header, "")) != str(after.get(header, ""))
                 for header in streaming.SHEET_COLUMNS
             ):
@@ -4696,48 +4696,177 @@ def _review_update_requests(
 def _bounded_deterministic_review_updates(
     epgshare_updates: Sequence[dict[str, str]],
     native_updates: Sequence[dict[str, str]],
+    *,
+    limit: int = MAX_RECHECK_APPLIES_PER_RUN,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Select a count-bounded deterministic write prefix.
 
-    EPGShare keeps its established priority. Native updates use the remaining
-    run capacity. The writer splits this prefix into independently verified,
-    count- and byte-bounded Google batches so one large request is never
-    required and an interrupted run can resume from the remaining REVIEW rows.
+    Verified real EPGShare rows are selected first, then verified native rows,
+    then synthetic guides and ignored headings. Each priority is round-robin
+    across servers so a small canary is representative. The writer splits the
+    selected prefix into independently verified, count- and byte-bounded
+    Google batches.
     """
+
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 0 <= limit <= MAX_RECHECK_APPLIES_PER_RUN
+    ):
+        raise SyncError("The deterministic REVIEW selection limit is invalid.")
+
+    tagged: dict[tuple[str, str], tuple[str, dict[str, str]]] = {}
+    for lane, rows in (("epgshare", epgshare_updates), ("native", native_updates)):
+        for raw in rows:
+            row = dict(raw)
+            key = _row_identity(row)
+            if key in tagged:
+                raise SyncError(
+                    "The deterministic REVIEW candidates contain a duplicate identity."
+                )
+            tagged[key] = (lane, row)
 
     selected_epgshare: list[dict[str, str]] = []
     selected_native: list[dict[str, str]] = []
-    for lane, rows in (("epgshare", epgshare_updates), ("native", native_updates)):
-        for row in rows:
-            if (
-                len(selected_epgshare) + len(selected_native)
-                >= MAX_RECHECK_APPLIES_PER_RUN
-            ):
-                return selected_epgshare, selected_native
-            # Prove that even a single maximum-sized row can form a legal
-            # batch. Cumulative sizing happens later with real row locations.
-            requests_for_row = _review_update_requests(
-                numeric_sheet_id=2_147_483_647,
-                row_number=MAX_GOOGLE_MAPPING_ROWS + 1,
-                row=row,
+    ordered = _prioritized_deterministic_review_rows(
+        tuple(row for _lane, row in tagged.values())
+    )
+    for row in ordered[:limit]:
+        lane = tagged[_row_identity(row)][0]
+        # Prove that even a single maximum-sized row can form a legal batch.
+        # Cumulative sizing happens later with real row locations.
+        requests_for_row = _review_update_requests(
+            numeric_sheet_id=2_147_483_647,
+            row_number=MAX_GOOGLE_MAPPING_ROWS + 1,
+            row=row,
+        )
+        row_estimate = len(
+            json.dumps(
+                {"requests": requests_for_row},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        if row_estimate > MAX_RECHECK_DETERMINISTIC_REQUEST_BYTES:
+            raise SyncError(
+                "A deterministic REVIEW update cannot fit in one "
+                "conservative Google request."
             )
-            row_estimate = len(
-                json.dumps(
-                    {"requests": requests_for_row},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            )
-            if row_estimate > MAX_RECHECK_DETERMINISTIC_REQUEST_BYTES:
-                raise SyncError(
-                    "A deterministic REVIEW update cannot fit in one "
-                    "conservative Google request."
-                )
-            if lane == "epgshare":
-                selected_epgshare.append(row)
-            else:
-                selected_native.append(row)
+        if lane == "epgshare":
+            selected_epgshare.append(row)
+        else:
+            selected_native.append(row)
     return selected_epgshare, selected_native
+
+
+def _prioritized_deterministic_review_rows(
+    rows: Sequence[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Order deterministic candidates by value, then fairly across servers."""
+
+    action_priority = {
+        "AUTO_EPGSHARE": 0,
+        "KEEP_PANEL": 1,
+        "AUTO_DUMMY": 2,
+        "IGNORE": 3,
+    }
+    by_priority: dict[int, dict[str, list[dict[str, str]]]] = {}
+    for raw in rows:
+        row = dict(raw)
+        action = streaming.clean_text(row.get("action", ""), 40).upper()
+        if action not in action_priority:
+            raise SyncError("A deterministic REVIEW candidate has an invalid action.")
+        server_id = streaming.normalize_server_id(row.get("server_id", ""))
+        by_priority.setdefault(action_priority[action], {}).setdefault(
+            server_id, []
+        ).append(row)
+
+    ordered: list[dict[str, str]] = []
+    for priority in sorted(by_priority):
+        buckets = by_priority[priority]
+        for bucket in buckets.values():
+            bucket.sort(key=lambda row: streaming.stream_sort_key(row["stream_id"]))
+        maximum = max((len(bucket) for bucket in buckets.values()), default=0)
+        for index in range(maximum):
+            for server_id in sorted(buckets):
+                bucket = buckets[server_id]
+                if index < len(bucket):
+                    ordered.append(bucket[index])
+    return ordered
+
+
+_REVIEW_APPLY_LANES = ("deterministic", "native", "synthetic", "ignore", "ai")
+
+
+def _review_apply_lane(
+    row: Mapping[str, str], *, ai_keys: frozenset[tuple[str, str]] = frozenset()
+) -> str:
+    """Return the one write-cap lane represented by an approved REVIEW row."""
+
+    action = streaming.clean_text(row.get("action", ""), 40).upper()
+    if _row_identity(row) in ai_keys:
+        return "ai"
+    if action == "KEEP_PANEL":
+        return "native"
+    if action == "AUTO_EPGSHARE":
+        return "deterministic"
+    if action == "AUTO_DUMMY":
+        return "synthetic"
+    if action == "IGNORE":
+        return "ignore"
+    raise SyncError("A selected REVIEW update has an unsupported apply lane.")
+
+
+def _review_apply_lane_metrics(
+    rows: Sequence[Mapping[str, str]],
+    *,
+    state: str,
+    ai_rows: Sequence[Mapping[str, str]] = (),
+) -> dict[str, int]:
+    """Build exact selected/persisted counters for the shared REVIEW cap."""
+
+    if state not in {"selected", "persisted"}:
+        raise SyncError("The REVIEW apply metric state is invalid.")
+    ai_keys = frozenset(_row_identity(row) for row in ai_rows)
+    counts = Counter(_review_apply_lane(row, ai_keys=ai_keys) for row in rows)
+    return {
+        f"review_apply_{state}_rows": len(rows),
+        **{
+            f"review_apply_{state}_{lane}_rows": int(counts.get(lane, 0))
+            for lane in _REVIEW_APPLY_LANES
+        },
+    }
+
+
+def _mapping_table_with_review_updates(
+    base_table: MappingTable,
+    rows: Sequence[Mapping[str, str]],
+) -> MappingTable:
+    """Return the exact expected table after a verified REVIEW prefix."""
+
+    updates: dict[tuple[str, str], Mapping[str, str]] = {}
+    for row in rows:
+        key = _row_identity(row)
+        if key in updates:
+            raise SyncError("The committed REVIEW prefix contains a duplicate identity.")
+        updates[key] = row
+    base_keys = {_row_identity(row) for row in base_table.rows}
+    if not set(updates).issubset(base_keys):
+        raise SyncError("The committed REVIEW prefix contains an unknown identity.")
+    patched_rows: list[dict[str, str]] = []
+    for before in base_table.rows:
+        after = dict(before)
+        update = updates.get(_row_identity(before))
+        if update is not None:
+            for column in RECHECK_PATCH_COLUMNS:
+                after[column] = str(update.get(column, ""))
+        patched_rows.append(after)
+    return MappingTable(
+        raw_headers=list(base_table.raw_headers),
+        headers=list(base_table.headers),
+        rows=patched_rows,
+        row_numbers=list(base_table.row_numbers),
+    )
 
 
 def _verify_review_update_result(
@@ -4815,6 +4944,7 @@ def update_google_sheet_review_rows(
     ) = None,
     verified_native_rows: Sequence[Mapping[str, str]] = (),
     verified_ai_rows: Sequence[Mapping[str, str]] = (),
+    maximum_rows: int,
 ) -> tuple[int, MappingTable]:
     """Patch REVIEW rows in verified, resumable Google batches.
 
@@ -4823,10 +4953,16 @@ def update_google_sheet_review_rows(
     therefore remain a safe resume point if a later request is interrupted.
     """
 
+    if (
+        isinstance(maximum_rows, bool)
+        or not isinstance(maximum_rows, int)
+        or not 0 <= maximum_rows <= MAX_RECHECK_TOTAL_UPDATES
+    ):
+        raise SyncError("The REVIEW writer maximum is invalid.")
     if not rows:
         return 0, base_table
-    if len(rows) > MAX_RECHECK_TOTAL_UPDATES:
-        raise SyncError("The REVIEW update batch exceeds its conservative limit.")
+    if len(rows) > maximum_rows:
+        raise SyncError("The REVIEW update batch exceeds its authorized run maximum.")
     desired: dict[tuple[str, str], dict[str, str]] = {}
     verified_native_updates: dict[tuple[str, str], dict[str, str]] = {}
     verified_ai_updates: dict[tuple[str, str], dict[str, str]] = {}
@@ -4877,16 +5013,21 @@ def update_google_sheet_review_rows(
         raise SyncError(
             "The native REVIEW allowlist does not exactly match native updates."
         )
-    ai_desired_keys = {
-        key
-        for key, row in desired.items()
-        if "ai-verified-v2"
-        in streaming.clean_text(row.get("notes", ""), 2000).casefold()
-    }
-    if set(verified_ai_updates) != ai_desired_keys:
-        raise SyncError(
-            "The AI REVIEW allowlist does not exactly match AI-assisted updates."
-        )
+    for key, expected in verified_ai_updates.items():
+        current = desired.get(key)
+        if (
+            current is None
+            or streaming.clean_text(current.get("action", ""), 40).upper()
+            != "AUTO_EPGSHARE"
+            or any(
+                str(expected.get(header, "")) != str(current.get(header, ""))
+                for header in streaming.SHEET_COLUMNS
+            )
+        ):
+            raise SyncError(
+                "The AI REVIEW allowlist does not exactly match AI-assisted "
+                "updates."
+            )
 
     layout = google_sheet_layout(
         session,
@@ -5001,6 +5142,10 @@ def update_google_sheet_review_rows(
         ).encode("utf-8")
         if len(current_desired) > MAX_RECHECK_UPDATE_ROWS_PER_BATCH:
             raise SyncError("A REVIEW update batch exceeds its row limit.")
+        if committed_count + len(current_desired) > maximum_rows:
+            raise SyncError(
+                "The REVIEW update would exceed its authorized run maximum."
+            )
         if len(encoded_body) > MAX_RECHECK_UPDATE_REQUEST_BYTES:
             raise SyncError(
                 "A REVIEW update request exceeds its conservative size limit."
@@ -5642,6 +5787,15 @@ def _gemini_review_updates(
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """Apply only Smart+Gemini HIGH agreements which pass every local gate."""
 
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 0 <= limit <= MAX_AI_REVIEW_ROWS
+    ):
+        raise SyncError(
+            f"The effective Gemini row limit must be from 0 to {MAX_AI_REVIEW_ROWS}."
+        )
+
     excluded = frozenset(excluded_keys)
     available = tuple(
         shortlist
@@ -5694,12 +5848,20 @@ def _gemini_review_updates(
     try:
         clusters = ai_policy.cluster_exact_compatible_rows(tuple(policy_rows))
         prepared = ai_policy.prepare_cluster_reviews(clusters)
-        plan = ai_policy.partition_review_requests(
-            prepared,
-            run_limit=min(int(limit), MAX_AI_REVIEW_ROWS),
-            batch_size=ai_policy.MAX_ROWS_PER_GEMINI_CALL,
-            rotation=int(getattr(outcome, "ai_review_rotation", 0) or 0),
-        )
+        if limit:
+            plan = ai_policy.partition_review_requests(
+                prepared,
+                run_limit=limit,
+                batch_size=ai_policy.MAX_ROWS_PER_GEMINI_CALL,
+                rotation=int(getattr(outcome, "ai_review_rotation", 0) or 0),
+            )
+            planned_selected = list(plan.selected)
+            planned_deferred = list(plan.deferred)
+        else:
+            # A zero total apply allowance must not make an external AI call.
+            # Keep every eligible cluster whole and report it as deferred.
+            planned_selected = []
+            planned_deferred = [item for item in prepared if item.eligible]
     except (ai_policy.PolicyInputError, ValueError, TypeError):
         summary["ai_review_error_rows"] += len(policy_rows)
         summary["ai_review_status"] = "failed_closed"
@@ -5709,15 +5871,15 @@ def _gemini_review_updates(
         1 for item in prepared if not item.eligible
     )
 
-    # The user-facing limit controls AI clusters.  Keep an independent 200-row
-    # mutation cap so clustering can save API calls without expanding the
-    # Google write blast radius.
+    # The effective limit counts represented rows, not clusters. A cluster
+    # which does not fit is deferred whole, so one agreement is never partly
+    # applied merely to fill the remaining total REVIEW capacity.
     selected: list[ai_policy.PreparedClusterReview] = []
-    deferred = list(plan.deferred)
+    deferred = planned_deferred
     selected_rows = 0
-    for item in plan.selected:
+    for item in planned_selected:
         row_count = len(item.cluster.rows)
-        if selected_rows + row_count > MAX_AI_REVIEW_ROWS:
+        if selected_rows + row_count > limit:
             deferred.append(item)
             continue
         selected.append(item)
@@ -5732,10 +5894,23 @@ def _gemini_review_updates(
         summary["ai_review_status"] = "no_safe_clusters"
         return [], summary
 
-    batches = tuple(
-        tuple(selected[index : index + ai_policy.MAX_ROWS_PER_GEMINI_CALL])
-        for index in range(0, len(selected), ai_policy.MAX_ROWS_PER_GEMINI_CALL)
-    )
+    batches_list: list[tuple[ai_policy.PreparedClusterReview, ...]] = []
+    current_batch: list[ai_policy.PreparedClusterReview] = []
+    current_batch_rows = 0
+    for item in selected:
+        row_count = len(item.cluster.rows)
+        if current_batch and (
+            current_batch_rows + row_count > ai_policy.MAX_ROWS_PER_GEMINI_CALL
+            or len(current_batch) >= ai_policy.MAX_ROWS_PER_GEMINI_CALL
+        ):
+            batches_list.append(tuple(current_batch))
+            current_batch = []
+            current_batch_rows = 0
+        current_batch.append(item)
+        current_batch_rows += row_count
+    if current_batch:
+        batches_list.append(tuple(current_batch))
+    batches = tuple(batches_list)
     results_by_id: dict[str, gemini_review.ReviewResult] = {}
     for batch_index, batch in enumerate(batches):
         requests_to_review = tuple(
@@ -5768,10 +5943,21 @@ def _gemini_review_updates(
                 continue
             results_by_id[result.review_id] = result
 
+    error_result_ids = frozenset(
+        review_id
+        for review_id, result in results_by_id.items()
+        if result.decision is gemini_review.ReviewDecision.ERROR
+        or bool(getattr(result, "error_code", None))
+    )
+    for item in selected:
+        if item.cluster.cluster_id in error_result_ids:
+            summary["ai_review_error_rows"] += len(item.cluster.rows)
+
     result_items = tuple(
         item
         for item in selected
         if item.cluster.cluster_id in results_by_id
+        and item.cluster.cluster_id not in error_result_ids
     )
     terminal_input_by_key: dict[tuple[str, str], dict[str, str]] = {}
     for item in result_items:
@@ -5813,6 +5999,10 @@ def _gemini_review_updates(
         result = results_by_id.get(item.cluster.cluster_id)
         if result is None:
             # A failed later API batch is already counted above.
+            continue
+        if item.cluster.cluster_id in error_result_ids:
+            # Transport/parser errors are counted above and never reported as
+            # a model abstention or sent through terminal approval policy.
             continue
         is_high = (
             result.decision is gemini_review.ReviewDecision.SUGGEST
@@ -5920,6 +6110,7 @@ def _run_sync_review_mode(
     epgshare_spool_out: Path | None,
     review_recheck_mode: str,
     review_recheck_servers: Sequence[str],
+    review_apply_limit: int,
     coverage_fallback_limit: int,
     use_gemini_ai: bool,
     gemini_api_key: str,
@@ -5945,10 +6136,21 @@ def _run_sync_review_mode(
         raise SyncError(
             f"The Gemini review limit must be between 1 and {MAX_AI_REVIEW_ROWS}."
         )
+    if (
+        isinstance(review_apply_limit, bool)
+        or review_apply_limit not in REVIEW_APPLY_LIMIT_CHOICES
+    ):
+        raise SyncError(
+            "The REVIEW apply limit must be 0, 25, 100, 500, 2500, or 5000."
+        )
     mapping_write_requested = bool(write_to_sheet or mode == "apply")
     if mapping_write_requested and google_session is None:
         raise SyncError("A Google authorized session is required for Sheet writes.")
-    if use_gemini_ai and not str(gemini_api_key or "").strip():
+    if (
+        use_gemini_ai
+        and review_apply_limit > 0
+        and not str(gemini_api_key or "").strip()
+    ):
         raise SyncError(
             "Gemini review was selected, but the GEMINI_API_KEY secret is missing."
         )
@@ -6042,6 +6244,7 @@ def _run_sync_review_mode(
         "coverage_fallback_applied_rows": 0,
         "coverage_fallback_deferred_rows": 0,
         "coverage_fallback_ai_deferred_rows": 0,
+        "coverage_fallback_suppressed_unwritten_new_rows": 0,
         "new_channel_coverage_fallback_rows": 0,
         "review_recheck_coverage_fallback_rows": 0,
         "coverage_fallback_machine_prefilled_candidate_rows": 0,
@@ -6068,6 +6271,7 @@ def _run_sync_review_mode(
                 generated_at=generated_at,
                 enable_ai_review=bool(use_gemini_ai),
                 coverage_fallback_limit=coverage_fallback_limit,
+                include_new_coverage_fallback=bool(write_to_sheet),
             )
         except automatch.AutoMatchError as exc:
             raise SyncError(str(exc)) from exc
@@ -6151,11 +6355,11 @@ def _run_sync_review_mode(
     ) = _bounded_deterministic_review_updates(
         safe_review_matches,
         native_verified_updates,
+        limit=review_apply_limit,
     )
-    deterministic_updates = [
-        *deterministic_epgshare_updates,
-        *deterministic_native_updates,
-    ]
+    deterministic_updates = _prioritized_deterministic_review_rows(
+        [*deterministic_epgshare_updates, *deterministic_native_updates]
+    )
     deferred_safe_matches = max(
         0,
         len(safe_review_matches)
@@ -6255,6 +6459,7 @@ def _run_sync_review_mode(
             frozenset(_row_identity(row) for row in verified_rows),
         )
 
+    ai_remaining_capacity = max(0, review_apply_limit - len(deterministic_updates))
     if use_gemini_ai and outcome is not None:
         provider_sensitive_values = gemini_provider_sensitive_values(
             server_configs
@@ -6263,7 +6468,7 @@ def _run_sync_review_mode(
             outcome=outcome,
             authoritative_table=authoritative_table,
             api_key=gemini_api_key,
-            limit=int(ai_review_limit),
+            limit=min(int(ai_review_limit), ai_remaining_capacity),
             sensitive_values=provider_sensitive_values,
             excluded_keys=(_row_identity(row) for row in native_verified_updates),
             terminal_state_loader=load_ai_terminal_state,
@@ -6277,6 +6482,9 @@ def _run_sync_review_mode(
             int(auto_match_summary.get("review_recheck_still_review_rows", 0))
             - len(ai_updates),
         )
+
+    if len(deterministic_updates) + len(ai_updates) > review_apply_limit:
+        raise SyncError("The selected REVIEW updates exceed the total apply limit.")
 
     review_updates = [*deterministic_updates, *ai_updates]
     projected_sheet_bytes = validate_projected_sheet_size(
@@ -6301,6 +6509,7 @@ def _run_sync_review_mode(
         "sheet_mode": "write" if mapping_write_requested else "dry-run",
         "review_recheck_mode": mode,
         "review_recheck_servers": list(selected_servers),
+        "review_apply_limit": review_apply_limit,
         "inventory_rows": sum(len(item.channels) for item in inventories),
         "new_rows": len(new_rows),
         "appended_rows": 0,
@@ -6333,6 +6542,10 @@ def _run_sync_review_mode(
         **ai_summary,
         **dict(native_hint_summary or {}),
         **native_summary,
+        **_review_apply_lane_metrics(
+            review_updates, state="selected", ai_rows=ai_updates
+        ),
+        **_review_apply_lane_metrics((), state="persisted"),
     }
     status_table = authoritative_table
     status_quarantine_keys = match_time_quarantine_keys
@@ -6405,6 +6618,15 @@ def _run_sync_review_mode(
         if sync_alert_dedup_key(row) not in latest_open_incidents
     ]
     existing_alerts = latest_alerts_before_append
+    # Report the authoritative post-dedup proposal set. A concurrent run may
+    # already have stored the same stable incident after our initial compare.
+    summary["new_sync_alerts"] = len(pending_alerts)
+    summary["projected_sync_alert_rows"] = len(existing_alerts) + len(
+        pending_alerts
+    )
+    summary["projected_sync_alert_bytes"] = validate_projected_alert_size(
+        existing_alerts, pending_alerts
+    )
     try:
         summary["sync_alerts_appended"] = append_sync_alert_rows(
             google_session,
@@ -6594,11 +6816,19 @@ def _run_sync_review_mode(
         )
         summary.update(revalidation_summary)
         deterministic_native_updates = revalidated_native_updates
-        deterministic_updates = [
-            *deterministic_epgshare_updates,
-            *deterministic_native_updates,
-        ]
+        deterministic_updates = _prioritized_deterministic_review_rows(
+            [*deterministic_epgshare_updates, *deterministic_native_updates]
+        )
         review_updates = [*deterministic_updates, *ai_updates]
+        if len(review_updates) > review_apply_limit:
+            raise SyncError(
+                "Native revalidation produced more REVIEW updates than authorized."
+            )
+        summary.update(
+            _review_apply_lane_metrics(
+                review_updates, state="selected", ai_rows=ai_updates
+            )
+        )
         proposed_review_keys = {_row_identity(row) for row in review_updates}
         revalidated_native_keys = {
             _row_identity(row) for row in deterministic_native_updates
@@ -6689,6 +6919,8 @@ def _run_sync_review_mode(
             )
 
     if mode == "apply" and review_updates:
+        if len(review_updates) > review_apply_limit:
+            raise SyncError("The REVIEW writer input exceeds the total apply limit.")
         refresh_alert_safety_before_mapping_write()
         try:
             writer_kwargs: dict[str, Any] = {
@@ -6707,16 +6939,14 @@ def _run_sync_review_mode(
                 sheet_tab,
                 final_table,
                 review_updates,
+                maximum_rows=review_apply_limit,
                 **writer_kwargs,
             )
         except SheetWriteError as exc:
             committed_rows = review_updates[: max(0, exc.appended_count)]
+            ai_update_keys = {_row_identity(row) for row in ai_updates}
             committed_ai = sum(
-                1
-                for row in committed_rows
-                if "ai-verified-v2" in streaming.clean_text(
-                    row.get("notes", ""), 2000
-                ).casefold()
+                1 for row in committed_rows if _row_identity(row) in ai_update_keys
             )
             committed_deterministic = len(committed_rows) - committed_ai
             committed_native = sum(
@@ -6731,6 +6961,11 @@ def _run_sync_review_mode(
             )
             summary["native_review_persisted"] = committed_native
             summary["ai_review_high_suggestions_persisted"] = committed_ai
+            summary.update(
+                _review_apply_lane_metrics(
+                    committed_rows, state="persisted", ai_rows=ai_updates
+                )
+            )
             summary["review_recheck_deferred_rows"] = int(
                 summary.get("review_recheck_deferred_rows", 0)
             ) + (
@@ -6740,6 +6975,9 @@ def _run_sync_review_mode(
                 summary.get("native_review_deferred", 0)
             ) + len(deterministic_native_updates) - committed_native
             summary["review_recheck_write_error"] = str(exc)
+            status_table = _mapping_table_with_review_updates(
+                final_table, committed_rows
+            )
             persist_reports()
             raise
         summary["review_recheck_rows_updated"] = updated_count
@@ -6752,6 +6990,11 @@ def _run_sync_review_mode(
         intentional_mapping_write = intentional_mapping_write or bool(updated_count)
         summary["ai_review_high_suggestions_persisted"] = int(
             len(ai_updates)
+        )
+        summary.update(
+            _review_apply_lane_metrics(
+                review_updates, state="persisted", ai_rows=ai_updates
+            )
         )
 
     # Every apply run ends with a fresh Mappings read, even when there were no
@@ -6857,6 +7100,7 @@ def run_sync(
     epgshare_spool_out: Path | None = None,
     review_recheck_mode: str = "off",
     review_recheck_servers: Sequence[str] = (),
+    review_apply_limit: int = 0,
     coverage_fallback_limit: int = 0,
     use_gemini_ai: bool = False,
     gemini_api_key: str = "",
@@ -6870,6 +7114,14 @@ def run_sync(
     ).casefold() or "off"
     if normalized_recheck_mode not in {"off", "dry-run", "apply"}:
         raise SyncError("The REVIEW recheck mode must be off, dry-run, or apply.")
+    if (
+        isinstance(review_apply_limit, bool)
+        or not isinstance(review_apply_limit, int)
+        or review_apply_limit not in REVIEW_APPLY_LIMIT_CHOICES
+    ):
+        raise SyncError(
+            "REVIEW apply limit must be 0, 25, 100, 500, 2500, or 5000."
+        )
     if (
         isinstance(coverage_fallback_limit, bool)
         or not isinstance(coverage_fallback_limit, int)
@@ -6908,6 +7160,7 @@ def run_sync(
             epgshare_spool_out=epgshare_spool_out,
             review_recheck_mode=normalized_recheck_mode,
             review_recheck_servers=review_recheck_servers,
+            review_apply_limit=review_apply_limit,
             coverage_fallback_limit=coverage_fallback_limit,
             use_gemini_ai=use_gemini_ai,
             gemini_api_key=gemini_api_key,
@@ -6983,6 +7236,7 @@ def run_sync(
         "coverage_fallback_applied_rows": 0,
         "coverage_fallback_deferred_rows": 0,
         "coverage_fallback_ai_deferred_rows": 0,
+        "coverage_fallback_suppressed_unwritten_new_rows": 0,
         "new_channel_coverage_fallback_rows": 0,
         "review_recheck_coverage_fallback_rows": 0,
         "coverage_fallback_machine_prefilled_candidate_rows": 0,
@@ -7058,10 +7312,13 @@ def run_sync(
         "generated_at": generated_at,
         "sheet_mode": "write" if write_to_sheet else "dry-run",
         "review_recheck_mode": "off",
+        "review_apply_limit": review_apply_limit,
         "review_recheck_eligible_rows": 0,
         "review_recheck_deferred_rows": 0,
         "review_recheck_safe_matches_persisted": 0,
         "review_recheck_rows_updated": 0,
+        **_review_apply_lane_metrics((), state="selected"),
+        **_review_apply_lane_metrics((), state="persisted"),
         "ai_review_enabled": False,
         "ai_review_considered_rows": 0,
         "ai_review_suggestion_rows": 0,
@@ -7471,6 +7728,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Server allowlist for the existing REVIEW recheck.",
     )
     parser.add_argument(
+        "--review-apply-limit",
+        type=int,
+        choices=REVIEW_APPLY_LIMIT_CHOICES,
+        default=0,
+        metavar="COUNT",
+        help=(
+            "Maximum total existing REVIEW rows that apply mode may persist "
+            "across every decision lane (0 forbids REVIEW writes)."
+        ),
+    )
+    parser.add_argument(
         "--coverage-fallback-limit",
         type=int,
         default=0,
@@ -7723,6 +7991,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             epgshare_spool_out=epgshare_spool_out,
             review_recheck_mode=effective_recheck_mode,
             review_recheck_servers=args.review_recheck_servers,
+            review_apply_limit=args.review_apply_limit,
             coverage_fallback_limit=args.coverage_fallback_limit,
             use_gemini_ai=args.use_gemini_ai and not bootstrap_error,
             gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
