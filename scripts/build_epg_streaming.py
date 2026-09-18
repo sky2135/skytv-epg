@@ -2968,26 +2968,134 @@ def panel_payload_is_non_xmltv(prefix: bytes) -> bool:
     return lowered.startswith((b"<html", b"<!doctype html", b"{", b"["))
 
 
+PANEL_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+PANEL_MAX_REDIRECTS = 5
+PANEL_REQUEST_TIMEOUT = (25, 300)
+PANEL_ACCEPT_HEADER = (
+    "application/json,application/xml,text/xml,text/plain,"
+    "application/gzip,application/octet-stream,*/*"
+)
+
+
+def panel_hostname_key(value: object) -> str:
+    """Return a DNS-safe comparison key without Unicode case folding."""
+
+    host = str(value or "").rstrip(".")
+    # Requests converts Unicode hostnames to IDNA before connecting.  Unicode
+    # casefolding here would conflate distinct DNS names (for example, ``ss``
+    # and a sharp-s label) before that conversion and could leak credentials.
+    if not host or not host.isascii():
+        raise BuildError("Panel returned an unsafe redirect.")
+    return host.lower()
+
+
+def panel_redirect_target(
+    current_url: str,
+    location: str,
+    *,
+    original_host: str,
+    original_scheme: str,
+) -> str:
+    """Return a credential-free, same-host panel redirect target.
+
+    Panel credentials are query parameters rather than an Authorization header.
+    Following redirects automatically could therefore expose them to another
+    host.  Resolve and validate the target ourselves, discard every redirected
+    query/fragment, and let the caller reattach the known credentials via
+    ``params`` only after this check passes.
+    """
+
+    if not str(location or "").strip():
+        raise BuildError("Panel returned an unsafe redirect.")
+    try:
+        parsed = urlparse(urljoin(current_url, str(location).strip()))
+        # Accessing ``port`` validates malformed or out-of-range port text.
+        _port = parsed.port
+    except (TypeError, ValueError):
+        raise BuildError("Panel returned an unsafe redirect.") from None
+
+    scheme = parsed.scheme.casefold()
+    host = panel_hostname_key(parsed.hostname)
+    trusted_host = panel_hostname_key(original_host)
+    # Xtream providers commonly redirect between service ports on one exact
+    # hostname.  That hostname already received the authenticated request, so
+    # its ports share the panel trust boundary; another hostname never does.
+    if (
+        scheme not in {"http", "https"}
+        or not host
+        or host != trusted_host
+        or parsed.username
+        or parsed.password
+        or (original_scheme.casefold() == "https" and scheme != "https")
+    ):
+        raise BuildError("Panel returned an unsafe redirect.")
+    return parsed._replace(query="", fragment="").geturl()
+
+
+def close_panel_transport(transport: Any) -> None:
+    """Best-effort close without masking a completed download or safe error."""
+
+    try:
+        transport.close()
+    except Exception:
+        # Closing a fully consumed response/session is cleanup only.  Exception
+        # text may also contain the credential-bearing request URL, so neither
+        # propagate nor log it here.
+        pass
+
+
 def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[str, Any]]:
     base_url, username, password = panel_credentials(server_id)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
     session = requests.Session()
-    session.headers.update({"User-Agent": f"SKYTV-EPG/{PIPELINE_VERSION}"})
+    session.headers.update(
+        {
+            "User-Agent": "SKYTV-EPG-Builder/2.0",
+            "Accept": PANEL_ACCEPT_HEADER,
+        }
+    )
+    endpoint = f"{base_url}/xmltv.php"
+    parsed_endpoint = urlparse(endpoint)
+    original_host = parsed_endpoint.hostname or ""
+    original_scheme = parsed_endpoint.scheme.casefold()
+    credentials = {"username": username, "password": password}
+    last_issue = "request error"
     try:
         for attempt in range(1, 4):
             temporary.unlink(missing_ok=True)
+            response = None
+            last_issue = "request error"
             try:
-                response = session.get(
-                    f"{base_url}/xmltv.php",
-                    params={"username": username, "password": password},
-                    stream=True,
-                    timeout=(20, 180),
-                    allow_redirects=False,
-                )
+                request_url = endpoint
+                for _redirect_number in range(PANEL_MAX_REDIRECTS + 1):
+                    response = session.get(
+                        request_url,
+                        params=credentials,
+                        stream=True,
+                        timeout=PANEL_REQUEST_TIMEOUT,
+                        allow_redirects=False,
+                    )
+                    if response.status_code not in PANEL_REDIRECT_STATUSES:
+                        break
+                    location = response.headers.get("Location", "")
+                    next_url = panel_redirect_target(
+                        request_url,
+                        location,
+                        original_host=original_host,
+                        original_scheme=original_scheme,
+                    )
+                    close_panel_transport(response)
+                    response = None
+                    request_url = next_url
+                else:
+                    raise BuildError(
+                        f"{server_id} panel exceeded the redirect limit."
+                    )
+
                 if response.status_code != 200:
-                    response.close()
-                    raise requests.RequestException("panel HTTP failure")
+                    last_issue = f"HTTP {response.status_code}"
+                    raise requests.RequestException()
                 total = 0
                 digest = hashlib.sha256()
                 prefix = b""
@@ -3003,7 +3111,9 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                         output.write(chunk)
                     output.flush()
                     os.fsync(output.fileno())
-                response.close()
+                if total == 0:
+                    last_issue = "empty response"
+                    raise requests.RequestException()
                 if panel_payload_is_non_xmltv(prefix):
                     raise BuildError(f"{server_id} panel returned a non-XML response.")
                 os.replace(temporary, destination)
@@ -3014,14 +3124,38 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
             except BuildError:
                 temporary.unlink(missing_ok=True)
                 raise
-            except (OSError, requests.RequestException):
+            except requests.Timeout:
+                last_issue = "timeout"
                 temporary.unlink(missing_ok=True)
                 if attempt == 3:
                     break
                 time.sleep(2 ** (attempt - 1))
+            except requests.ConnectionError:
+                last_issue = "connection error"
+                temporary.unlink(missing_ok=True)
+                if attempt == 3:
+                    break
+                time.sleep(2 ** (attempt - 1))
+            except requests.RequestException:
+                temporary.unlink(missing_ok=True)
+                if attempt == 3:
+                    break
+                time.sleep(2 ** (attempt - 1))
+            except OSError:
+                last_issue = "local I/O error"
+                temporary.unlink(missing_ok=True)
+                if attempt == 3:
+                    break
+                time.sleep(2 ** (attempt - 1))
+            finally:
+                if response is not None:
+                    close_panel_transport(response)
     finally:
-        session.close()
-    raise BuildError(f"{server_id} panel XMLTV download failed after 3 attempts.")
+        close_panel_transport(session)
+    raise BuildError(
+        f"{server_id} panel XMLTV download failed after 3 attempts "
+        f"(last result: {last_issue})."
+    )
 
 
 @dataclass(frozen=True)
