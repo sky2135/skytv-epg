@@ -2971,10 +2971,26 @@ def panel_payload_is_non_xmltv(prefix: bytes) -> bool:
 PANEL_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 PANEL_MAX_REDIRECTS = 5
 PANEL_REQUEST_TIMEOUT = (25, 300)
+PANEL_CREDENTIALLESS_REDIRECT_HOSTS = frozenset(
+    {
+        # Server 2's legacy panel host redirects XMLTV here.  The endpoint is
+        # HTTPS and serves the feed without account parameters.  Keep this
+        # explicit rather than trusting arbitrary cross-host redirects.
+        "epg.irathomas08.com",
+    }
+)
 PANEL_ACCEPT_HEADER = (
     "application/json,application/xml,text/xml,text/plain,"
     "application/gzip,application/octet-stream,*/*"
 )
+
+
+class PanelCredentiallessAuth(requests.auth.AuthBase):
+    """Suppress ambient netrc authentication on a credentialless redirect."""
+
+    def __call__(self, request: Any) -> Any:
+        request.headers.pop("Authorization", None)
+        return request
 
 
 def panel_hostname_key(value: object) -> str:
@@ -2995,14 +3011,14 @@ def panel_redirect_target(
     *,
     original_host: str,
     original_scheme: str,
-) -> str:
-    """Return a credential-free, same-host panel redirect target.
+) -> tuple[str, bool]:
+    """Return a safe target and whether panel credentials may accompany it.
 
     Panel credentials are query parameters rather than an Authorization header.
-    Following redirects automatically could therefore expose them to another
-    host.  Resolve and validate the target ourselves, discard every redirected
-    query/fragment, and let the caller reattach the known credentials via
-    ``params`` only after this check passes.
+    A redirect on the configured panel hostname may receive them again.  A
+    different HTTPS hostname is followed only through a clean session with no
+    parameters or inherited cookies.  Redirect query text is discarded in both
+    cases so a provider cannot reflect credentials into a new URL.
     """
 
     if not str(location or "").strip():
@@ -3020,16 +3036,20 @@ def panel_redirect_target(
     # Xtream providers commonly redirect between service ports on one exact
     # hostname.  That hostname already received the authenticated request, so
     # its ports share the panel trust boundary; another hostname never does.
-    if (
-        scheme not in {"http", "https"}
-        or not host
-        or host != trusted_host
-        or parsed.username
-        or parsed.password
-        or (original_scheme.casefold() == "https" and scheme != "https")
-    ):
+    if scheme not in {"http", "https"} or parsed.username or parsed.password:
         raise BuildError("Panel returned an unsafe redirect.")
-    return parsed._replace(query="", fragment="").geturl()
+    same_host = host == trusted_host
+    if same_host:
+        if original_scheme.casefold() == "https" and scheme != "https":
+            raise BuildError("Panel returned an unsafe redirect.")
+    elif (
+        scheme != "https"
+        or host not in PANEL_CREDENTIALLESS_REDIRECT_HOSTS
+    ):
+        # Credentials and cookies are withheld even from an HTTPS external
+        # target.  Never follow an external redirect over plaintext HTTP.
+        raise BuildError("Panel returned an unsafe redirect.")
+    return parsed._replace(query="", fragment="").geturl(), same_host
 
 
 def close_panel_transport(transport: Any) -> None:
@@ -3060,6 +3080,7 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
     original_host = parsed_endpoint.hostname or ""
     original_scheme = parsed_endpoint.scheme.casefold()
     credentials = {"username": username, "password": password}
+    redirect_session = None
     last_issue = "request error"
     try:
         for attempt in range(1, 4):
@@ -3068,10 +3089,12 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
             last_issue = "request error"
             try:
                 request_url = endpoint
+                request_session = session
+                request_params: Mapping[str, str] | None = credentials
                 for _redirect_number in range(PANEL_MAX_REDIRECTS + 1):
-                    response = session.get(
+                    response = request_session.get(
                         request_url,
-                        params=credentials,
+                        params=request_params,
                         stream=True,
                         timeout=PANEL_REQUEST_TIMEOUT,
                         allow_redirects=False,
@@ -3079,7 +3102,7 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                     if response.status_code not in PANEL_REDIRECT_STATUSES:
                         break
                     location = response.headers.get("Location", "")
-                    next_url = panel_redirect_target(
+                    next_url, send_credentials = panel_redirect_target(
                         request_url,
                         location,
                         original_host=original_host,
@@ -3088,6 +3111,24 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                     close_panel_transport(response)
                     response = None
                     request_url = next_url
+                    if send_credentials:
+                        request_session = session
+                        request_params = credentials
+                    else:
+                        if redirect_session is None:
+                            redirect_session = requests.Session()
+                            # A truthy explicit auth handler suppresses
+                            # requests' automatic ~/.netrc lookup while still
+                            # preserving environment proxy and CA settings.
+                            redirect_session.auth = PanelCredentiallessAuth()
+                            redirect_session.headers.update(
+                                {
+                                    "User-Agent": "SKYTV-EPG-Builder/2.0",
+                                    "Accept": PANEL_ACCEPT_HEADER,
+                                }
+                            )
+                        request_session = redirect_session
+                        request_params = None
                 else:
                     raise BuildError(
                         f"{server_id} panel exceeded the redirect limit."
@@ -3151,6 +3192,8 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                 if response is not None:
                     close_panel_transport(response)
     finally:
+        if redirect_session is not None:
+            close_panel_transport(redirect_session)
         close_panel_transport(session)
     raise BuildError(
         f"{server_id} panel XMLTV download failed after 3 attempts "
