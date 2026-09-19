@@ -284,6 +284,23 @@ class CandidateIndex:
         allowed = set().union(*(self._region_items.get(region, set()) for region in allowed_regions))
         hits: dict[int, set[str]] = defaultdict(set)
 
+        resolver = getattr(self, "resolver", None)
+        approved_alias_match = getattr(resolver, "_approved_alias_match", None)
+        if callable(approved_alias_match):
+            try:
+                approved = approved_alias_match(subject.context)
+            except ContractError:
+                raise
+            except Exception as exc:
+                raise ContractError(
+                    "The frozen approved-alias resolver failed during Matching Lab retrieval."
+                ) from exc
+            if approved:
+                epg_id = streaming.clean_identifier(approved.get("epg_id", ""), 300)
+                index = self.by_epg_id.get(epg_id)
+                if index is not None and index in allowed:
+                    hits[index].add("CURATED_ALIAS_EXACT")
+
         alias_key = (subject.views.strict, subject.market)
         for index in self._aliases.get(alias_key, ()):
             if index in allowed:

@@ -654,8 +654,179 @@ class MatchingLabDecisionSafetyTests(unittest.TestCase):
         self.assertEqual(selected, "")
         self.assertFalse(apply_eligible)
 
+    def test_trusted_alias_can_cross_score_gate_but_stays_read_only(self) -> None:
+        candidate = _candidate(
+            state=ProgrammeState.PASS,
+            methods=("CURATED_ALIAS_EXACT",),
+            score=DEFAULT_POLICY.strong_proposal_score_ppm - 1,
+        )
+        state, reasons, selected, apply_eligible = _decision(
+            subject=_subject(),
+            ranking=_ranking(candidate),
+            candidates=(candidate,),
+            blocked_alert=False,
+            eligibility_reason="",
+            unsupported=False,
+            policy=DEFAULT_POLICY,
+            alert_snapshot_present=True,
+        )
+        self.assertIs(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(selected, "c001")
+        self.assertIn("LANE_TRUSTED_ALIAS", reasons)
+        self.assertIn("TRUSTED_ALIAS_SCORE_OVERRIDE", reasons)
+        self.assertIn("SHADOW_ONLY_NO_WRITE_AUTHORITY", reasons)
+        self.assertFalse(apply_eligible)
+
+        low_margin = replace(
+            _ranking(candidate),
+            margin_ppm=DEFAULT_POLICY.strong_margin_ppm - 1,
+        )
+        state, reasons, _selected, apply_eligible = _decision(
+            subject=_subject(),
+            ranking=low_margin,
+            candidates=(candidate,),
+            blocked_alert=False,
+            eligibility_reason="",
+            unsupported=False,
+            policy=DEFAULT_POLICY,
+            alert_snapshot_present=True,
+        )
+        self.assertIs(state, DecisionState.NEEDS_REVIEW)
+        self.assertNotIn("LANE_TRUSTED_ALIAS", reasons)
+        self.assertFalse(apply_eligible)
+
 
 class MatchingLabRetrievalSafetyTests(unittest.TestCase):
+    def test_attached_resolver_curated_alias_retrieves_current_catalog_target(self) -> None:
+        subject_context = _fake_context("Approved Alias")
+        candidate_context = _fake_context("Opaque Catalog Name")
+        subject = LabSubject(
+            server_id="server_1",
+            stream_id="101",
+            channel_name="Approved Alias",
+            category_id="general",
+            category_name="US | General",
+            row_guard_sha256=SHA_A,
+            provider_identity_sha256=SHA_B,
+            route_explicit=True,
+            market="US",
+            route_plan=("US",),
+            views=NameViews.from_context(subject_context),
+            semantics=ProtectedSemantics(market="US"),
+            context=subject_context,
+        )
+        raw = {
+            "epg_id": "opaque.station.us2",
+            "display_name": "Opaque Catalog Name",
+            "feed": "US2",
+            "region": "US",
+        }
+        with mock.patch.object(
+            retrieval,
+            "parse_candidate_context_v8",
+            return_value=candidate_context,
+        ):
+            index = CandidateIndex(engine=object(), candidates=[raw])
+        resolver = SimpleNamespace(
+            _approved_alias_match=mock.Mock(
+                return_value={"epg_id": "opaque.station.us2"}
+            )
+        )
+        index.attach_resolver(resolver)
+
+        ranked = index.rank(subject)
+
+        resolver._approved_alias_match.assert_called_once_with(subject_context)
+        self.assertEqual([item.epg_id for item in ranked.candidates], ["opaque.station.us2"])
+        self.assertIn("CURATED_ALIAS_EXACT", ranked.candidates[0].methods)
+        self.assertEqual(ranked.tier, 5)
+
+    def test_curated_alias_target_outside_allowed_region_is_rejected(self) -> None:
+        subject_context = _fake_context("Approved Alias")
+        candidate_context = _fake_context("Opaque Catalog Name")
+        subject = LabSubject(
+            server_id="server_1",
+            stream_id="101",
+            channel_name="Approved Alias",
+            category_id="general",
+            category_name="US | General",
+            row_guard_sha256=SHA_A,
+            provider_identity_sha256=SHA_B,
+            route_explicit=True,
+            market="US",
+            route_plan=("US",),
+            views=NameViews.from_context(subject_context),
+            semantics=ProtectedSemantics(market="US"),
+            context=subject_context,
+        )
+        raw = {
+            "epg_id": "opaque.station.ca",
+            "display_name": "Opaque Catalog Name",
+            "feed": "CA1",
+            "region": "CA",
+        }
+        with mock.patch.object(
+            retrieval,
+            "parse_candidate_context_v8",
+            return_value=candidate_context,
+        ):
+            index = CandidateIndex(engine=object(), candidates=[raw])
+        index.attach_resolver(
+            SimpleNamespace(
+                _approved_alias_match=mock.Mock(
+                    return_value={"epg_id": "opaque.station.ca"}
+                )
+            )
+        )
+
+        ranked = index.rank(subject)
+
+        self.assertEqual(ranked.candidates, ())
+        self.assertEqual(ranked.work_candidates, 0)
+
+    def test_curated_alias_target_absent_from_current_catalog_is_ignored(self) -> None:
+        subject_context = _fake_context("Approved Alias")
+        candidate_context = _fake_context("Opaque Catalog Name")
+        subject = LabSubject(
+            server_id="server_1",
+            stream_id="101",
+            channel_name="Approved Alias",
+            category_id="general",
+            category_name="US | General",
+            row_guard_sha256=SHA_A,
+            provider_identity_sha256=SHA_B,
+            route_explicit=True,
+            market="US",
+            route_plan=("US",),
+            views=NameViews.from_context(subject_context),
+            semantics=ProtectedSemantics(market="US"),
+            context=subject_context,
+        )
+        raw = {
+            "epg_id": "opaque.station.us2",
+            "display_name": "Opaque Catalog Name",
+            "feed": "US2",
+            "region": "US",
+        }
+        with mock.patch.object(
+            retrieval,
+            "parse_candidate_context_v8",
+            return_value=candidate_context,
+        ):
+            index = CandidateIndex(engine=object(), candidates=[raw])
+        index.attach_resolver(
+            SimpleNamespace(
+                _approved_alias_match=mock.Mock(
+                    return_value={"epg_id": "missing.station.us2"}
+                )
+            )
+        )
+
+        ranked = index.rank(subject)
+
+        self.assertEqual(ranked.candidates, ())
+        self.assertEqual(ranked.work_candidates, 0)
+
     def test_attached_frozen_scorer_failure_aborts_instead_of_falling_back(self) -> None:
         context = _fake_context("Alpha News")
         subject = LabSubject(

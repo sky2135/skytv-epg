@@ -36,7 +36,7 @@ from typing import Any, Iterable, Mapping, Sequence
 STRICT_MATCHER_VERSION = "8.4"
 STRICT_MATCHER_BUILD_ID = "SKYTV-CONTEXTUAL-RULES-8.4-2026-07-19"
 STRICT_MATCHER_SOURCE_SHA256 = (
-    "289d19993cf33caef3358f9f5b5d2989625c7659adc48494cb81c02610034f99"
+    "3ac5bb0800cb2b9ae071af9ba0e9d64766d1c50359aa3275a5974a10a227fda0"
 )
 STRICT_ENGINE_SOURCE_SHA256 = (
     "8040562b85758a6b0c7b59a7d0e7918f313f3ccf7829498401a8815d097bddf4"
@@ -76,6 +76,7 @@ SAFE_DUMMY_METHODS = frozenset(
 DUMMY_REVIEW_METHODS = frozenset(
     {
         "safety_rule",
+        "exact_numbered_event_bank",
         "virtual_360_event_bank",
         "synthetic_numbered_genre_slot",
         "heading_placeholder",
@@ -351,6 +352,42 @@ def _has_adult_evidence(channel_name: str, category_name: str) -> bool:
     )
 
 
+def _exact_bank_category_key(value: object) -> str:
+    text = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", _text(value))).strip()
+    return re.sub(r"\s*\|\s*", "|", text).casefold()
+
+
+def _has_exact_numbered_event_bank_evidence(
+    *, epg_id: str, channel_name: str, category_name: str
+) -> bool:
+    """Independently recheck the v8.4 exact-bank claim at the write boundary."""
+    category = _exact_bank_category_key(category_name)
+    channel = re.sub(
+        r"\s+", " ", unicodedata.normalize("NFKC", _text(channel_name))
+    ).strip()
+    normalized_id = _text(epg_id).casefold()
+    if category == "sports|espn+" and normalized_id == "espn+.dummy.us":
+        return bool(re.fullmatch(
+            r"(?:\(\s*(?:US|AU)\s*\)\s+)?ESPN\s+PLAY\s+[1-9]\d{0,2}",
+            channel,
+            re.IGNORECASE,
+        ))
+    if category == "|na|usa espn+" and normalized_id == "espn+.dummy.us":
+        matched = re.fullmatch(
+            r"US\s*\(\s*ESPN\+\s+([0-9]{3})\s*\)\s*\|(?:\s*.*)?",
+            channel,
+            re.IGNORECASE,
+        )
+        return bool(matched and int(matched.group(1)) > 0)
+    if category == "|na|usa flo" and normalized_id == "flo.events.dummy.us":
+        return bool(re.fullmatch(
+            r"USA\s*-\s*FLO\s+[1-9]\d{0,2}\s*:(?:\s*.*)?",
+            channel,
+            re.IGNORECASE,
+        ))
+    return False
+
+
 def _safe_dummy_classification(
     *,
     method: str,
@@ -371,6 +408,13 @@ def _safe_dummy_classification(
     normalized_id = _text(epg_id).casefold()
     if normalized_method not in SAFE_DUMMY_METHODS:
         return False
+
+    if normalized_method == "exact_numbered_event_bank":
+        return _has_exact_numbered_event_bank_evidence(
+            epg_id=epg_id,
+            channel_name=channel_name,
+            category_name=category_name,
+        )
 
     numbered_targets = _NUMBERED_BANK_DUMMY_IDS.get(normalized_method)
     if numbered_targets is not None:

@@ -266,6 +266,7 @@ _REASON_CODES = frozenset(
         "SHADOW_ONLY_NO_WRITE_AUTHORITY",
         "STANDARD_LANE_THRESHOLD_PASSED",
         "STRICT_EXACT_UNIQUE_CANDIDATE",
+        "TRUSTED_ALIAS_SCORE_OVERRIDE",
         "NON_STRICT_AUTO_BLOCKED_CONSERVATIVE_COHORT",
         "PREFILLED_ID_CATALOG_REVALIDATED",
         "PREFILLED_ID_NOT_CORROBORATED",
@@ -1042,7 +1043,10 @@ def _validate_proposal_decision(
             or selected.programme_state is not ProgrammeState.PASS
             or not (trusted_alias_lane or standard_lane or conservative_strict_lane)
             or len(auto_lanes) != 1
-            or proposal.score_ppm < DEFAULT_POLICY.strong_proposal_score_ppm
+            or (
+                not trusted_alias_lane
+                and proposal.score_ppm < DEFAULT_POLICY.strong_proposal_score_ppm
+            )
             or proposal.margin_ppm < DEFAULT_POLICY.strong_margin_ppm
             or not proposal.route_explicit
             or not proposal.market
@@ -1074,6 +1078,14 @@ def _validate_proposal_decision(
                 not trusted_alias_lane
                 and {"CURATED_ALIAS_EXACT", "LEARNED_ALIAS_EXACT"}.intersection(
                     proposal.reason_codes
+                )
+            )
+            or (
+                ("TRUSTED_ALIAS_SCORE_OVERRIDE" in reasons)
+                != (
+                    trusted_alias_lane
+                    and proposal.score_ppm
+                    < DEFAULT_POLICY.strong_proposal_score_ppm
                 )
             )
             or "LANE_HUMAN_REVIEW" in reasons

@@ -15,13 +15,16 @@ from . import LAB_VERSION, PROPOSAL_SCHEMA, RUN_MANIFEST_SCHEMA
 from .ai import (
     DEFAULT_MODEL as DEFAULT_AI_MODEL,
     MAX_ADVISORY_REQUESTS,
+    MAX_ADVISORY_SHARDS,
     PROMPT_VERSION as AI_PROMPT_VERSION,
     AdvisoryCacheError,
     AdvisoryDisposition,
     attach_advisory,
+    proposals_for_advisory_shard,
     replay_cache_namespace_sha256,
     requests_from_proposals,
     review_advisories,
+    validate_advisory_shard,
     validate_model_name,
 )
 from .artifacts import (
@@ -62,6 +65,30 @@ class ShadowRunResult:
     run_id: str
     proposal_count: int
     counts: Mapping[str, int]
+
+
+def _ai_config_sha256(
+    *,
+    enabled: bool,
+    model: str,
+    maximum_requests: int,
+    shard_count: int,
+    shard_index: int,
+    cache_namespace_sha256: str,
+) -> str:
+    """Bind the complete local advisory selection configuration to a run."""
+
+    return sha256_json(
+        {
+            "enabled": enabled,
+            "model": str(model or "") if enabled else "",
+            "prompt_version": AI_PROMPT_VERSION if enabled else "",
+            "maximum_requests": int(maximum_requests) if enabled else 0,
+            "shard_count": int(shard_count) if enabled else 0,
+            "shard_index": int(shard_index) if enabled else 0,
+            "cache_namespace_sha256": cache_namespace_sha256,
+        }
+    )
 
 
 def _parse_utc(value: str) -> datetime:
@@ -255,8 +282,17 @@ def _decision(
     alias_exact = bool(
         set(top.methods).intersection({"HUMAN_ALIAS_EXACT", "CURATED_ALIAS_EXACT"})
     )
-    if strong and alias_exact:
+    trusted_alias_ready = (
+        alias_exact
+        and ranking.margin_ppm >= policy.strong_margin_ppm
+        and subject.route_explicit
+        and len(subject.route_plan) == 1
+        and alert_snapshot_present
+    )
+    if trusted_alias_ready:
         reasons.add("CURATED_ALIAS_EXACT" if "CURATED_ALIAS_EXACT" in top.methods else "LEARNED_ALIAS_EXACT")
+        if top.score_ppm < policy.strong_proposal_score_ppm:
+            reasons.add("TRUSTED_ALIAS_SCORE_OVERRIDE")
         # The shadow package has no Sheet writer.  AUTO_ELIGIBLE describes the
         # evidence tier; auto_apply_eligible stays false until a signed,
         # calibrated production policy is installed in the guarded writer.
@@ -366,6 +402,8 @@ def run_shadow(
     ai_model: str = DEFAULT_AI_MODEL,
     ai_cache_path: Path | None = None,
     ai_max_requests: int = MAX_ADVISORY_REQUESTS,
+    ai_shard_count: int = 1,
+    ai_shard_index: int = 0,
     ai_transport: Any | None = None,
     ai_sensitive_values: Sequence[str] = (),
     ledger_path: Path | None = None,
@@ -429,6 +467,12 @@ def run_shadow(
     expires_at = _utc_text(as_of_dt + timedelta(seconds=policy.expiry_seconds))
     as_of_epoch = int(as_of_dt.timestamp())
     ai_enabled = bool(str(ai_api_key or "").strip())
+    ai_shard_count, ai_shard_index = validate_advisory_shard(
+        ai_shard_count,
+        ai_shard_index,
+    )
+    if not ai_enabled and (ai_shard_count != 1 or ai_shard_index != 0):
+        raise ContractError("AI sharding is only valid when AI review is enabled.")
     if ai_enabled and ai_cache_path is None:
         raise ContractError("AI review requires a durable --ai-cache for replay safety.")
     ai_cache_namespace_sha256 = ""
@@ -587,14 +631,13 @@ def run_shadow(
         "EPG_XML_CATALOG": one_pass.catalog.fingerprint_sha256,
         "EPG_TEXT": text_catalog_sha256,
         "EPG_TEXT_CATALOG": text_catalog.fingerprint_sha256,
-        "AI_CONFIG": sha256_json(
-            {
-                "enabled": ai_enabled,
-                "model": str(ai_model or "") if ai_enabled else "",
-                "prompt_version": AI_PROMPT_VERSION if ai_enabled else "",
-                "maximum_requests": int(ai_max_requests) if ai_enabled else 0,
-                "cache_namespace_sha256": ai_cache_namespace_sha256,
-            }
+        "AI_CONFIG": _ai_config_sha256(
+            enabled=ai_enabled,
+            model=ai_model,
+            maximum_requests=int(ai_max_requests),
+            shard_count=ai_shard_count,
+            shard_index=ai_shard_index,
+            cache_namespace_sha256=ai_cache_namespace_sha256,
         ),
     }
     run_id = sha256_json(
@@ -661,13 +704,43 @@ def run_shadow(
     )
     if ai_enabled:
         eligible_requests = requests_from_proposals(proposals)
+        if (
+            ai_shard_count > 1
+            and len(eligible_requests) > ai_shard_count * int(ai_max_requests)
+        ):
+            minimum_shards = (
+                len(eligible_requests) + int(ai_max_requests) - 1
+            ) // int(ai_max_requests)
+            raise ContractError(
+                "The AI shard plan cannot cover every eligible proposal; increase "
+                f"ai_shard_count to at least {minimum_shards} "
+                f"(maximum {MAX_ADVISORY_SHARDS})."
+            )
+        eligible_request_ids = {request.review_id for request in eligible_requests}
+        shard_proposals = proposals_for_advisory_shard(
+            (
+                proposal
+                for proposal in proposals
+                if proposal.proposal_id in eligible_request_ids
+            ),
+            shard_count=ai_shard_count,
+            shard_index=ai_shard_index,
+        )
+        shard_proposal_ids = {
+            proposal.proposal_id for proposal in shard_proposals
+        }
+        shard_requests = tuple(
+            request
+            for request in eligible_requests
+            if request.review_id in shard_proposal_ids
+        )
         server_by_proposal = {
             proposal.proposal_id: proposal.server_id for proposal in proposals
         }
         request_queues = {
             server_id: deque(
                 request
-                for request in eligible_requests
+                for request in shard_requests
                 if server_by_proposal[request.review_id] == server_id
             )
             for server_id in selected_servers

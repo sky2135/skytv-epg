@@ -107,7 +107,7 @@ IDENTITY_TOKEN_CANONICAL_V84 = {
 }
 
 CATEGORY_NAMESPACE_CODES_V84 = {
-    "AS", "SA", "AR", "UK", "EU", "NA", "AF", "ES", "AM",
+    "AS", "SA", "AR", "UK", "EU", "NA", "AF", "ES", "AM", "CA",
     "ALB", "BLN", "DE", "PT", "FR", "GR", "PL", "TH", "IT", "MT",
 }
 
@@ -123,12 +123,30 @@ CATEGORY_PREFIX_CODES_V84 = {
 }
 
 CATEGORY_DIRECT_MARKETS_V84 = {
-    "UK": "UK", "FR": "FR", "ES": "ES", "DE": "DE", "PT": "PT",
+    "UK": "UK", "CA": "CA", "FR": "FR", "ES": "ES", "DE": "DE", "PT": "PT",
     "ALB": "AL", "BLN": "EXYU", "GR": "GR", "PL": "PL",
     "TH": "TH", "IT": "IT", "MT": "MT",
 }
 
 CATEGORY_COUNTRY_MARKETS_V84: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    # Put explicit country names before broad geographic words. In particular,
+    # ``Argentina`` must win over a surrounding South-America/LATAM label.
+    (re.compile(r"\b(?:argentina|argentinian)\b", re.I), "AR", "Argentina"),
+    (re.compile(r"\b(?:saudi|saoudi)(?:\s+arabia|\s+arabian)?\b", re.I), "SA", "Saudi Arabia"),
+    (re.compile(r"\b(?:afghanistan|afghan)\b", re.I), "AF", "Afghanistan"),
+    (re.compile(r"\b(?:russia|russian)\b", re.I), "RU", "Russia"),
+    (re.compile(r"\b(?:turkey|turkish)\b", re.I), "TR", "Turkey"),
+    (re.compile(r"\b(?:pakistan|pakistani)\b", re.I), "PK", "Pakistan"),
+    (re.compile(r"\bisrael(?:i)?\b", re.I), "IL", "Israel"),
+    (re.compile(r"\b(?:malaysia|malaysian)\b", re.I), "MY", "Malaysia"),
+    (re.compile(r"\b(?:united arab emirates|uae|emirati)\b", re.I), "AE", "United Arab Emirates"),
+    (re.compile(r"\b(?:australia|australian)\b", re.I), "AU", "Australia"),
+    (re.compile(r"\b(?:new zealand|new zealander)\b", re.I), "NZ", "New Zealand"),
+    (re.compile(r"\b(?:philippines|philippine|filipino)\b", re.I), "PH", "Philippines"),
+    (re.compile(r"\b(?:germany|german)\b", re.I), "DE", "Germany"),
+    (re.compile(r"\b(?:austria|austrian)\b", re.I), "AT", "Austria"),
+    (re.compile(r"\b(?:norway|norwegian)\b", re.I), "NO", "Norway"),
+    (re.compile(r"\b(?:finland|finnish)\b", re.I), "FI", "Finland"),
     (re.compile(r"\b(?:usa|united states|america)\b", re.I), "US", "United States"),
     (re.compile(r"\bcanada\b", re.I), "CA", "Canada"),
     (re.compile(r"\bfrance|french\b", re.I), "FR", "France"),
@@ -164,6 +182,61 @@ CATEGORY_COUNTRY_MARKETS_V84: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (re.compile(r"\bmali|malian\b", re.I), "ML", "Mali"),
 )
 
+# These namespace codes are provider groupings, not ISO country codes. A
+# spelled-out country in their topic is stronger evidence than the broad group,
+# while a generic topic keeps the established route. This distinction matters
+# for ambiguous pairs such as AR=Arabic/Argentina, SA=Latin/Saudi Arabia and
+# AF=Africa/Afghanistan.
+COARSE_CATEGORY_NAMESPACES_V84 = frozenset({"AS", "AR", "EU", "SA", "AM", "AF", "BLN"})
+
+# A country override inside a coarse provider namespace is accepted only when
+# the country begins a recognizable taxonomy bucket.  This allow-list is
+# deliberately narrower than normal channel vocabulary: unknown tails fail
+# closed to the broad namespace instead of treating an event, sponsor, airline,
+# programme or brand title as a country label.
+COUNTRY_TOPIC_BUCKET_TAIL_TOKENS_V84 = frozenset(
+    {
+        "24", "7", "adult", "canal", "caribbean", "carribean", "children",
+        "cinema", "cocuk", "dazn", "diger", "documentaire", "documentary",
+        "enfants", "entertainment", "general", "hevc", "info", "kids",
+        "live", "local", "movies", "music", "musique", "news", "netflix",
+        "plus", "ppv", "premium", "radio", "redbox", "regional", "sinema",
+        "spor", "sport", "sports", "tabii", "ulusal", "vl", "wl",
+    }
+)
+
+# An anchored parenthetical prefix is a provider country wrapper only when its
+# token is on this explicit allow-list. Ambiguous ISO codes intentionally use
+# their ISO meaning here; provider category namespaces are parsed separately.
+LEADING_PARENTHETICAL_COUNTRY_MARKETS_V84 = {
+    "US": "US", "USA": "US", "CA": "CA", "CANADA": "CA",
+    "UK": "UK", "GB": "UK", "IN": "IN", "INDIA": "IN",
+    "PK": "PK", "PT": "PT", "AU": "AU", "NZ": "NZ", "ZA": "ZA",
+    "IE": "IE", "FR": "FR", "DE": "DE", "ES": "ES", "IT": "IT",
+    "NL": "NL", "BE": "BE", "CH": "CH", "AT": "AT", "SE": "SE",
+    "NO": "NO", "DK": "DK", "FI": "FI", "PL": "PL", "CZ": "CZ",
+    "SK": "SK", "HU": "HU", "RO": "RO", "BG": "BG", "GR": "GR",
+    "TR": "TR", "RU": "RU", "UA": "UA", "AE": "AE", "SA": "SA",
+    "QA": "QA", "EG": "EG", "MA": "MA", "MX": "MX", "BR": "BR",
+    "AR": "AR", "CL": "CL", "CO": "CO", "PE": "PE", "VE": "VE",
+    "UY": "UY", "PY": "PY", "BO": "BO", "EC": "EC", "DO": "DO",
+    "PR": "PR", "JM": "JM", "TT": "TT", "BZ": "BZ", "CR": "CR",
+    "PA": "PA", "GT": "GT", "HN": "HN", "SV": "SV", "NI": "NI",
+    "CN": "CN", "HK": "HK", "TW": "TW", "JP": "JP", "KR": "KR",
+    "TH": "TH", "VN": "VN", "ID": "ID", "MY": "MY", "SG": "SG",
+    "PH": "PH", "BD": "BD", "LK": "LK", "NP": "NP", "AF": "AF",
+    "IR": "IR", "IQ": "IQ", "IL": "IL", "PS": "PS", "JO": "JO",
+    "LB": "LB", "KW": "KW", "BH": "BH", "OM": "OM", "YE": "YE",
+    "SY": "SY", "RS": "RS", "HR": "HR", "SI": "SI", "BA": "BA",
+    "ME": "ME", "MK": "MK", "AL": "AL", "EE": "EE", "LV": "LV",
+    "LT": "LT", "IS": "IS", "LU": "LU", "MT": "MT", "CY": "CY",
+    "GE": "GE", "AM": "AM", "AZ": "AZ", "KZ": "KZ", "UZ": "UZ",
+}
+
+# IZ is a recurring provider annotation in the saved Latin lineup. It is not a
+# country and is stripped only after an already validated country wrapper.
+SECONDARY_PARENTHETICAL_PROVIDER_WRAPPERS_V84 = frozenset({"IZ"})
+
 INDIA_CATEGORY_TOPIC_TOKENS_V84 = {
     "india", "indian", "english", "sports", "sport", "punjabi", "punjab",
     "malayalam", "bangla", "bengali", "marathi", "gujarati", "tamil",
@@ -177,6 +250,27 @@ VIRTUAL_BANK_MARKERS_V84 = {
 }
 MOVIE_BANK_MARKERS_V84 = {"movies", "cinema", "box", "office", "store", "premiere"}
 DECORATIVE_EDGE_CHARS_V84 = "#*=~_─━═•▪▫◆◇"
+
+# These three provider banks are intentionally literal.  A category must reduce
+# to one of the exact keys below after Unicode/whitespace normalization, and the
+# channel name must have the corresponding anchored numbered shape.  Keeping
+# this separate from the generic event rules prevents ESPN, ESPN2, ESPNU and
+# similarly named linear networks from being converted to synthetic guides.
+EXACT_NUMBERED_EVENT_BANK_CATEGORIES_V84 = frozenset(
+    {"sports|espn+", "|na|usa espn+", "|na|usa flo"}
+)
+ESPN_PLAY_NUMBERED_BANK_RE_V84 = re.compile(
+    r"^(?:\(\s*(?:US|AU)\s*\)\s+)?ESPN\s+PLAY\s+([1-9]\d{0,2})$",
+    re.IGNORECASE,
+)
+ESPN_PLUS_NUMBERED_BANK_RE_V84 = re.compile(
+    r"^US\s*\(\s*ESPN\+\s+([0-9]{3})\s*\)\s*\|(?:\s*.*)?$",
+    re.IGNORECASE,
+)
+FLO_NUMBERED_BANK_RE_V84 = re.compile(
+    r"^USA\s*-\s*FLO\s+([1-9]\d{0,2})\s*:(?:\s*.*)?$",
+    re.IGNORECASE,
+)
 
 # A short wrapper may be removed when it is an isolated prefix token. Brand-like
 # words such as SKY are intentionally excluded here, although they can still be
@@ -431,6 +525,12 @@ def _nfkc(value: object) -> str:
     return unicodedata.normalize("NFKC", str(value or ""))
 
 
+def _exact_bank_category_key_v84(value: object) -> str:
+    """Normalize spacing/case without erasing any category semantics."""
+    text = re.sub(r"\s+", " ", _nfkc(value)).strip()
+    return re.sub(r"\s*\|\s*", "|", text).casefold()
+
+
 def _ascii_fold(value: object) -> str:
     text = unicodedata.normalize("NFKD", _nfkc(value))
     return "".join(ch for ch in text if not unicodedata.combining(ch))
@@ -571,6 +671,31 @@ def _normalize_key_v8(value: object, *, remove_optional: bool = False) -> str:
 
 def _metadata_key_v8(value: object) -> str:
     return _normalize_key_v8(value, remove_optional=False)
+
+
+def _coarse_topic_country_v84(
+    namespace: str, topic: str
+) -> tuple[str, str] | None:
+    """Return a country only for an anchored, allow-listed taxonomy bucket."""
+    if namespace not in COARSE_CATEGORY_NAMESPACES_V84:
+        return None
+    for pattern, code, label in CATEGORY_COUNTRY_MARKETS_V84:
+        matched = pattern.search(topic)
+        if not matched:
+            continue
+        if _normalize_key_v8(topic[: matched.start()]):
+            continue
+        if (
+            code == "US"
+            and namespace in {"SA", "AM"}
+            and re.search(r"\b(?:usa|united states)\b", topic, re.IGNORECASE) is None
+        ):
+            continue
+        tail_tokens = set(_normalize_key_v8(topic[matched.end() :]).split())
+        if tail_tokens.difference(COUNTRY_TOPIC_BUCKET_TAIL_TOKENS_V84):
+            continue
+        return code, label
+    return None
 
 
 def _market_from_segment_v8(segment: str) -> str:
@@ -715,7 +840,12 @@ def _parse_category_context_v84(category_name: str) -> dict[str, Any]:
     market = ""
     strength = 0
     reason = ""
-    if namespace == "NA":
+    topic_country = _coarse_topic_country_v84(namespace, topic)
+
+    if topic_country is not None:
+        market, strength = topic_country[0], 3
+        reason = f"provider taxonomy topic identifies {topic_country[1]}"
+    elif namespace == "NA":
         if re.search(r"\b(?:usa|us|united states)\b", topic_key):
             market, strength, reason = "US", 3, "provider taxonomy indicates United States"
         elif "canada" in topic_tokens:
@@ -727,41 +857,24 @@ def _parse_category_context_v84(category_name: str) -> dict[str, Any]:
     elif namespace == "AS":
         if languages & SOUTH_ASIAN_LANGUAGES_V8 or topic_tokens & INDIA_CATEGORY_TOPIC_TOKENS_V84:
             market, strength, reason = "IN", 3, "provider taxonomy indicates the India/South-Asian package"
-        else:
-            for pattern, code, label in CATEGORY_COUNTRY_MARKETS_V84:
-                if pattern.search(topic):
-                    market, strength, reason = code, 3, f"provider taxonomy indicates {label}"
-                    break
-            if not market:
-                market, strength, reason = "ASIA", 3, "provider taxonomy indicates an unsupported Asian market"
+        if not market:
+            market, strength, reason = "ASIA", 3, "provider taxonomy indicates an unsupported Asian market"
     elif namespace == "AR":
         if re.search(r"\bbein\b", topic_key):
             market, strength, reason = "BEIN", 3, "provider taxonomy indicates the configured beIN catalog"
         else:
             market, strength, reason = "MENA", 3, "provider taxonomy indicates Arabic/MENA programming"
     elif namespace == "EU":
-        for pattern, code, label in CATEGORY_COUNTRY_MARKETS_V84:
-            if pattern.search(topic):
-                market, strength, reason = code, 3, f"provider taxonomy indicates {label}"
-                break
-        if not market:
-            market, strength, reason = "EU", 3, "provider taxonomy indicates an unsupported European market"
+        market, strength, reason = "EU", 3, "provider taxonomy indicates an unsupported European market"
     elif namespace == "SA":
         market, strength, reason = "LATAM", 3, "provider taxonomy indicates Caribbean/Latin programming"
     elif namespace == "AM":
-        for pattern, code, label in CATEGORY_COUNTRY_MARKETS_V84:
-            if pattern.search(topic):
-                market, strength, reason = code, 3, f"provider taxonomy indicates {label}"
-                break
+        if re.search(r"\b(?:latin|south|central)\s+america\b", topic_key):
+            market, strength, reason = "LATAM", 3, "provider taxonomy indicates Latin America"
         if not market:
             market, strength, reason = "LATAM", 3, "provider taxonomy indicates Latin America"
     elif namespace == "AF":
-        for pattern, code, label in CATEGORY_COUNTRY_MARKETS_V84:
-            if pattern.search(topic):
-                market, strength, reason = code, 3, f"provider taxonomy indicates {label}"
-                break
-        if not market:
-            market, strength, reason = "AFRICA", 3, "provider taxonomy indicates an unsupported African market"
+        market, strength, reason = "AFRICA", 3, "provider taxonomy indicates an unsupported African market"
     elif namespace in CATEGORY_DIRECT_MARKETS_V84:
         market = CATEGORY_DIRECT_MARKETS_V84[namespace]
         strength = 3
@@ -1002,6 +1115,42 @@ def _extract_channel_core_v8(
     raw = re.sub(r"[.\s]+$", "", raw)
     wrappers: list[str] = []
     market_evidence: list[tuple[str, int, str]] = []
+    preserved_leading_country_wrapper = ""
+
+    # Provider lineups can lead with a parenthesized ISO country, for example
+    # ``(MX) Canal Once`` or ``(MX) (IZ) Canal Once``. Parse only an anchored,
+    # allow-listed country. The secondary provider tag is deliberately narrow,
+    # so arbitrary parentheticals remain part of the real channel identity.
+    leading_country = re.match(r"^\s*(\(\s*([A-Za-z]{2,6})\s*\))\s*(.+)$", raw)
+    if leading_country:
+        country_token = leading_country.group(2).upper()
+        country_market = LEADING_PARENTHETICAL_COUNTRY_MARKETS_V84.get(country_token, "")
+        if country_market:
+            category_market = str(category_context.get("market", "")).upper()
+            mexico_latin_exception = country_market == "MX" and bool(
+                re.search(r"\b(?:latin|latino)\b", _normalize_key_v8(category_name))
+            )
+            if category_market == country_market or mexico_latin_exception:
+                wrappers.append(leading_country.group(1).strip())
+                market_evidence.append((
+                    country_market, 4,
+                    f"explicit leading country wrapper ({country_token})",
+                ))
+                raw = leading_country.group(3).strip()
+                secondary = re.match(r"^(\(\s*([A-Za-z0-9+]{2,6})\s*\))\s*(.+)$", raw)
+                if (
+                    secondary
+                    and secondary.group(2).upper()
+                    in SECONDARY_PARENTHETICAL_PROVIDER_WRAPPERS_V84
+                ):
+                    wrappers.append(secondary.group(1).strip())
+                    raw = secondary.group(3).strip()
+            else:
+                # Protect a recognized-but-conflicting wrapper from the generic
+                # bracket cleanup below. It remains visible in the identity and
+                # contributes no routing evidence.
+                preserved_leading_country_wrapper = leading_country.group(1).strip()
+                raw = leading_country.group(3).strip()
 
     # Special diaspora wrappers used by providers.
     if re.match(r"^\s*US\s*\(\s*(?:IN|INDIA)\s*\)", raw, flags=re.I):
@@ -1179,6 +1328,8 @@ def _extract_channel_core_v8(
     raw = _strip_redundant_brackets_v82(raw, category_name)
     raw = re.sub(r"(?:\s*\((?:HD|FHD|UHD|4K|8K|SD|HEVC|H265|H264)\))+\s*$", "", raw, flags=re.I)
     raw = re.sub(r"\s+", " ", raw).strip(" -_:|./")
+    if preserved_leading_country_wrapper:
+        raw = f"{preserved_leading_country_wrapper} {raw}".strip()
     return raw, wrappers, market_evidence
 
 
@@ -2348,6 +2499,54 @@ class ContextualMatcherV8:
             "match_method": "synthetic_numbered_genre_slot",
         }
 
+    def _exact_numbered_event_bank_match(
+        self, row: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Classify only the three audited, exact provider event-bank shapes."""
+        category_key = _exact_bank_category_key_v84(row.get("category_name", ""))
+        if category_key not in EXACT_NUMBERED_EVENT_BANK_CATEGORIES_V84:
+            return None
+
+        channel = re.sub(
+            r"\s+", " ", _nfkc(row.get("channel_name", ""))
+        ).strip()
+        epg_id = ""
+        label = ""
+        slot = ""
+        if category_key == "sports|espn+":
+            matched = ESPN_PLAY_NUMBERED_BANK_RE_V84.fullmatch(channel)
+            if matched:
+                epg_id = "ESPN+.Dummy.us"
+                label = "ESPN PLAY"
+                slot = matched.group(1)
+        elif category_key == "|na|usa espn+":
+            matched = ESPN_PLUS_NUMBERED_BANK_RE_V84.fullmatch(channel)
+            if matched and int(matched.group(1)) > 0:
+                epg_id = "ESPN+.Dummy.us"
+                label = "ESPN+"
+                slot = matched.group(1)
+        else:
+            matched = FLO_NUMBERED_BANK_RE_V84.fullmatch(channel)
+            if matched:
+                epg_id = "Flo.Events.Dummy.us"
+                label = "FLO"
+                slot = matched.group(1)
+
+        if not epg_id:
+            return None
+        return {
+            "action": "AUTO_DUMMY", "source": "dummy",
+            "epg_id": self.engine.dummy_id(epg_id),
+            "epg_feed": "DUMMY_CHANNELS", "best_score": "",
+            "second_epg_id": "", "second_epg_feed": "",
+            "second_score": "", "score_margin": "",
+            "reason": (
+                f"Exact audited {label} numbered event bank slot {slot} "
+                "has no stable one-to-one linear schedule"
+            ),
+            "match_method": "exact_numbered_event_bank",
+        }
+
     def _heading_placeholder_match(self, row: Mapping[str, Any]) -> dict[str, Any] | None:
         if not _is_decorative_heading_v84(str(row.get("channel_name", ""))):
             return None
@@ -2545,10 +2744,22 @@ class ContextualMatcherV8:
         if heading:
             return query, heading
 
+        exact_event_bank = self._exact_numbered_event_bank_match(row)
+        if exact_event_bank:
+            return query, exact_event_bank
+
         special = self.engine.special_rule(row)
         if special:
-            result = dict(special); result.setdefault("match_method", "safety_rule")
-            return query, result
+            result = dict(special)
+            # The legacy matcher used broad category/name searches for these
+            # two bank-specific dummy IDs.  v8.4 permits them only through the
+            # exact audited method above; all near variants continue through
+            # ordinary matching instead of inheriting the broad legacy rule.
+            if str(result.get("epg_id", "")).casefold() not in {
+                "espn+.dummy.us", "flo.events.dummy.us",
+            }:
+                result.setdefault("match_method", "safety_rule")
+                return query, result
 
         inventory_bank = self._inventory_bank_match(inventory_signal)
         if inventory_bank:

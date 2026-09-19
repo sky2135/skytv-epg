@@ -497,6 +497,109 @@ class MatchingLabValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "requests auto-apply"):
             validate_bundle(fixture.bundle_dir, as_of=VALID_AS_OF)
 
+    def test_trusted_alias_score_override_is_exactly_scoped(self) -> None:
+        def reseal(
+            fixture: BundleFixture,
+            mutate: Any,
+        ) -> None:
+            proposal_path = fixture.bundle_dir / "proposals.jsonl"
+            manifest_path = fixture.bundle_dir / "manifest.json"
+            record = json.loads(proposal_path.read_text(encoding="utf-8"))
+            mutate(record)
+            record["proposal_id"] = sha256_json(
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != "proposal_id"
+                }
+            )
+            proposal_content = canonical_json_bytes(record) + b"\n"
+            proposal_path.write_bytes(proposal_content)
+            manifest = _json(manifest_path)
+            manifest["proposals_sha256"] = sha256_bytes(proposal_content)
+            _write_json(manifest_path, manifest)
+
+        def make_low_score_alias(record: dict[str, Any]) -> None:
+            top_score = DEFAULT_POLICY.strong_proposal_score_ppm - 1
+            second_score = DEFAULT_POLICY.human_review_score_ppm
+            for candidate, score in zip(
+                record["candidates"],
+                (top_score, second_score),
+                strict=True,
+            ):
+                candidate["score_ppm"] = score
+                candidate["features_ppm"] = {
+                    name: score for name in candidate["features_ppm"]
+                }
+            record["decision"]["score_ppm"] = top_score
+            record["decision"]["margin_ppm"] = top_score - second_score
+            record["decision"]["auto_apply_eligible"] = False
+            reasons = set(record["decision"]["reason_codes"])
+            reasons.add("TRUSTED_ALIAS_SCORE_OVERRIDE")
+            record["decision"]["reason_codes"] = sorted(reasons)
+
+        valid = self._build_bundle(auto_apply=True)
+        reseal(valid, make_low_score_alias)
+        result = validate_bundle(valid.bundle_dir, as_of=VALID_AS_OF)
+        self.assertEqual(result.proposals[0].state, DecisionState.AUTO_ELIGIBLE)
+        self.assertLess(
+            result.proposals[0].score_ppm,
+            DEFAULT_POLICY.strong_proposal_score_ppm,
+        )
+        self.assertIn(
+            "TRUSTED_ALIAS_SCORE_OVERRIDE",
+            result.proposals[0].reason_codes,
+        )
+
+        missing_reason = self._build_bundle(auto_apply=True)
+
+        def remove_required_reason(record: dict[str, Any]) -> None:
+            make_low_score_alias(record)
+            record["decision"]["reason_codes"].remove(
+                "TRUSTED_ALIAS_SCORE_OVERRIDE"
+            )
+
+        reseal(missing_reason, remove_required_reason)
+        with self.assertRaisesRegex(ContractError, "AUTO_ELIGIBLE evidence"):
+            validate_bundle(missing_reason.bundle_dir, as_of=VALID_AS_OF)
+
+        strong_alias = self._build_bundle(auto_apply=True)
+
+        def add_override_to_strong_alias(record: dict[str, Any]) -> None:
+            record["decision"]["auto_apply_eligible"] = False
+            reasons = set(record["decision"]["reason_codes"])
+            reasons.add("TRUSTED_ALIAS_SCORE_OVERRIDE")
+            record["decision"]["reason_codes"] = sorted(reasons)
+
+        reseal(strong_alias, add_override_to_strong_alias)
+        with self.assertRaisesRegex(ContractError, "AUTO_ELIGIBLE evidence"):
+            validate_bundle(strong_alias.bundle_dir, as_of=VALID_AS_OF)
+
+        non_alias = self._build_bundle(
+            stream_ids=("alpha",),
+            auto_apply=True,
+        )
+
+        def add_override_to_non_alias(record: dict[str, Any]) -> None:
+            record["decision"]["auto_apply_eligible"] = False
+            record["candidates"][0]["methods"] = ["STRICT_EXACT"]
+            reasons = set(record["decision"]["reason_codes"])
+            reasons.difference_update(
+                {"CURATED_ALIAS_EXACT", "LANE_TRUSTED_ALIAS"}
+            )
+            reasons.update(
+                {
+                    "LANE_STANDARD_STRONG",
+                    "STANDARD_LANE_THRESHOLD_PASSED",
+                    "TRUSTED_ALIAS_SCORE_OVERRIDE",
+                }
+            )
+            record["decision"]["reason_codes"] = sorted(reasons)
+
+        reseal(non_alias, add_override_to_non_alias)
+        with self.assertRaisesRegex(ContractError, "AUTO_ELIGIBLE evidence"):
+            validate_bundle(non_alias.bundle_dir, as_of=VALID_AS_OF)
+
     def test_resealed_auto_state_without_alias_evidence_is_rejected(self) -> None:
         fixture = self._build_bundle()
         proposal_path = fixture.bundle_dir / "proposals.jsonl"

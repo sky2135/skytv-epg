@@ -40,6 +40,7 @@ AI_REQUEST_SCHEMA = "skytv.matching-lab.ai-request.v1"
 PROMPT_VERSION = "matching-lab-advisory-v1"
 DEFAULT_MODEL = gemini_review.DEFAULT_MODEL
 MAX_ADVISORY_REQUESTS = 1_000
+MAX_ADVISORY_SHARDS = 64
 MAX_CALL_SIZE = gemini_review.MAX_ROWS_PER_CALL
 
 _OPAQUE_KEY_RE = re.compile(r"\Ac[0-9]{3}\Z")
@@ -47,6 +48,7 @@ _MODEL_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 _CACHE_SCHEMA_VERSION = 2
 _CACHE_CHECKPOINT_SCHEMA = "skytv.matching-lab.ai-cache-checkpoint.v1"
+_SHARD_IDENTITY_SCHEMA = "skytv.matching-lab.ai-shard-identity.v1"
 
 
 class AdvisoryDisposition(str, Enum):
@@ -303,6 +305,92 @@ def request_sha256(request: AdvisoryRequest, *, model: str = DEFAULT_MODEL) -> s
     """Hash the complete normalized request, model, and prompt contract."""
 
     return sha256_bytes(canonical_json_bytes(canonical_request_payload(request, model=model)))
+
+
+def validate_advisory_shard(
+    shard_count: object,
+    shard_index: object,
+) -> tuple[int, int]:
+    """Validate and normalize one bounded, zero-based advisory shard."""
+
+    if isinstance(shard_count, bool) or not isinstance(shard_count, int):
+        raise ContractError("ai_shard_count must be an integer.")
+    if not 1 <= shard_count <= MAX_ADVISORY_SHARDS:
+        raise ContractError(
+            f"ai_shard_count must be between 1 and {MAX_ADVISORY_SHARDS}."
+        )
+    if isinstance(shard_index, bool) or not isinstance(shard_index, int):
+        raise ContractError("ai_shard_index must be an integer.")
+    if not 0 <= shard_index < shard_count:
+        raise ContractError(
+            "ai_shard_index must be zero-based and smaller than ai_shard_count."
+        )
+    return shard_count, shard_index
+
+
+def advisory_shard_identity_sha256(proposal: ProposalRecord) -> str:
+    """Return a run-independent identity for deterministic AI partitioning.
+
+    ``proposal_id`` and ``run_id`` deliberately are not used: both bind the AI
+    shard configuration, so using either would reshuffle rows between sibling
+    shard runs. The provider row guards and opaque row key identify the same
+    frozen proposal input without exposing it outside the local process.
+    """
+
+    if not isinstance(proposal, ProposalRecord):
+        raise TypeError("AI shard items must be ProposalRecord values.")
+    return sha256_bytes(
+        canonical_json_bytes(
+            {
+                "schema": _SHARD_IDENTITY_SCHEMA,
+                "server_id": proposal.server_id,
+                "stream_id": proposal.stream_id,
+                "row_guard_sha256": proposal.row_guard_sha256,
+                "provider_identity_sha256": proposal.provider_identity_sha256,
+            }
+        )
+    )
+
+
+def proposals_for_advisory_shard(
+    proposals: Iterable[ProposalRecord],
+    *,
+    shard_count: int = 1,
+    shard_index: int = 0,
+) -> tuple[ProposalRecord, ...]:
+    """Select a complete, disjoint hash partition of frozen proposals.
+
+    The default one-shard configuration preserves input order and membership.
+    For multiple shards, a proposal belongs to exactly one zero-based shard.
+    """
+
+    count, index = validate_advisory_shard(shard_count, shard_index)
+    items = tuple(proposals)
+    if any(not isinstance(item, ProposalRecord) for item in items):
+        raise TypeError("AI shard items must be ProposalRecord values.")
+    if count == 1:
+        return items
+    identities = tuple(advisory_shard_identity_sha256(item) for item in items)
+    if len(identities) != len(set(identities)):
+        raise ContractError("AI shard proposal identities must be unique.")
+    ranked = sorted(
+        enumerate(items),
+        key=lambda item: (
+            identities[item[0]],
+            item[1].server_id,
+            item[1].stream_id,
+        ),
+    )
+    selected_offsets = {
+        original_offset
+        for rank, (original_offset, _proposal) in enumerate(ranked)
+        if rank % count == index
+    }
+    return tuple(
+        proposal
+        for original_offset, proposal in enumerate(items)
+        if original_offset in selected_offsets
+    )
 
 
 def request_from_proposal(proposal: ProposalRecord) -> AdvisoryRequest:
@@ -833,6 +921,7 @@ __all__ = (
     "AI_REQUEST_SCHEMA",
     "DEFAULT_MODEL",
     "MAX_ADVISORY_REQUESTS",
+    "MAX_ADVISORY_SHARDS",
     "PROMPT_VERSION",
     "AdvisoryBatchResult",
     "AdvisoryCacheError",
@@ -840,12 +929,15 @@ __all__ = (
     "AdvisoryDisposition",
     "AdvisoryOutcome",
     "AdvisoryRequest",
+    "advisory_shard_identity_sha256",
     "attach_advisory",
     "canonical_request_payload",
     "request_from_proposal",
     "request_sha256",
     "requests_from_proposals",
+    "proposals_for_advisory_shard",
     "replay_cache_namespace_sha256",
     "review_advisories",
+    "validate_advisory_shard",
     "validate_model_name",
 )

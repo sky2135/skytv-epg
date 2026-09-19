@@ -1,2 +1,37 @@
 alias,regions,epg_ids,relationship,note
 ptc chak de,IN,PTC.CHAK.DE.in|PTC.Chak.De.in|PTC.NEWS.in|PTC.News.in,verified_identity_with_news_fallback,Prefer the dedicated PTC Chak De schedule; use PTC News only if the dedicated ID disappears.
+rtsh 1,AL,RTSH.1.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+rtsh 3,AL,RTSH.3.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+rtsh 24,AL,RTSH.24.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+rtk 3,AL,RTK.3.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+rtk 4,AL,RTK.4.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+realitatea plus,RO,Realitatea.Plus.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+tvr 2,RO,TVR.2.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+diema sport 3,BG,Diema.Sport.3.bg,verified_cross_server_identity,Two servers independently selected the same current programme-backed Bulgarian target.
+sky sport 24,IT,Sky.Sport.24.it,verified_cross_server_identity,Two servers independently selected the same current programme-backed Italian target.
+a2 cnn,AL,A2.CNN.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+au sky racing 1,AU,SkyRacing1.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
+au sky racing 2,AU,SkyRacing2.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
+t7,AL,T7.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+history channel,RO,History.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+tv paprika,CZ,Paprika.cz,verified_cross_server_identity,Two servers independently selected the same current programme-backed Czech target.
+au channel 9 melbourne,AU,9Melbourne.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
+horse and country,SE,[HORSECT].Horse.&.Country.TV.se,verified_cross_server_identity,Two servers independently selected the same current programme-backed Swedish target.
+au channel 7 sydney,AU,7Sydney.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
+au channel 9 perth,AU,9Perth.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
+art doku 1,AL,Doku.1.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+art doku 2,AL,Doku.2.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+tv4 motor,SE,[TV4MOSV].TV4.Motor.se,verified_cross_server_identity,Two servers independently selected the same current programme-backed Swedish target.
+tring 3 plus,AL,3.Plus.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+tlc,BG,TLC.Balkans.bg,verified_cross_server_identity,Two servers independently selected the same current programme-backed Bulgarian target.
+nat geo wild,RO,National.Geographic.Wild.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+star,GR,STAR.gr,verified_cross_server_identity,Two servers independently selected the same current programme-backed Greek national target.
+etno,RO,Etno.TV.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+bbc 2 scotland,UK,BBC.Two.HD.uk,verified_schedule_relationship,BBC Two Scotland closed and its viewers now receive the network BBC Two schedule.
+movies cafe,RO,FILM.CAFE.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+explorer histori,AL,EXP.Histori.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+canal plus sports,FR,Canal+.Sport.fr,verified_cross_server_identity,Two servers independently selected the same current programme-backed French target.
+sky racing 1,AU,SkyRacing1.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
+sky racing 2,AU,SkyRacing2.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
+channel 7 sydney,AU,7Sydney.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
+channel 9 perth,AU,9Perth.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
