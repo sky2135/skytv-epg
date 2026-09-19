@@ -491,7 +491,72 @@ class MappingContractTests(unittest.TestCase):
         response.close.assert_called_once()
         session.close.assert_called_once()
 
-    def test_panel_download_rejects_cross_host_and_https_downgrade_redirects(self) -> None:
+    def test_panel_download_follows_approved_cross_host_without_credentials(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "http://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+            "ALLOW_INSECURE_PANEL_HTTP": "TRUE",
+        }
+        payload = b'<?xml version="1.0"?><tv/>'
+        redirected = mock.MagicMock()
+        redirected.status_code = 302
+        redirected.headers = {
+            "Location": (
+                "https://epg.irathomas08.com/xmltv.php"
+                "?username=reflected&password=reflected#discarded"
+            )
+        }
+        downloaded = mock.MagicMock()
+        downloaded.status_code = 200
+        downloaded.headers = {}
+        downloaded.iter_content.return_value = [payload]
+        panel_session = mock.MagicMock()
+        panel_session.headers = {}
+        panel_session.get.return_value = redirected
+        clean_session = mock.MagicMock()
+        clean_session.headers = {}
+        clean_session.get.return_value = downloaded
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests,
+                "Session",
+                side_effect=[panel_session, clean_session],
+            ), mock.patch("builtins.print"):
+                returned, details = runner.download_panel_xmltv(
+                    "server_2", destination
+                )
+            self.assertEqual(returned, destination)
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(details["bytes"], len(payload))
+
+        panel_request = panel_session.get.call_args
+        self.assertEqual(
+            panel_request.kwargs["params"],
+            {"username": "fixture-user", "password": "fixture-password"},
+        )
+        clean_request = clean_session.get.call_args
+        self.assertEqual(
+            clean_request.args[0],
+            "https://epg.irathomas08.com/xmltv.php",
+        )
+        self.assertIsNone(clean_request.kwargs["params"])
+        self.assertFalse(clean_request.kwargs["allow_redirects"])
+        self.assertIsInstance(
+            clean_session.auth, runner.PanelCredentiallessAuth
+        )
+        self.assertNotIn("Cookie", clean_session.headers)
+        self.assertNotIn("Authorization", clean_session.headers)
+        redirected.close.assert_called_once()
+        downloaded.close.assert_called_once()
+        panel_session.close.assert_called_once()
+        clean_session.close.assert_called_once()
+
+    def test_panel_download_rejects_unapproved_host_and_https_downgrade_redirects(self) -> None:
         cases = (
             (
                 "https://panel.example/provider",
@@ -500,6 +565,10 @@ class MappingContractTests(unittest.TestCase):
             (
                 "https://panel.example/provider",
                 "http://panel.example/xmltv.php",
+            ),
+            (
+                "https://panel.example/provider",
+                "http://epg.irathomas08.com/xmltv.php",
             ),
             # Unicode casefolding must not make two distinct IDNA DNS names
             # look equal before Requests prepares the redirect target.
