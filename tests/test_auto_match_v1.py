@@ -150,6 +150,17 @@ class FakeResolver:
         return self.query, result
 
 
+class StorageReplayResolver(FakeResolver):
+    def __init__(self, matches: dict[str, object], replay: object, **kwargs) -> None:
+        super().__init__(matches, **kwargs)
+        self.replay = replay
+        self.replay_calls = 0
+
+    def _approved_alias_match(self, _query):
+        self.replay_calls += 1
+        return self.replay
+
+
 class ScanProbeResolver(FakeResolver):
     SCAN_METHODS = (
         "_legacy_verified_match",
@@ -406,6 +417,77 @@ class StrictAutoMatchV1Tests(unittest.TestCase):
                 ).sheet_patch()
                 self.assertEqual(patch["action"], "AUTO_EPGSHARE")
                 self.assertEqual(patch["enabled"], "TRUE")
+
+    def test_replayed_static_storage_alias_reaches_programme_gate(self) -> None:
+        raw_match = real_match(
+            "MBC.2.ae",
+            method="approved_storage_knowledge",
+        )
+        resolver = StorageReplayResolver(
+            {"New Channel": raw_match},
+            replay=dict(raw_match),
+            explicit_market="MENA",
+            route_plan=("MENA",),
+        )
+
+        proposal = proposals_for(
+            resolver,
+            exact_catalog=catalog("MBC.2.ae", region="AE"),
+        )[("server_1", "10")]
+
+        self.assertEqual(resolver.replay_calls, 1)
+        self.assertTrue(proposal.eligible_for_finalization)
+        final = finalize_proposal(proposal, evidence("MBC.2.ae"))
+        self.assertTrue(final.approved)
+        self.assertEqual(final.sheet_patch()["epg_id"], "MBC.2.ae")
+
+    def test_storage_alias_method_cannot_bypass_replay_or_region_scope(self) -> None:
+        raw_match = real_match(
+            "MBC.2.ae",
+            method="approved_storage_knowledge",
+        )
+        cases = (
+            (
+                FakeResolver(
+                    {"New Channel": raw_match},
+                    explicit_market="MENA",
+                    route_plan=("MENA",),
+                ),
+                catalog("MBC.2.ae", region="AE"),
+                "fixed approved knowledge",
+            ),
+            (
+                StorageReplayResolver(
+                    {"New Channel": raw_match},
+                    replay=real_match(
+                        "Different.Channel.ae",
+                        method="approved_storage_knowledge",
+                    ),
+                    explicit_market="MENA",
+                    route_plan=("MENA",),
+                ),
+                catalog("MBC.2.ae", region="AE"),
+                "fixed approved knowledge",
+            ),
+            (
+                StorageReplayResolver(
+                    {"New Channel": raw_match},
+                    replay=dict(raw_match),
+                    explicit_market="MENA",
+                    route_plan=("MENA",),
+                ),
+                catalog("MBC.2.ae", region="MENA"),
+                "same-market",
+            ),
+        )
+        for resolver, exact_catalog, reason in cases:
+            with self.subTest(reason=reason):
+                proposal = proposals_for(
+                    resolver,
+                    exact_catalog=exact_catalog,
+                )[("server_1", "10")]
+                self.assertFalse(proposal.eligible_for_finalization)
+                self.assertIn(reason, proposal.decision_reason)
 
     def test_real_resolver_produces_nonzero_structural_approvals_and_safe_negative(self) -> None:
         engine, resolver = real_resolver()

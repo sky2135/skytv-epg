@@ -114,7 +114,8 @@ def lexical_cohort_risk_codes(
 ) -> tuple[str, ...]:
     """Return replayable market/language risks from public identity text."""
 
-    combined = f"{channel_name or ''} {category_name or ''}"
+    raw_channel_name = str(channel_name or "")
+    combined = f"{raw_channel_name} {category_name or ''}"
     tokens = set(words(combined))
     risks: set[str] = set()
     if str(market or "").upper() in SOUTH_ASIA_MARKETS or tokens.intersection(
@@ -134,6 +135,15 @@ def lexical_cohort_risk_codes(
     ):
         risks.add("RISK_TIMESHIFT_VARIANT")
     if tokens.intersection({"alt", "alternate", "extra", "xtra"}):
+        risks.add("RISK_EDITION_VARIANT")
+    # A terminal/embedded uppercase ``ME`` after an acronym is a protected
+    # channel edition or sub-brand, not a disposable filler word.  Exact
+    # identity can still pass, while a fuzzy contraction such as ABC ME
+    # Melbourne -> ABC Melbourne must remain human review.
+    if re.search(
+        r"(?<![A-Za-z0-9])[A-Z]{2,6}\s+ME(?=$|[^A-Za-z0-9])",
+        raw_channel_name,
+    ):
         risks.add("RISK_EDITION_VARIANT")
     return tuple(sorted(risks))
 
@@ -189,6 +199,7 @@ def semantics_from_context(context: Any, *, market: str = "") -> ProtectedSemant
         market=str(market or "").upper(),
         direction=str(context.direction or ""),
         timeshift=str(context.timeshift or ""),
+        quality=str(getattr(context, "quality", "") or ""),
         has_plus=bool(context.has_plus),
         has_extra=bool(context.has_extra),
         has_alternate=bool(context.has_alternate),
@@ -204,7 +215,12 @@ def protected_conflicts(
     *,
     route_explicit: bool,
 ) -> tuple[str, ...]:
-    """Return symmetric identity contradictions; absence is not agreement."""
+    """Return identity contradictions; absence is not agreement.
+
+    Quality is intentionally directional: a lower-quality or unspecified
+    provider channel must never be promoted to a UHD/4K guide.  A UHD provider
+    channel may still use a non-UHD guide when the schedule is the same.
+    """
 
     conflicts: set[str] = set()
     if route_explicit and query.market and candidate.market and query.market != candidate.market:
@@ -216,6 +232,8 @@ def protected_conflicts(
         conflicts.add("DIRECTION_MISMATCH")
     if (query.timeshift or candidate.timeshift) and query.timeshift != candidate.timeshift:
         conflicts.add("TIMESHIFT_MISMATCH")
+    if candidate.quality == "UHD" and query.quality != "UHD":
+        conflicts.add("QUALITY_UPGRADE_MISMATCH")
     if query.has_plus != candidate.has_plus:
         conflicts.add("PLUS_VARIANT_MISMATCH")
     if query.has_extra != candidate.has_extra:

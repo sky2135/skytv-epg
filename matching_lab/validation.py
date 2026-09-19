@@ -13,6 +13,7 @@ import io
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from itertools import combinations
 from pathlib import Path
 from types import MappingProxyType
@@ -25,6 +26,12 @@ from .artifacts import (
     package_code_sha256,
     read_stable_regular_file,
     strict_json_loads,
+)
+from .compat import (
+    automatch,
+    catalog_stream,
+    parse_candidate_context_v8,
+    parse_channel_context_v8,
 )
 from .models import (
     AIReviewEvidence,
@@ -39,11 +46,13 @@ from .models import (
     require_code,
     safe_display_text,
     safe_text,
+    retained_exact_tier_families,
     sha256_bytes,
     sha256_json,
 )
-from .normalization import lexical_cohort_risk_codes
+from .normalization import NameViews, lexical_cohort_risk_codes
 from .policy import DEFAULT_POLICY
+from .retrieval import repository_curated_alias_targets
 
 
 MAX_MANIFEST_BYTES = 1024 * 1024
@@ -57,6 +66,26 @@ PROGRAMME_MAXIMUM_INITIAL_GAP_SECONDS = 6 * 60 * 60
 PROGRAMME_PASS_REASON = (
     "Exact ID has a non-placeholder current/future programme guide."
 )
+_PROGRAMME_QUARANTINE_REASONS = MappingProxyType(
+    {
+        **{
+            epg_id.casefold(): catalog_stream.CROSSWIRED_PROGRAMME_REASON
+            for epg_id in catalog_stream.KNOWN_CROSSWIRED_PROGRAMME_IDS
+        },
+        **{
+            epg_id.casefold(): catalog_stream.UNINFORMATIVE_PROGRAMME_REASON
+            for epg_id in catalog_stream.KNOWN_UNINFORMATIVE_PROGRAMME_IDS
+        },
+        **{
+            epg_id.casefold(): catalog_stream.AMBIGUOUS_PROGRAMME_REASON
+            for epg_id in catalog_stream.KNOWN_AMBIGUOUS_PROGRAMME_IDS
+        },
+    }
+)
+
+
+def _expected_programme_quarantine_reason(epg_id: object) -> str:
+    return _PROGRAMME_QUARANTINE_REASONS.get(str(epg_id or "").casefold(), "")
 
 # These fields are the versioned row preimage used by the current proposal
 # producer.  Keeping the list here also lets bundle-only validation run without
@@ -170,6 +199,7 @@ _SEMANTICS_FIELDS = frozenset(
         "market",
         "direction",
         "timeshift",
+        "quality",
         "has_plus",
         "has_extra",
         "has_alternate",
@@ -205,6 +235,7 @@ _EVIDENCE_FIELDS = frozenset(
 )
 _INPUT_HASH_FIELDS = frozenset(
     {
+        "APPROVED_ALIASES",
         "MAPPING_FILE",
         "MAPPING_TABLE",
         "ALERTS_FILE",
@@ -237,6 +268,12 @@ _REASON_CODES = frozenset(
         "AMBIGUOUS_CANDIDATES",
         "CATALOG_CORROBORATED",
         "CURATED_ALIAS_EXACT",
+        "CURATED_STORAGE_ALIAS_EXACT",
+        "CURATED_STORAGE_ALIAS_SEMANTIC_CONFLICT",
+        "FROZEN_RESOLVER_EXACT_GATES_FAILED",
+        "FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE",
+        "FROZEN_RESOLVER_EXACT_SEMANTIC_CONFLICT",
+        "FROZEN_RESOLVER_EXACT_TOP",
         "INVALID_REVIEW_STATE",
         "LEARNED_ALIAS_EXACT",
         "LOW_CALIBRATED_CONFIDENCE",
@@ -246,8 +283,10 @@ _REASON_CODES = frozenset(
         "LANE_ABSTAIN",
         "LANE_CONFLICT",
         "LANE_CONSERVATIVE_STRICT_EXACT",
+        "LANE_FROZEN_RESOLVER_EXACT",
         "LANE_HUMAN_REVIEW",
         "LANE_PROGRAMME_VERIFICATION",
+        "LANE_REPOSITORY_CURATED_ALIAS",
         "LANE_STANDARD_STRONG",
         "LANE_TRUSTED_ALIAS",
         "MARGIN_GATE_PASSED",
@@ -262,10 +301,17 @@ _REASON_CODES = frozenset(
         "PROVIDER_REVALIDATION_REQUIRED",
         "PROTECTED_SEMANTICS_COMPATIBLE",
         "PROTECTED_SEMANTICS_CONFLICT",
+        "REPOSITORY_CURATED_ALIAS_ALLOWLISTED",
+        "REPOSITORY_CURATED_ALIAS_MARGIN_OVERRIDE",
+        "REPOSITORY_CURATED_ALIAS_SCORE_OVERRIDE",
         "ROW_NOT_DISABLED_REVIEW",
         "SHADOW_ONLY_NO_WRITE_AUTHORITY",
         "STANDARD_LANE_THRESHOLD_PASSED",
+        "STATIC_STORAGE_ROUTE_ALLOWLISTED",
         "STRICT_EXACT_UNIQUE_CANDIDATE",
+        "TARGET_ROUTE_AGREES",
+        "TARGET_ROUTE_MISMATCH",
+        "TRUSTED_ALIAS_SCORE_OVERRIDE",
         "NON_STRICT_AUTO_BLOCKED_CONSERVATIVE_COHORT",
         "PREFILLED_ID_CATALOG_REVALIDATED",
         "PREFILLED_ID_NOT_CORROBORATED",
@@ -291,6 +337,7 @@ _REASON_CODES = frozenset(
         "MARKET_MISMATCH",
         "NUMBER_MISMATCH",
         "PLUS_VARIANT_MISMATCH",
+        "QUALITY_UPGRADE_MISMATCH",
         "TIMESHIFT_MISMATCH",
     }
 )
@@ -301,7 +348,10 @@ _CANDIDATE_METHODS = frozenset(
         "CHAR_NGRAM_RETRIEVAL",
         "COMPACT_EXACT",
         "CURATED_ALIAS_EXACT",
+        "CURATED_STORAGE_ALIAS_EXACT",
+        "FROZEN_RESOLVER_EXACT",
         "HUMAN_ALIAS_EXACT",
+        "REPOSITORY_CURATED_ALIAS_EXACT",
         "RELAXED_EXACT",
         "STRICT_EXACT",
         "TOKEN_RETRIEVAL",
@@ -319,6 +369,7 @@ _CANDIDATE_CONFLICTS = frozenset(
         "MARKET_MISMATCH",
         "NUMBER_MISMATCH",
         "PLUS_VARIANT_MISMATCH",
+        "QUALITY_UPGRADE_MISMATCH",
         "TIMESHIFT_MISMATCH",
     }
 )
@@ -593,6 +644,7 @@ def _parse_semantics(raw: object, *, label: str) -> ProtectedSemantics:
         market=_string(value["market"], label=f"{label} market"),
         direction=_string(value["direction"], label=f"{label} direction"),
         timeshift=_string(value["timeshift"], label=f"{label} timeshift"),
+        quality=_string(value["quality"], label=f"{label} quality"),
         has_plus=_boolean(value["has_plus"], label=f"{label} has_plus"),
         has_extra=_boolean(value["has_extra"], label=f"{label} has_extra"),
         has_alternate=_boolean(
@@ -867,14 +919,105 @@ def _parse_proposal(raw: object, *, line_number: int) -> ProposalRecord:
     return record
 
 
+@lru_cache(maxsize=1)
+def _repository_alias_validation_engine() -> Any:
+    try:
+        return automatch._load_frozen_engine()
+    except Exception as exc:
+        raise ContractError(
+            "The repository alias validator could not load the frozen parser."
+        ) from exc
+
+
+def _validate_replayed_quality_evidence(
+    proposal: ProposalRecord, *, label: str
+) -> None:
+    """Reparse public identities and independently verify quality evidence."""
+
+    engine = _repository_alias_validation_engine()
+    try:
+        query_context = parse_channel_context_v8(
+            engine,
+            proposal.channel_name,
+            proposal.category_name,
+        )
+        query_quality = str(getattr(query_context, "quality", "") or "").upper()
+        for candidate in proposal.candidates:
+            candidate_context = parse_candidate_context_v8(
+                engine,
+                {
+                    "epg_id": candidate.epg_id,
+                    "display_name": candidate.display_name,
+                    "feed": candidate.feed,
+                    "region": candidate.region,
+                },
+            )
+            candidate_quality = str(
+                getattr(candidate_context, "quality", "") or ""
+            ).upper()
+            if candidate.semantics.quality != candidate_quality:
+                raise ContractError(
+                    f"{label} candidate quality evidence is inconsistent."
+                )
+            expected_conflict = (
+                candidate_quality == "UHD" and query_quality != "UHD"
+            )
+            actual_conflict = "QUALITY_UPGRADE_MISMATCH" in candidate.conflicts
+            if actual_conflict != expected_conflict:
+                raise ContractError(
+                    f"{label} quality-conflict evidence is inconsistent."
+                )
+    except ContractError:
+        raise
+    except Exception as exc:
+        raise ContractError(
+            f"{label} quality evidence could not be replayed."
+        ) from exc
+
+
+def _repository_alias_validation_targets() -> Mapping[tuple[str, str], str]:
+    targets, _digest = repository_curated_alias_targets()
+    return MappingProxyType(targets)
+
+
+def _repository_curated_target_for_proposal(proposal: ProposalRecord) -> str:
+    try:
+        context = parse_channel_context_v8(
+            _repository_alias_validation_engine(),
+            proposal.channel_name,
+            proposal.category_name,
+        )
+    except ContractError:
+        raise
+    except Exception as exc:
+        raise ContractError(
+            "The repository alias validator could not parse a proposal identity."
+        ) from exc
+    alias_key = NameViews.from_context(context).strict
+    return _repository_alias_validation_targets().get(
+        (alias_key, proposal.market.upper()),
+        "",
+    )
+
+
 def _validate_proposal_decision(
     proposal: ProposalRecord, *, line_number: int
 ) -> None:
     label = f"proposal line {line_number}"
+    _validate_replayed_quality_evidence(proposal, label=label)
 
     def evidence_tier(candidate: CandidateEvidence) -> int:
         methods = set(candidate.methods)
-        if methods.intersection({"HUMAN_ALIAS_EXACT", "CURATED_ALIAS_EXACT"}):
+        if methods.intersection(
+            {
+                "HUMAN_ALIAS_EXACT",
+                "CURATED_ALIAS_EXACT",
+                "CURATED_STORAGE_ALIAS_EXACT",
+                "REPOSITORY_CURATED_ALIAS_EXACT",
+            }
+        ):
+            return 6
+        if "FROZEN_RESOLVER_EXACT" in methods:
             return 5
         if "STRICT_EXACT" in methods:
             return 4
@@ -919,12 +1062,25 @@ def _validate_proposal_decision(
             and candidate.programme_count >= PROGRAMME_MINIMUM_COUNT
             and latest >= generated_epoch + PROGRAMME_MINIMUM_FUTURE_SECONDS
         )
+        quarantine_reason = _expected_programme_quarantine_reason(
+            candidate.epg_id
+        )
         if candidate.programme_state is ProgrammeState.PASS and (
-            not passes_gate or candidate.programme_reason != PROGRAMME_PASS_REASON
+            not passes_gate
+            or candidate.programme_reason != PROGRAMME_PASS_REASON
+            or quarantine_reason
         ):
             raise ContractError(f"{label} contains invalid passing programme evidence.")
-        if candidate.programme_state is ProgrammeState.FAIL and passes_gate:
-            raise ContractError(f"{label} contains inconsistent failed programme evidence.")
+        if candidate.programme_state is ProgrammeState.FAIL:
+            if quarantine_reason:
+                if candidate.programme_reason != quarantine_reason:
+                    raise ContractError(
+                        f"{label} contains inconsistent quarantined programme evidence."
+                    )
+            elif passes_gate:
+                raise ContractError(
+                    f"{label} contains inconsistent failed programme evidence."
+                )
         if candidate.programme_state is ProgrammeState.NOT_CHECKED and (
             candidate.programme_count
             or first is not None
@@ -936,6 +1092,7 @@ def _validate_proposal_decision(
     compatible = tuple(
         candidate for candidate in proposal.candidates if not candidate.conflicts
     )
+    exact_tier_families = retained_exact_tier_families(compatible)
     expected_score = compatible[0].score_ppm if compatible else 0
     second_score = compatible[1].score_ppm if len(compatible) > 1 else 0
     expected_margin = max(0, expected_score - second_score)
@@ -970,6 +1127,180 @@ def _validate_proposal_decision(
         DecisionState.PENDING_PROGRAMME,
     }
     reasons = set(proposal.reason_codes)
+    prefilled_status_codes = {
+        "PREFILLED_ID_CATALOG_REVALIDATED",
+        "PREFILLED_ID_NOT_CORROBORATED",
+    }.intersection(reasons)
+    untrusted_prefilled_id = (
+        "PREFILLED_ID_UNTRUSTED_EVIDENCE" in reasons
+    )
+    if (
+        untrusted_prefilled_id != bool(prefilled_status_codes)
+        or len(prefilled_status_codes) > 1
+    ):
+        raise ContractError(f"{label} prefilled-ID evidence is inconsistent.")
+    frozen_exact_candidates = tuple(
+        candidate
+        for candidate in proposal.candidates
+        if "FROZEN_RESOLVER_EXACT" in candidate.methods
+    )
+    frozen_exact_conflicts = tuple(
+        candidate for candidate in frozen_exact_candidates if candidate.conflicts
+    )
+    selected_frozen_exact = bool(
+        selected is not None and "FROZEN_RESOLVER_EXACT" in selected.methods
+    )
+    storage_alias_candidates = tuple(
+        candidate
+        for candidate in proposal.candidates
+        if "CURATED_STORAGE_ALIAS_EXACT" in candidate.methods
+    )
+    storage_alias_conflicts = tuple(
+        candidate for candidate in storage_alias_candidates if candidate.conflicts
+    )
+    selected_storage_alias = bool(
+        selected is not None and "CURATED_STORAGE_ALIAS_EXACT" in selected.methods
+    )
+    storage_reason_codes = {
+        "CURATED_STORAGE_ALIAS_EXACT",
+        "CURATED_STORAGE_ALIAS_SEMANTIC_CONFLICT",
+        "STATIC_STORAGE_ROUTE_ALLOWLISTED",
+    }
+    repository_alias_candidates = tuple(
+        candidate
+        for candidate in proposal.candidates
+        if "REPOSITORY_CURATED_ALIAS_EXACT" in candidate.methods
+    )
+    selected_repository_alias = bool(
+        selected is not None
+        and "REPOSITORY_CURATED_ALIAS_EXACT" in selected.methods
+    )
+    repository_alias_reason_codes = {
+        "LANE_REPOSITORY_CURATED_ALIAS",
+        "REPOSITORY_CURATED_ALIAS_ALLOWLISTED",
+        "REPOSITORY_CURATED_ALIAS_MARGIN_OVERRIDE",
+        "REPOSITORY_CURATED_ALIAS_SCORE_OVERRIDE",
+    }
+    frozen_selected_reason_codes = {
+        "FROZEN_RESOLVER_EXACT_GATES_FAILED",
+        "FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE",
+        "FROZEN_RESOLVER_EXACT_TOP",
+        "LANE_FROZEN_RESOLVER_EXACT",
+        "TARGET_ROUTE_AGREES",
+        "TARGET_ROUTE_MISMATCH",
+    }
+    if frozen_exact_conflicts:
+        expected_conflicts = {
+            conflict
+            for candidate in frozen_exact_conflicts
+            for conflict in candidate.conflicts
+        }
+        if (
+            proposal.state is not DecisionState.CONFLICT
+            or "FROZEN_RESOLVER_EXACT_SEMANTIC_CONFLICT" not in reasons
+            or "LANE_CONFLICT" not in reasons
+            or "PROTECTED_SEMANTICS_CONFLICT" not in reasons
+            or not expected_conflicts.issubset(reasons)
+        ):
+            raise ContractError(
+                f"{label} frozen-resolver conflict evidence is inconsistent."
+            )
+    elif "FROZEN_RESOLVER_EXACT_SEMANTIC_CONFLICT" in reasons:
+        raise ContractError(
+            f"{label} claims a frozen-resolver conflict without evidence."
+        )
+    if selected_frozen_exact:
+        route_codes = {"TARGET_ROUTE_AGREES", "TARGET_ROUTE_MISMATCH"}.intersection(
+            reasons
+        )
+        if "FROZEN_RESOLVER_EXACT_TOP" not in reasons or len(route_codes) != 1:
+            raise ContractError(
+                f"{label} frozen-resolver selection evidence is incomplete."
+            )
+        if "TARGET_ROUTE_AGREES" in route_codes and (
+            not proposal.route_explicit
+            or not proposal.market
+            or selected is None
+            or selected.region != proposal.market.upper()
+            or "MARKET_ROUTE_EXPLICIT" not in reasons
+            or "MARKET_UNKNOWN" in reasons
+        ):
+            raise ContractError(
+                f"{label} frozen-resolver target route is inconsistent."
+            )
+    elif reasons.intersection(frozen_selected_reason_codes):
+        raise ContractError(
+            f"{label} has frozen-resolver selection reasons without a selected target."
+        )
+    if storage_alias_conflicts:
+        expected_conflicts = {
+            conflict
+            for candidate in storage_alias_conflicts
+            for conflict in candidate.conflicts
+        }
+        if (
+            proposal.state is not DecisionState.CONFLICT
+            or "CURATED_STORAGE_ALIAS_SEMANTIC_CONFLICT" not in reasons
+            or "LANE_CONFLICT" not in reasons
+            or "PROTECTED_SEMANTICS_CONFLICT" not in reasons
+            or not expected_conflicts.issubset(reasons)
+        ):
+            raise ContractError(
+                f"{label} curated-storage conflict evidence is inconsistent."
+            )
+    elif "CURATED_STORAGE_ALIAS_SEMANTIC_CONFLICT" in reasons:
+        raise ContractError(
+            f"{label} claims a curated-storage conflict without evidence."
+        )
+    if not storage_alias_candidates and reasons.intersection(storage_reason_codes):
+        raise ContractError(
+            f"{label} has curated-storage reasons without candidate evidence."
+        )
+    if reasons.intersection(
+        {"CURATED_STORAGE_ALIAS_EXACT", "STATIC_STORAGE_ROUTE_ALLOWLISTED"}
+    ) and not (
+        proposal.state is DecisionState.AUTO_ELIGIBLE and selected_storage_alias
+    ):
+        raise ContractError(
+            f"{label} has curated-storage selection reasons outside its trusted lane."
+        )
+    if repository_alias_candidates:
+        repository_target = _repository_curated_target_for_proposal(proposal)
+        repository_candidate = repository_alias_candidates[0]
+        if (
+            len(repository_alias_candidates) != 1
+            or "CURATED_ALIAS_EXACT" not in repository_candidate.methods
+            or "CURATED_STORAGE_ALIAS_EXACT" in repository_candidate.methods
+            or not proposal.route_explicit
+            or not proposal.market
+            or repository_candidate.region != proposal.market.upper()
+            or repository_candidate.epg_id != repository_target
+        ):
+            raise ContractError(
+                f"{label} repository-curated alias evidence is inconsistent."
+            )
+    elif reasons.intersection(repository_alias_reason_codes):
+        raise ContractError(
+            f"{label} has repository-curated reasons without candidate evidence."
+        )
+    if reasons.intersection(repository_alias_reason_codes) and not (
+        proposal.state is DecisionState.AUTO_ELIGIBLE
+        and selected_repository_alias
+    ):
+        raise ContractError(
+            f"{label} has repository-curated reasons outside its override lane."
+        )
+    if (
+        "FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE" in reasons
+        and proposal.state is not DecisionState.AUTO_ELIGIBLE
+    ) or (
+        "LANE_FROZEN_RESOLVER_EXACT" in reasons
+        and proposal.state is not DecisionState.AUTO_ELIGIBLE
+    ) or (
+        "FROZEN_RESOLVER_EXACT_GATES_FAILED" in reasons
+        and proposal.state is not DecisionState.NEEDS_REVIEW
+    ):
+        raise ContractError(f"{label} frozen-resolver lane state is inconsistent.")
     risk_codes = {code for code in reasons if code.startswith("RISK_")}
     expected_risk_codes = set(
         lexical_cohort_risk_codes(
@@ -1006,15 +1337,73 @@ def _validate_proposal_decision(
     ):
         raise ContractError(f"{label} programme-verification lane is missing.")
     if proposal.state is DecisionState.AUTO_ELIGIBLE:
-        alias_methods = set(selected.methods if selected is not None else ()).intersection(
-            {"HUMAN_ALIAS_EXACT", "CURATED_ALIAS_EXACT"}
+        selected_methods = set(selected.methods if selected is not None else ())
+        alias_methods = selected_methods.intersection(
+            {
+                "HUMAN_ALIAS_EXACT",
+                "CURATED_ALIAS_EXACT",
+                "CURATED_STORAGE_ALIAS_EXACT",
+            }
         )
+        frozen_exact_method = "FROZEN_RESOLVER_EXACT" in selected_methods
         expected_alias_reason = (
-            "CURATED_ALIAS_EXACT"
-            if "CURATED_ALIAS_EXACT" in alias_methods
-            else "LEARNED_ALIAS_EXACT"
+            "CURATED_STORAGE_ALIAS_EXACT"
+            if "CURATED_STORAGE_ALIAS_EXACT" in alias_methods
+            else (
+                "CURATED_ALIAS_EXACT"
+                if "CURATED_ALIAS_EXACT" in alias_methods
+                else "LEARNED_ALIAS_EXACT"
+            )
         )
         trusted_alias_lane = bool(alias_methods) and "LANE_TRUSTED_ALIAS" in reasons
+        frozen_exact_lane = (
+            frozen_exact_method and "LANE_FROZEN_RESOLVER_EXACT" in reasons
+        )
+        repository_alias_lane = (
+            selected_repository_alias
+            and "LANE_REPOSITORY_CURATED_ALIAS" in reasons
+        )
+        curated_alias_candidates = tuple(
+            candidate
+            for candidate in proposal.candidates
+            if "CURATED_ALIAS_EXACT" in candidate.methods
+        )
+        repository_score_override = (
+            proposal.score_ppm < DEFAULT_POLICY.minimum_candidate_score_ppm
+        )
+        repository_margin_override = (
+            proposal.margin_ppm < DEFAULT_POLICY.strong_margin_ppm
+        )
+        expected_repository_reasons = (
+            {
+                "LANE_REPOSITORY_CURATED_ALIAS",
+                "REPOSITORY_CURATED_ALIAS_ALLOWLISTED",
+            }
+            | (
+                {"REPOSITORY_CURATED_ALIAS_SCORE_OVERRIDE"}
+                if repository_score_override
+                else set()
+            )
+            | (
+                {"REPOSITORY_CURATED_ALIAS_MARGIN_OVERRIDE"}
+                if repository_margin_override
+                else set()
+            )
+        )
+        unique_retained_exact_family = bool(
+            len(exact_tier_families) == 1
+            and selected is not None
+            and exact_tier_families[0].candidate_key
+            == selected.candidate_key
+        )
+        legacy_single_compatible_exact = len(compatible) == 1
+        expanded_exact_family_ready = bool(
+            len(compatible) > 1
+            and unique_retained_exact_family
+            and proposal.margin_ppm >= DEFAULT_POLICY.strong_margin_ppm
+            and not risk_codes
+            and not untrusted_prefilled_id
+        )
         standard_lane = (
             not alias_methods
             and not risk_codes
@@ -1034,21 +1423,42 @@ def _validate_proposal_decision(
         )
         auto_lanes = {
             "LANE_TRUSTED_ALIAS",
+            "LANE_FROZEN_RESOLVER_EXACT",
+            "LANE_REPOSITORY_CURATED_ALIAS",
             "LANE_STANDARD_STRONG",
             "LANE_CONSERVATIVE_STRICT_EXACT",
         }.intersection(reasons)
         if (
             selected is None
             or selected.programme_state is not ProgrammeState.PASS
-            or not (trusted_alias_lane or standard_lane or conservative_strict_lane)
+            or not (
+                trusted_alias_lane
+                or frozen_exact_lane
+                or repository_alias_lane
+                or standard_lane
+                or conservative_strict_lane
+            )
             or len(auto_lanes) != 1
-            or proposal.score_ppm < DEFAULT_POLICY.strong_proposal_score_ppm
-            or proposal.margin_ppm < DEFAULT_POLICY.strong_margin_ppm
+            or (
+                not (
+                    trusted_alias_lane
+                    or frozen_exact_lane
+                    or repository_alias_lane
+                )
+                and proposal.score_ppm < DEFAULT_POLICY.strong_proposal_score_ppm
+            )
+            or (
+                not (frozen_exact_lane or repository_alias_lane)
+                and proposal.margin_ppm < DEFAULT_POLICY.strong_margin_ppm
+            )
             or not proposal.route_explicit
             or not proposal.market
             or "PROGRAMME_GATE_PASSED" not in proposal.reason_codes
             or "MARKET_ROUTE_EXPLICIT" not in proposal.reason_codes
-            or "MARGIN_GATE_PASSED" not in proposal.reason_codes
+            or (
+                not (frozen_exact_lane or repository_alias_lane)
+                and "MARGIN_GATE_PASSED" not in proposal.reason_codes
+            )
             or "CATALOG_CORROBORATED" not in proposal.reason_codes
             or "PROTECTED_SEMANTICS_COMPATIBLE" not in proposal.reason_codes
             or "PROVIDER_REVALIDATION_REQUIRED" not in proposal.reason_codes
@@ -1064,16 +1474,107 @@ def _validate_proposal_decision(
             or "LOW_MARGIN" in proposal.reason_codes
             or "AMBIGUOUS_CANDIDATES" in proposal.reason_codes
             or (
-                trusted_alias_lane
-                and {"CURATED_ALIAS_EXACT", "LEARNED_ALIAS_EXACT"}.intersection(
-                    proposal.reason_codes
+                repository_alias_lane
+                and (
+                    len(curated_alias_candidates) != 1
+                    or selected is None
+                    or curated_alias_candidates[0].candidate_key
+                    != selected.candidate_key
+                    or any(
+                        candidate.candidate_key != selected.candidate_key
+                        and "FROZEN_RESOLVER_EXACT" in candidate.methods
+                        and candidate.programme_state is not ProgrammeState.FAIL
+                        for candidate in compatible
+                    )
+                    or selected.conflicts
+                    or selected.region != proposal.market.upper()
+                    or not (repository_score_override or repository_margin_override)
+                    or "MARGIN_GATE_PASSED" in reasons
                 )
+            )
+            or (
+                reasons.intersection(repository_alias_reason_codes)
+                != (
+                    expected_repository_reasons
+                    if repository_alias_lane
+                    else set()
+                )
+            )
+            or (
+                frozen_exact_method
+                and "TARGET_ROUTE_MISMATCH" in proposal.reason_codes
+            )
+            or (
+                frozen_exact_lane
+                and (
+                    "FROZEN_RESOLVER_EXACT_TOP" not in reasons
+                    or "TARGET_ROUTE_AGREES" not in reasons
+                    or "TARGET_ROUTE_MISMATCH" in reasons
+                    or "FROZEN_RESOLVER_EXACT_GATES_FAILED" in reasons
+                    or selected.region != proposal.market.upper()
+                    or not (
+                        legacy_single_compatible_exact
+                        or expanded_exact_family_ready
+                    )
+                    or (
+                        legacy_single_compatible_exact
+                        and "MARGIN_GATE_PASSED" in reasons
+                    )
+                    or (
+                        expanded_exact_family_ready
+                        and "MARGIN_GATE_PASSED" not in reasons
+                    )
+                )
+            )
+            or (
+                trusted_alias_lane
+                and {
+                    "CURATED_ALIAS_EXACT",
+                    "CURATED_STORAGE_ALIAS_EXACT",
+                    "LEARNED_ALIAS_EXACT",
+                }.intersection(proposal.reason_codes)
                 != {expected_alias_reason}
             )
             or (
                 not trusted_alias_lane
-                and {"CURATED_ALIAS_EXACT", "LEARNED_ALIAS_EXACT"}.intersection(
-                    proposal.reason_codes
+                and {
+                    "CURATED_ALIAS_EXACT",
+                    "CURATED_STORAGE_ALIAS_EXACT",
+                    "LEARNED_ALIAS_EXACT",
+                }.intersection(proposal.reason_codes)
+            )
+            or (
+                selected_storage_alias
+                and (
+                    "STATIC_STORAGE_ROUTE_ALLOWLISTED" not in reasons
+                    or selected is None
+                    or selected.region == proposal.market.upper()
+                )
+            )
+            or (
+                not selected_storage_alias
+                and {
+                    "CURATED_STORAGE_ALIAS_EXACT",
+                    "STATIC_STORAGE_ROUTE_ALLOWLISTED",
+                }.intersection(reasons)
+            )
+            or (
+                "CURATED_STORAGE_ALIAS_SEMANTIC_CONFLICT" in reasons
+            )
+            or (
+                ("TRUSTED_ALIAS_SCORE_OVERRIDE" in reasons)
+                != (
+                    trusted_alias_lane
+                    and proposal.score_ppm
+                    < DEFAULT_POLICY.strong_proposal_score_ppm
+                )
+            )
+            or (
+                ("FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE" in reasons)
+                != (
+                    frozen_exact_lane
+                    and proposal.score_ppm
+                    < DEFAULT_POLICY.strong_proposal_score_ppm
                 )
             )
             or "LANE_HUMAN_REVIEW" in reasons
@@ -1083,7 +1584,12 @@ def _validate_proposal_decision(
     if proposal.state is DecisionState.NEEDS_REVIEW and (
         selected is None
         or selected.programme_state is not ProgrammeState.PASS
-        or proposal.score_ppm < DEFAULT_POLICY.minimum_candidate_score_ppm
+        or (
+            proposal.score_ppm < DEFAULT_POLICY.minimum_candidate_score_ppm
+            and not selected_frozen_exact
+            and not selected_storage_alias
+            and not selected_repository_alias
+        )
         or "PROGRAMME_GATE_PASSED" not in proposal.reason_codes
         or "CATALOG_CORROBORATED" not in proposal.reason_codes
         or "PROTECTED_SEMANTICS_COMPATIBLE" not in proposal.reason_codes
@@ -1092,6 +1598,64 @@ def _validate_proposal_decision(
         or "PROGRAMME_GATE_PENDING" in proposal.reason_codes
     ):
         raise ContractError(f"{label} NEEDS_REVIEW evidence is incomplete.")
+    if proposal.state is DecisionState.NEEDS_REVIEW and selected_frozen_exact:
+        non_supporting_ai = {
+            "AI_DISAGREES",
+            "AI_LOW_CONFIDENCE",
+            "AI_ABSTAINED",
+            "AI_REVIEW_ERROR",
+        }.intersection(reasons)
+        legacy_single_compatible_exact = len(compatible) == 1
+        exact_family_ambiguous = bool(
+            not legacy_single_compatible_exact
+            and not (
+                len(exact_tier_families) == 1
+                and selected is not None
+                and exact_tier_families[0].candidate_key
+                == selected.candidate_key
+            )
+        )
+        margin_failed = bool(
+            not legacy_single_compatible_exact
+            and proposal.margin_ppm < DEFAULT_POLICY.strong_margin_ppm
+        )
+        failed_local_gate = bool(
+            {
+                "ALERT_SNAPSHOT_MISSING",
+                "MARKET_UNKNOWN",
+                "TARGET_ROUTE_MISMATCH",
+            }.intersection(reasons)
+            or exact_family_ambiguous
+            or margin_failed
+            or (
+                not legacy_single_compatible_exact
+                and (risk_codes or untrusted_prefilled_id)
+            )
+        )
+        expected_margin_passed = bool(
+            not legacy_single_compatible_exact and not margin_failed
+        )
+        invalid_local_evidence = bool(
+            ("FROZEN_RESOLVER_EXACT_GATES_FAILED" in reasons)
+            != failed_local_gate
+            or ("AMBIGUOUS_CANDIDATES" in reasons)
+            != exact_family_ambiguous
+            or ("LOW_MARGIN" in reasons) != margin_failed
+            or ("MARGIN_GATE_PASSED" in reasons)
+            != expected_margin_passed
+            or not failed_local_gate
+        )
+        if (
+            (not non_supporting_ai and invalid_local_evidence)
+            or (
+                non_supporting_ai
+                and "FROZEN_RESOLVER_EXACT_GATES_FAILED" in reasons
+                and not failed_local_gate
+            )
+        ):
+            raise ContractError(
+                f"{label} frozen-resolver review evidence is inconsistent."
+            )
     expected_programme_reason = (
         "PROGRAMME_GATE_PENDING"
         if selected is not None
@@ -1101,7 +1665,11 @@ def _validate_proposal_decision(
     if proposal.state is DecisionState.PENDING_PROGRAMME and (
         selected is None
         or selected.programme_state is ProgrammeState.PASS
-        or proposal.score_ppm < DEFAULT_POLICY.minimum_candidate_score_ppm
+        or (
+            proposal.score_ppm < DEFAULT_POLICY.minimum_candidate_score_ppm
+            and not selected_frozen_exact
+            and not selected_storage_alias
+        )
         or "CATALOG_CORROBORATED" not in proposal.reason_codes
         or "PROTECTED_SEMANTICS_COMPATIBLE" not in proposal.reason_codes
         or "PROVIDER_REVALIDATION_REQUIRED" not in proposal.reason_codes
@@ -1109,6 +1677,14 @@ def _validate_proposal_decision(
         or "PROGRAMME_GATE_PASSED" in proposal.reason_codes
     ):
         raise ContractError(f"{label} PENDING_PROGRAMME evidence is inconsistent.")
+    if proposal.state is DecisionState.PENDING_PROGRAMME and selected_frozen_exact and (
+        "FROZEN_RESOLVER_EXACT_GATES_FAILED" in reasons
+        or "LANE_FROZEN_RESOLVER_EXACT" in reasons
+        or "FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE" in reasons
+    ):
+        raise ContractError(
+            f"{label} frozen-resolver pending evidence is inconsistent."
+        )
     if proposal.state is DecisionState.BLOCKED_ALERT and (
         tuple(proposal.reason_codes) != ("OPEN_SYNC_ALERT",)
         or proposal.candidates
@@ -1496,6 +2072,17 @@ def validate_bundle(
         maximum_bytes=MAX_MANIFEST_BYTES,
         label="manifest.json",
     )
+    manifest = _parse_manifest(manifest_raw)
+    _repository_targets, repository_aliases_sha256 = (
+        repository_curated_alias_targets()
+    )
+    if (
+        repository_aliases_sha256
+        != manifest.input_sha256["APPROVED_ALIASES"]
+    ):
+        raise ContractError(
+            "The repository alias file differs from the bundle input."
+        )
     summary_raw, summary_content, summary_digest = _canonical_document(
         target / "summary.json",
         maximum_bytes=MAX_SUMMARY_BYTES,
@@ -1504,8 +2091,6 @@ def validate_bundle(
     proposals, proposal_content, proposal_digest = _read_proposals(
         target / "proposals.jsonl"
     )
-    manifest = _parse_manifest(manifest_raw)
-
     if sha256_bytes(proposal_content) != proposal_digest:
         raise ContractError("The proposals file changed during validation.")
     if proposal_digest != manifest.proposals_sha256:

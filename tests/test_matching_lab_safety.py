@@ -16,7 +16,13 @@ from matching_lab.artifacts import (
     strict_json_loads,
     write_private_bundle,
 )
-from matching_lab.compat import automatch, streaming, sync
+from matching_lab.compat import (
+    automatch,
+    parse_candidate_context_v8,
+    parse_channel_context_v8,
+    streaming,
+    sync,
+)
 from matching_lab.models import (
     CandidateEvidence,
     ContractError,
@@ -27,7 +33,12 @@ from matching_lab.models import (
     safe_display_text,
     sha256_bytes,
 )
-from matching_lab.normalization import NameViews, protected_conflicts, words
+from matching_lab.normalization import (
+    NameViews,
+    protected_conflicts,
+    semantics_from_context,
+    words,
+)
 from matching_lab.pipeline import (
     _cohort_risk_codes,
     _decision,
@@ -416,6 +427,68 @@ class MatchingLabProtectedSemanticsTests(unittest.TestCase):
             ("MARKET_MISMATCH",),
         )
 
+    def test_uhd_quality_upgrade_is_a_one_way_conflict(self) -> None:
+        hd = ProtectedSemantics(quality="hd")
+        unspecified = ProtectedSemantics()
+        uhd = ProtectedSemantics(quality="uhd")
+
+        self.assertEqual(hd.quality, "HD")
+        self.assertIn(
+            "QUALITY_UPGRADE_MISMATCH",
+            protected_conflicts(hd, uhd, route_explicit=True),
+        )
+        self.assertIn(
+            "QUALITY_UPGRADE_MISMATCH",
+            protected_conflicts(unspecified, uhd, route_explicit=True),
+        )
+        self.assertNotIn(
+            "QUALITY_UPGRADE_MISMATCH",
+            protected_conflicts(uhd, hd, route_explicit=True),
+        )
+        self.assertNotIn(
+            "QUALITY_UPGRADE_MISMATCH",
+            protected_conflicts(hd, hd, route_explicit=True),
+        )
+
+    def test_real_hd_to_uhd_and_4k_contexts_are_blocked(self) -> None:
+        engine = automatch._load_frozen_engine()
+        cases = (
+            (
+                "FI: MTV LIIGA HD",
+                "FINLAND",
+                "MTV.Liiga.UHD.fi",
+                "MTV Liiga UHD",
+                "FINLAND1",
+                "FI",
+            ),
+            (
+                "IT: SKY SPORT HD",
+                "ITALY",
+                "Sky.Sport.4K.it",
+                "Sky Sport 4K",
+                "ITALY1",
+                "IT",
+            ),
+        )
+        for channel_name, category_name, epg_id, display_name, feed, region in cases:
+            with self.subTest(channel_name=channel_name, epg_id=epg_id):
+                query = parse_channel_context_v8(engine, channel_name, category_name)
+                candidate = parse_candidate_context_v8(
+                    engine,
+                    {
+                        "epg_id": epg_id,
+                        "display_name": display_name,
+                        "feed": feed,
+                        "region": region,
+                    },
+                )
+                conflicts = protected_conflicts(
+                    semantics_from_context(query, market=region),
+                    semantics_from_context(candidate, market=region),
+                    route_explicit=True,
+                )
+                self.assertIn("QUALITY_UPGRADE_MISMATCH", conflicts)
+
 
 class MatchingLabDecisionSafetyTests(unittest.TestCase):
     def test_row_eligibility_revalidates_prefilled_review_rows(self) -> None:
@@ -562,6 +635,26 @@ class MatchingLabDecisionSafetyTests(unittest.TestCase):
             },
         )
 
+    def test_uppercase_me_subbrand_is_a_conservative_edition(self) -> None:
+        context = _fake_context("ABC ME MELBOURNE")
+        subject = LabSubject(
+            server_id="server_3",
+            stream_id="259830",
+            channel_name="AU - ABC ME MELBOURNE",
+            category_id="australia",
+            category_name="|AU| AUSTRALIA",
+            row_guard_sha256=SHA_A,
+            provider_identity_sha256=SHA_B,
+            route_explicit=True,
+            market="AU",
+            route_plan=("AU",),
+            views=NameViews.from_context(context),
+            semantics=ProtectedSemantics(market="AU"),
+            context=context,
+        )
+
+        self.assertIn("RISK_EDITION_VARIANT", _cohort_risk_codes(subject))
+
     def test_real_parser_marks_rte2_and_dazn_f1_as_number_sensitive(self) -> None:
         engine = automatch._load_frozen_engine()
         cases = (
@@ -654,8 +747,998 @@ class MatchingLabDecisionSafetyTests(unittest.TestCase):
         self.assertEqual(selected, "")
         self.assertFalse(apply_eligible)
 
+    def test_trusted_alias_can_cross_score_gate_but_stays_read_only(self) -> None:
+        candidate = _candidate(
+            state=ProgrammeState.PASS,
+            methods=("CURATED_ALIAS_EXACT",),
+            score=DEFAULT_POLICY.strong_proposal_score_ppm - 1,
+        )
+        state, reasons, selected, apply_eligible = _decision(
+            subject=_subject(),
+            ranking=_ranking(candidate),
+            candidates=(candidate,),
+            blocked_alert=False,
+            eligibility_reason="",
+            unsupported=False,
+            policy=DEFAULT_POLICY,
+            alert_snapshot_present=True,
+        )
+        self.assertIs(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(selected, "c001")
+        self.assertIn("LANE_TRUSTED_ALIAS", reasons)
+        self.assertIn("TRUSTED_ALIAS_SCORE_OVERRIDE", reasons)
+        self.assertIn("SHADOW_ONLY_NO_WRITE_AUTHORITY", reasons)
+        self.assertFalse(apply_eligible)
+
+        low_margin = replace(
+            _ranking(candidate),
+            margin_ppm=DEFAULT_POLICY.strong_margin_ppm - 1,
+        )
+        state, reasons, _selected, apply_eligible = _decision(
+            subject=_subject(),
+            ranking=low_margin,
+            candidates=(candidate,),
+            blocked_alert=False,
+            eligibility_reason="",
+            unsupported=False,
+            policy=DEFAULT_POLICY,
+            alert_snapshot_present=True,
+        )
+        self.assertIs(state, DecisionState.NEEDS_REVIEW)
+        self.assertNotIn("LANE_TRUSTED_ALIAS", reasons)
+        self.assertFalse(apply_eligible)
+
+    def test_frozen_exact_is_supplemental_to_independent_auto_lanes(self) -> None:
+        standard = _candidate(
+            state=ProgrammeState.PASS,
+            methods=(
+                "FROZEN_RESOLVER_EXACT",
+                "STRICT_EXACT",
+                "TOKEN_RETRIEVAL",
+            ),
+            score=950_000,
+        )
+        alternate = replace(
+            _candidate(methods=("TOKEN_RETRIEVAL",), score=600_000),
+            candidate_key="c002",
+            epg_id="Other.Channel.us2",
+            display_name="Other Channel",
+        )
+
+        def ranking(top: CandidateEvidence) -> RankedCandidates:
+            return RankedCandidates(
+                candidates=(top, alternate),
+                compatible_count=2,
+                score_ppm=top.score_ppm,
+                margin_ppm=top.score_ppm - alternate.score_ppm,
+                tier=5,
+                work_candidates=2,
+            )
+
+        state, reasons, selected, apply_eligible = _decision(
+            subject=_subject(),
+            ranking=ranking(standard),
+            candidates=(standard, alternate),
+            blocked_alert=False,
+            eligibility_reason="",
+            unsupported=False,
+            policy=DEFAULT_POLICY,
+            alert_snapshot_present=True,
+        )
+        self.assertIs(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(selected, "c001")
+        self.assertIn("LANE_STANDARD_STRONG", reasons)
+        self.assertIn("FROZEN_RESOLVER_EXACT_TOP", reasons)
+        self.assertIn("MARGIN_GATE_PASSED", reasons)
+        self.assertNotIn("LANE_FROZEN_RESOLVER_EXACT", reasons)
+        self.assertNotIn("FROZEN_RESOLVER_EXACT_GATES_FAILED", reasons)
+        self.assertNotIn("AMBIGUOUS_CANDIDATES", reasons)
+        self.assertFalse(apply_eligible)
+
+        route_mismatch = replace(standard, region="CA")
+        state, reasons, _selected, apply_eligible = _decision(
+            subject=_subject(),
+            ranking=ranking(route_mismatch),
+            candidates=(route_mismatch, alternate),
+            blocked_alert=False,
+            eligibility_reason="",
+            unsupported=False,
+            policy=DEFAULT_POLICY,
+            alert_snapshot_present=True,
+        )
+        self.assertIs(state, DecisionState.NEEDS_REVIEW)
+        self.assertIn("TARGET_ROUTE_MISMATCH", reasons)
+        self.assertIn("FROZEN_RESOLVER_EXACT_GATES_FAILED", reasons)
+        self.assertNotIn("LANE_STANDARD_STRONG", reasons)
+        self.assertFalse(apply_eligible)
+
+        trusted_alias = replace(
+            standard,
+            methods=(
+                "CURATED_ALIAS_EXACT",
+                "FROZEN_RESOLVER_EXACT",
+                "STRICT_EXACT",
+            ),
+        )
+        state, reasons, selected, apply_eligible = _decision(
+            subject=_subject(),
+            ranking=ranking(trusted_alias),
+            candidates=(trusted_alias, alternate),
+            blocked_alert=False,
+            eligibility_reason="",
+            unsupported=False,
+            policy=DEFAULT_POLICY,
+            alert_snapshot_present=True,
+        )
+        self.assertIs(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(selected, "c001")
+        self.assertIn("LANE_TRUSTED_ALIAS", reasons)
+        self.assertIn("FROZEN_RESOLVER_EXACT_TOP", reasons)
+        self.assertNotIn("LANE_FROZEN_RESOLVER_EXACT", reasons)
+        self.assertNotIn("AMBIGUOUS_CANDIDATES", reasons)
+        self.assertFalse(apply_eligible)
+
+    def test_repository_curated_alias_has_a_narrow_score_margin_override(self) -> None:
+        repository_alias = _candidate(
+            state=ProgrammeState.PASS,
+            methods=(
+                "CURATED_ALIAS_EXACT",
+                "REPOSITORY_CURATED_ALIAS_EXACT",
+            ),
+            score=DEFAULT_POLICY.minimum_candidate_score_ppm - 1,
+        )
+        alternate = replace(
+            _candidate(methods=("TOKEN_RETRIEVAL",), score=700_000),
+            candidate_key="c002",
+            epg_id="Other.Channel.us2",
+            display_name="Other Channel",
+        )
+
+        def decide(
+            top: CandidateEvidence,
+            *,
+            candidates: tuple[CandidateEvidence, ...] | None = None,
+            alert_snapshot_present: bool = True,
+        ) -> tuple[DecisionState, tuple[str, ...], str, bool]:
+            values = candidates or (top, alternate)
+            ranking = RankedCandidates(
+                candidates=values,
+                compatible_count=sum(not item.conflicts for item in values),
+                score_ppm=top.score_ppm,
+                margin_ppm=0,
+                tier=6,
+                work_candidates=len(values),
+            )
+            return _decision(
+                subject=_subject(),
+                ranking=ranking,
+                candidates=values,
+                blocked_alert=False,
+                eligibility_reason="",
+                unsupported=False,
+                policy=DEFAULT_POLICY,
+                alert_snapshot_present=alert_snapshot_present,
+            )
+
+        state, reasons, selected, apply_eligible = decide(repository_alias)
+        self.assertIs(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(selected, "c001")
+        self.assertIn("LANE_REPOSITORY_CURATED_ALIAS", reasons)
+        self.assertIn("REPOSITORY_CURATED_ALIAS_ALLOWLISTED", reasons)
+        self.assertIn("REPOSITORY_CURATED_ALIAS_SCORE_OVERRIDE", reasons)
+        self.assertIn("REPOSITORY_CURATED_ALIAS_MARGIN_OVERRIDE", reasons)
+        self.assertNotIn("MARGIN_GATE_PASSED", reasons)
+        self.assertFalse(apply_eligible)
+
+        combined_exact = replace(
+            repository_alias,
+            methods=(
+                "CURATED_ALIAS_EXACT",
+                "FROZEN_RESOLVER_EXACT",
+                "REPOSITORY_CURATED_ALIAS_EXACT",
+            ),
+        )
+        state, reasons, selected, apply_eligible = decide(combined_exact)
+        self.assertIs(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(selected, "c001")
+        self.assertIn("LANE_REPOSITORY_CURATED_ALIAS", reasons)
+        self.assertIn("FROZEN_RESOLVER_EXACT_TOP", reasons)
+        self.assertIn("TARGET_ROUTE_AGREES", reasons)
+        self.assertNotIn("LANE_FROZEN_RESOLVER_EXACT", reasons)
+        self.assertFalse(apply_eligible)
+
+        ordinary_curated = replace(
+            repository_alias,
+            methods=("CURATED_ALIAS_EXACT",),
+        )
+        state, reasons, _selected, _apply_eligible = decide(ordinary_curated)
+        self.assertIs(state, DecisionState.ABSTAIN)
+        self.assertNotIn("LANE_REPOSITORY_CURATED_ALIAS", reasons)
+
+        state, reasons, _selected, _apply_eligible = decide(
+            repository_alias,
+            alert_snapshot_present=False,
+        )
+        self.assertIs(state, DecisionState.ABSTAIN)
+        self.assertNotIn("LANE_REPOSITORY_CURATED_ALIAS", reasons)
+
+        failed_programme = replace(
+            repository_alias,
+            programme_state=ProgrammeState.FAIL,
+        )
+        state, reasons, _selected, _apply_eligible = decide(failed_programme)
+        self.assertIs(state, DecisionState.ABSTAIN)
+        self.assertNotIn("LANE_REPOSITORY_CURATED_ALIAS", reasons)
+
+        second_curated = replace(
+            alternate,
+            methods=("CURATED_ALIAS_EXACT",),
+        )
+        state, reasons, _selected, _apply_eligible = decide(
+            repository_alias,
+            candidates=(repository_alias, second_curated),
+        )
+        self.assertIs(state, DecisionState.ABSTAIN)
+        self.assertNotIn("LANE_REPOSITORY_CURATED_ALIAS", reasons)
+
+        competing_frozen = replace(
+            alternate,
+            methods=("FROZEN_RESOLVER_EXACT",),
+        )
+        state, reasons, _selected, _apply_eligible = decide(
+            repository_alias,
+            candidates=(repository_alias, competing_frozen),
+        )
+        self.assertIsNot(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertNotIn("LANE_REPOSITORY_CURATED_ALIAS", reasons)
+
+        failed_competing_frozen = replace(
+            competing_frozen,
+            programme_state=ProgrammeState.FAIL,
+        )
+        state, reasons, selected, _apply_eligible = decide(
+            repository_alias,
+            candidates=(repository_alias, failed_competing_frozen),
+        )
+        self.assertIs(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(selected, "c001")
+        self.assertIn("LANE_REPOSITORY_CURATED_ALIAS", reasons)
+
+    def test_frozen_resolver_exact_requires_every_promotion_gate(self) -> None:
+        candidate = _candidate(
+            state=ProgrammeState.PASS,
+            methods=("FROZEN_RESOLVER_EXACT",),
+            score=DEFAULT_POLICY.minimum_candidate_score_ppm - 1,
+        )
+
+        def subject(**changes: object) -> SimpleNamespace:
+            values = vars(_subject()).copy()
+            values.update(changes)
+            return SimpleNamespace(**values)
+
+        def decide(
+            value: CandidateEvidence,
+            *,
+            current_subject: SimpleNamespace | None = None,
+            alert_snapshot_present: bool = True,
+            current_ranking: RankedCandidates | None = None,
+            risks: tuple[str, ...] = (),
+            evidence: tuple[str, ...] = (),
+        ) -> tuple[DecisionState, tuple[str, ...], str, bool]:
+            selected_ranking = current_ranking or _ranking(value)
+            return _decision(
+                subject=current_subject or _subject(),
+                ranking=selected_ranking,
+                candidates=selected_ranking.candidates,
+                blocked_alert=False,
+                eligibility_reason="",
+                unsupported=False,
+                policy=DEFAULT_POLICY,
+                alert_snapshot_present=alert_snapshot_present,
+                cohort_risk_codes=risks,
+                evidence_reason_codes=evidence,
+            )
+
+        state, reasons, selected, apply_eligible = decide(candidate)
+        self.assertIs(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(selected, "c001")
+        self.assertIn("FROZEN_RESOLVER_EXACT_TOP", reasons)
+        self.assertIn("FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE", reasons)
+        self.assertIn("LANE_FROZEN_RESOLVER_EXACT", reasons)
+        self.assertNotIn("MARGIN_GATE_PASSED", reasons)
+        self.assertIn("SHADOW_ONLY_NO_WRITE_AUTHORITY", reasons)
+        self.assertFalse(apply_eligible)
+
+        fuzzy_alternate = replace(
+            _candidate(
+                methods=("CHAR_NGRAM_RETRIEVAL", "TOKEN_RETRIEVAL"),
+                score=candidate.score_ppm - 200_000,
+            ),
+            candidate_key="c002",
+            epg_id="Other.Channel.us2",
+            display_name="Other Channel",
+        )
+        expanded_ranking = RankedCandidates(
+            candidates=(candidate, fuzzy_alternate),
+            compatible_count=2,
+            score_ppm=candidate.score_ppm,
+            margin_ppm=200_000,
+            tier=5,
+            work_candidates=2,
+        )
+        state, reasons, selected, apply_eligible = decide(
+            candidate,
+            current_ranking=expanded_ranking,
+        )
+        self.assertIs(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(selected, "c001")
+        self.assertIn("LANE_FROZEN_RESOLVER_EXACT", reasons)
+        self.assertIn("MARGIN_GATE_PASSED", reasons)
+        self.assertNotIn("AMBIGUOUS_CANDIDATES", reasons)
+        self.assertFalse(apply_eligible)
+
+        cases = (
+            (
+                "implicit market",
+                candidate,
+                subject(route_explicit=False, market="", route_plan=("US",)),
+                True,
+                DecisionState.NEEDS_REVIEW,
+                "MARKET_UNKNOWN",
+            ),
+            (
+                "diaspora multi route",
+                candidate,
+                subject(market="NA_DIASPORA", route_plan=("US", "CA")),
+                True,
+                DecisionState.NEEDS_REVIEW,
+                "MARKET_UNKNOWN",
+            ),
+            (
+                "programme fail",
+                replace(candidate, programme_state=ProgrammeState.FAIL),
+                _subject(),
+                True,
+                DecisionState.PENDING_PROGRAMME,
+                "PROGRAMME_GATE_FAILED",
+            ),
+            (
+                "semantic conflict",
+                replace(candidate, conflicts=("MARKET_MISMATCH",)),
+                _subject(),
+                True,
+                DecisionState.CONFLICT,
+                "PROTECTED_SEMANTICS_CONFLICT",
+            ),
+            (
+                "missing alert snapshot",
+                candidate,
+                _subject(),
+                False,
+                DecisionState.NEEDS_REVIEW,
+                "ALERT_SNAPSHOT_MISSING",
+            ),
+            (
+                "target route mismatch",
+                replace(candidate, region="CA"),
+                _subject(),
+                True,
+                DecisionState.NEEDS_REVIEW,
+                "TARGET_ROUTE_MISMATCH",
+            ),
+            (
+                "explicit market route mismatch",
+                candidate,
+                subject(market="MENA", route_plan=("US",)),
+                True,
+                DecisionState.NEEDS_REVIEW,
+                "TARGET_ROUTE_MISMATCH",
+            ),
+        )
+        for label, value, current_subject, alerts_present, expected, reason in cases:
+            with self.subTest(label=label):
+                state, reasons, _selected, apply_eligible = decide(
+                    value,
+                    current_subject=current_subject,
+                    alert_snapshot_present=alerts_present,
+                )
+                self.assertIs(state, expected)
+                self.assertIn(reason, reasons)
+                self.assertFalse(apply_eligible)
+
+        alternate = replace(
+            _candidate(
+                methods=("STRICT_EXACT",),
+                score=candidate.score_ppm - 200_000,
+            ),
+            candidate_key="c002",
+            epg_id="Good.Channel.us_locals1",
+            feed="US_LOCALS1",
+        )
+        ambiguous_ranking = RankedCandidates(
+            candidates=(candidate, alternate),
+            compatible_count=2,
+            score_ppm=candidate.score_ppm,
+            margin_ppm=200_000,
+            tier=5,
+            work_candidates=2,
+        )
+        state, reasons, selected, apply_eligible = decide(
+            candidate,
+            current_ranking=ambiguous_ranking,
+        )
+        self.assertIs(state, DecisionState.NEEDS_REVIEW)
+        self.assertEqual(selected, "c001")
+        self.assertIn("AMBIGUOUS_CANDIDATES", reasons)
+        self.assertIn("MARGIN_GATE_PASSED", reasons)
+        self.assertIn("FROZEN_RESOLVER_EXACT_GATES_FAILED", reasons)
+        self.assertFalse(apply_eligible)
+
+        # Preserve the audited legacy path: when the routed catalog contains
+        # only one compatible target, its original risk/prefill behavior and
+        # score/margin override remain unchanged.
+        legacy_low_score = replace(candidate, score_ppm=99_999)
+        legacy_low_ranking = RankedCandidates(
+            candidates=(legacy_low_score,),
+            compatible_count=1,
+            score_ppm=legacy_low_score.score_ppm,
+            margin_ppm=legacy_low_score.score_ppm,
+            tier=5,
+            work_candidates=1,
+        )
+        state, reasons, _selected, apply_eligible = decide(
+            legacy_low_score,
+            current_ranking=legacy_low_ranking,
+            risks=("RISK_EXPLICIT_NUMBER",),
+            evidence=(
+                "PREFILLED_ID_NOT_CORROBORATED",
+                "PREFILLED_ID_UNTRUSTED_EVIDENCE",
+            ),
+        )
+        self.assertIs(state, DecisionState.AUTO_ELIGIBLE)
+        self.assertIn("RISK_EXPLICIT_NUMBER", reasons)
+        self.assertIn("PREFILLED_ID_UNTRUSTED_EVIDENCE", reasons)
+        self.assertIn("LANE_FROZEN_RESOLVER_EXACT", reasons)
+        self.assertNotIn("MARGIN_GATE_PASSED", reasons)
+        self.assertFalse(apply_eligible)
+
+        state, reasons, _selected, apply_eligible = decide(
+            candidate,
+            current_ranking=expanded_ranking,
+            risks=("RISK_EXPLICIT_NUMBER",),
+        )
+        self.assertIs(state, DecisionState.NEEDS_REVIEW)
+        self.assertIn("RISK_EXPLICIT_NUMBER", reasons)
+        self.assertIn("FROZEN_RESOLVER_EXACT_GATES_FAILED", reasons)
+        self.assertFalse(apply_eligible)
+
+        close_fuzzy = replace(
+            fuzzy_alternate,
+            score_ppm=candidate.score_ppm - DEFAULT_POLICY.strong_margin_ppm + 1,
+        )
+        low_margin_ranking = RankedCandidates(
+            candidates=(candidate, close_fuzzy),
+            compatible_count=2,
+            score_ppm=candidate.score_ppm,
+            margin_ppm=DEFAULT_POLICY.strong_margin_ppm - 1,
+            tier=5,
+            work_candidates=2,
+        )
+        state, reasons, _selected, apply_eligible = decide(
+            candidate,
+            current_ranking=low_margin_ranking,
+        )
+        self.assertIs(state, DecisionState.NEEDS_REVIEW)
+        self.assertIn("LOW_MARGIN", reasons)
+        self.assertNotIn("AMBIGUOUS_CANDIDATES", reasons)
+        self.assertIn("FROZEN_RESOLVER_EXACT_GATES_FAILED", reasons)
+        self.assertFalse(apply_eligible)
+
+        state, reasons, _selected, apply_eligible = decide(
+            candidate,
+            current_ranking=expanded_ranking,
+            evidence=(
+                "PREFILLED_ID_NOT_CORROBORATED",
+                "PREFILLED_ID_UNTRUSTED_EVIDENCE",
+            ),
+        )
+        self.assertIs(state, DecisionState.NEEDS_REVIEW)
+        self.assertIn("PREFILLED_ID_UNTRUSTED_EVIDENCE", reasons)
+        self.assertIn("FROZEN_RESOLVER_EXACT_GATES_FAILED", reasons)
+        self.assertFalse(apply_eligible)
+
+        conflicted_exact = replace(candidate, conflicts=("MARKET_MISMATCH",))
+        compatible_fallback = replace(
+            _candidate(
+                methods=("CHAR_NGRAM_RETRIEVAL", "TOKEN_RETRIEVAL"),
+                score=900_000,
+            ),
+            candidate_key="c002",
+            epg_id="Fallback.Channel.us2",
+            display_name="Fallback Channel",
+        )
+        fallback_ranking = RankedCandidates(
+            candidates=(compatible_fallback, conflicted_exact),
+            compatible_count=1,
+            score_ppm=compatible_fallback.score_ppm,
+            margin_ppm=compatible_fallback.score_ppm,
+            tier=2,
+            work_candidates=2,
+        )
+        state, reasons, selected, apply_eligible = _decision(
+            subject=_subject(),
+            ranking=fallback_ranking,
+            candidates=fallback_ranking.candidates,
+            blocked_alert=False,
+            eligibility_reason="",
+            unsupported=False,
+            policy=DEFAULT_POLICY,
+            alert_snapshot_present=True,
+        )
+        self.assertIs(state, DecisionState.CONFLICT)
+        self.assertEqual(selected, "")
+        self.assertIn("FROZEN_RESOLVER_EXACT_SEMANTIC_CONFLICT", reasons)
+        self.assertFalse(apply_eligible)
+
 
 class MatchingLabRetrievalSafetyTests(unittest.TestCase):
+    def test_repository_override_accepts_identity_relationships_only(self) -> None:
+        targets, _digest = retrieval.repository_curated_alias_targets()
+
+        self.assertEqual(
+            targets[(NameViews.from_text("FXM").strict, "US")],
+            "FX.Movie.Channel.HD.us2",
+        )
+        self.assertNotIn(
+            (NameViews.from_text("BBC 2 Scotland").strict, "UK"),
+            targets,
+        )
+
+    def test_only_fixed_repository_aliases_receive_repository_authority(self) -> None:
+        subject_context = _fake_context("FXM")
+        candidate_context = _fake_context("FX Movie Channel")
+        subject = LabSubject(
+            server_id="server_2",
+            stream_id="608673",
+            channel_name="US FXM",
+            category_id="movies",
+            category_name="US | Movies",
+            row_guard_sha256=SHA_A,
+            provider_identity_sha256=SHA_B,
+            route_explicit=True,
+            market="US",
+            route_plan=("US",),
+            views=NameViews.from_context(subject_context),
+            semantics=ProtectedSemantics(market="US"),
+            context=subject_context,
+        )
+        raw = {
+            "epg_id": "FX.Movie.Channel.HD.us2",
+            "display_name": "FX Movie Channel",
+            "feed": "US2",
+            "region": "US",
+        }
+        _targets, repository_digest = (
+            retrieval.repository_curated_alias_targets()
+        )
+        with mock.patch.object(
+            retrieval,
+            "parse_candidate_context_v8",
+            return_value=candidate_context,
+        ):
+            repository_index = CandidateIndex(
+                engine=object(),
+                candidates=[raw],
+                repository_aliases_sha256=repository_digest,
+            )
+        repository_index.attach_resolver(
+            SimpleNamespace(
+                _approved_alias_match=mock.Mock(
+                    return_value={
+                        "epg_id": "FX.Movie.Channel.HD.us2",
+                        "match_method": "approved_knowledge",
+                    }
+                )
+            )
+        )
+        ranked = repository_index.rank(subject)
+        self.assertIn("CURATED_ALIAS_EXACT", ranked.candidates[0].methods)
+        self.assertIn(
+            "REPOSITORY_CURATED_ALIAS_EXACT",
+            ranked.candidates[0].methods,
+        )
+
+        with mock.patch.object(
+            retrieval,
+            "parse_candidate_context_v8",
+            return_value=candidate_context,
+        ):
+            in_memory_index = CandidateIndex(
+                engine=object(),
+                candidates=[raw],
+                aliases=(
+                    retrieval.AliasEdge(
+                        alias="FXM",
+                        market="US",
+                        epg_id="FX.Movie.Channel.HD.us2",
+                        provenance="curated",
+                    ),
+                ),
+            )
+        in_memory = in_memory_index.rank(subject)
+        self.assertIn("CURATED_ALIAS_EXACT", in_memory.candidates[0].methods)
+        self.assertNotIn(
+            "REPOSITORY_CURATED_ALIAS_EXACT",
+            in_memory.candidates[0].methods,
+        )
+
+        with self.assertRaisesRegex(ContractError, "changed after matcher setup"):
+            with mock.patch.object(
+                retrieval,
+                "parse_candidate_context_v8",
+                return_value=candidate_context,
+            ):
+                CandidateIndex(
+                    engine=object(),
+                    candidates=[raw],
+                    repository_aliases_sha256="0" * 64,
+                )
+
+    def test_attached_resolver_curated_alias_retrieves_current_catalog_target(self) -> None:
+        subject_context = _fake_context("Approved Alias")
+        candidate_context = _fake_context("Opaque Catalog Name")
+        subject = LabSubject(
+            server_id="server_1",
+            stream_id="101",
+            channel_name="Approved Alias",
+            category_id="general",
+            category_name="US | General",
+            row_guard_sha256=SHA_A,
+            provider_identity_sha256=SHA_B,
+            route_explicit=True,
+            market="US",
+            route_plan=("US",),
+            views=NameViews.from_context(subject_context),
+            semantics=ProtectedSemantics(market="US"),
+            context=subject_context,
+        )
+        raw = {
+            "epg_id": "opaque.station.us2",
+            "display_name": "Opaque Catalog Name",
+            "feed": "US2",
+            "region": "US",
+        }
+        with mock.patch.object(
+            retrieval,
+            "parse_candidate_context_v8",
+            return_value=candidate_context,
+        ):
+            index = CandidateIndex(engine=object(), candidates=[raw])
+        resolver = SimpleNamespace(
+            _approved_alias_match=mock.Mock(
+                return_value={"epg_id": "opaque.station.us2"}
+            )
+        )
+        index.attach_resolver(resolver)
+
+        ranked = index.rank(subject)
+
+        resolver._approved_alias_match.assert_called_once_with(subject_context)
+        self.assertEqual([item.epg_id for item in ranked.candidates], ["opaque.station.us2"])
+        self.assertIn("CURATED_ALIAS_EXACT", ranked.candidates[0].methods)
+        self.assertEqual(ranked.tier, 6)
+
+    def test_frozen_contextual_exact_retrieves_only_current_allowed_target(self) -> None:
+        subject_context = _fake_context("Provider Wrapped Name")
+        candidate_context = _fake_context("Opaque Catalog Name")
+        subject = LabSubject(
+            server_id="server_1",
+            stream_id="101",
+            channel_name="Provider Wrapped Name",
+            category_id="general",
+            category_name="US | General",
+            row_guard_sha256=SHA_A,
+            provider_identity_sha256=SHA_B,
+            route_explicit=True,
+            market="US",
+            route_plan=("US",),
+            views=NameViews.from_context(subject_context),
+            semantics=ProtectedSemantics(market="US"),
+            context=subject_context,
+        )
+        raw = {
+            "epg_id": "opaque.station.us2",
+            "display_name": "Opaque Catalog Name",
+            "feed": "US2",
+            "region": "US",
+        }
+        with mock.patch.object(
+            retrieval,
+            "parse_candidate_context_v8",
+            return_value=candidate_context,
+        ):
+            index = CandidateIndex(engine=object(), candidates=[raw])
+        resolver = SimpleNamespace(
+            _contextual_exact_match=mock.Mock(
+                return_value={
+                    "action": "AUTO_EPGSHARE",
+                    "source": "epgshare",
+                    "epg_id": "opaque.station.us2",
+                    "match_method": "canonical_identity",
+                }
+            )
+        )
+        index.attach_resolver(resolver)
+
+        ranked = index.rank(subject)
+
+        resolver._contextual_exact_match.assert_called_once_with(subject_context)
+        self.assertEqual([item.epg_id for item in ranked.candidates], ["opaque.station.us2"])
+        self.assertIn("FROZEN_RESOLVER_EXACT", ranked.candidates[0].methods)
+        self.assertEqual(ranked.tier, 5)
+
+    def test_frozen_contextual_exact_is_not_invoked_for_implicit_or_diaspora_route(self) -> None:
+        subject_context = _fake_context("Provider Wrapped Name")
+        candidate_context = _fake_context("Opaque Catalog Name")
+        raw = {
+            "epg_id": "opaque.station.us2",
+            "display_name": "Opaque Catalog Name",
+            "feed": "US2",
+            "region": "US",
+        }
+
+        for label, route_explicit, market, route_plan in (
+            ("implicit", False, "", ("US",)),
+            ("diaspora", True, "NA_DIASPORA", ("US", "CA")),
+        ):
+            with self.subTest(label=label), mock.patch.object(
+                retrieval,
+                "parse_candidate_context_v8",
+                return_value=candidate_context,
+            ):
+                index = CandidateIndex(engine=object(), candidates=[raw])
+                exact = mock.Mock(
+                    return_value={
+                        "action": "AUTO_EPGSHARE",
+                        "source": "epgshare",
+                        "epg_id": "opaque.station.us2",
+                        "match_method": "strict",
+                    }
+                )
+                index.attach_resolver(SimpleNamespace(_contextual_exact_match=exact))
+                subject = LabSubject(
+                    server_id="server_1",
+                    stream_id="101",
+                    channel_name="Provider Wrapped Name",
+                    category_id="general",
+                    category_name="General",
+                    row_guard_sha256=SHA_A,
+                    provider_identity_sha256=SHA_B,
+                    route_explicit=route_explicit,
+                    market=market,
+                    route_plan=route_plan,
+                    views=NameViews.from_context(subject_context),
+                    semantics=ProtectedSemantics(market=market),
+                    context=subject_context,
+                )
+
+                ranked = index.rank(subject)
+
+                exact.assert_not_called()
+                self.assertTrue(
+                    all(
+                        "FROZEN_RESOLVER_EXACT" not in candidate.methods
+                        for candidate in ranked.candidates
+                    )
+                )
+
+    def test_frozen_contextual_exact_rejects_untrusted_results(self) -> None:
+        subject_context = _fake_context("Provider Wrapped Name")
+        candidate_context = _fake_context("Opaque Catalog Name")
+        subject = LabSubject(
+            server_id="server_1",
+            stream_id="101",
+            channel_name="Provider Wrapped Name",
+            category_id="general",
+            category_name="US | General",
+            row_guard_sha256=SHA_A,
+            provider_identity_sha256=SHA_B,
+            route_explicit=True,
+            market="US",
+            route_plan=("US",),
+            views=NameViews.from_context(subject_context),
+            semantics=ProtectedSemantics(market="US"),
+            context=subject_context,
+        )
+        raw_candidates = [
+            {
+                "epg_id": "opaque.station.us2",
+                "display_name": "Opaque Catalog Name",
+                "feed": "US2",
+                "region": "US",
+            },
+            {
+                "epg_id": "opaque.station.ca2",
+                "display_name": "Opaque Canadian Name",
+                "feed": "CA2",
+                "region": "CA",
+            },
+        ]
+        invalid_results = (
+            {
+                "action": "REVIEW",
+                "source": "epgshare",
+                "epg_id": "opaque.station.us2",
+                "match_method": "strict",
+            },
+            {
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare_candidate",
+                "epg_id": "opaque.station.us2",
+                "match_method": "strict",
+            },
+            {
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare",
+                "epg_id": "opaque.station.us2",
+                "match_method": "near_exact_orthography",
+            },
+            {
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare",
+                "epg_id": "opaque.station.ca2",
+                "match_method": "strict",
+            },
+            {
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare",
+                "epg_id": "missing.station.us2",
+                "match_method": "strict",
+            },
+        )
+        for result in invalid_results:
+            with self.subTest(result=result), mock.patch.object(
+                retrieval,
+                "parse_candidate_context_v8",
+                side_effect=lambda _engine, row: _fake_context(row["display_name"]),
+            ):
+                index = CandidateIndex(engine=object(), candidates=raw_candidates)
+                index.attach_resolver(
+                    SimpleNamespace(_contextual_exact_match=mock.Mock(return_value=result))
+                )
+
+                ranked = index.rank(subject)
+
+                self.assertTrue(
+                    all(
+                        "FROZEN_RESOLVER_EXACT" not in candidate.methods
+                        for candidate in ranked.candidates
+                    )
+                )
+
+        for method in (
+            "fuzzy",
+            "safety_rule",
+            "exact_numbered_event_bank",
+            "panel",
+            "contextual_containment",
+            "near_exact_orthography",
+            "unknown_future_method",
+        ):
+            with self.subTest(method=method), mock.patch.object(
+                retrieval,
+                "parse_candidate_context_v8",
+                side_effect=lambda _engine, row: _fake_context(row["display_name"]),
+            ):
+                index = CandidateIndex(engine=object(), candidates=raw_candidates)
+                index.attach_resolver(
+                    SimpleNamespace(
+                        _contextual_exact_match=mock.Mock(
+                            return_value={
+                                "action": "AUTO_EPGSHARE",
+                                "source": "epgshare",
+                                "epg_id": "opaque.station.us2",
+                                "match_method": method,
+                            }
+                        )
+                    )
+                )
+
+                ranked = index.rank(subject)
+
+                self.assertTrue(
+                    all(
+                        "FROZEN_RESOLVER_EXACT" not in candidate.methods
+                        for candidate in ranked.candidates
+                    )
+                )
+
+    def test_curated_alias_target_outside_allowed_region_is_rejected(self) -> None:
+        subject_context = _fake_context("Approved Alias")
+        candidate_context = _fake_context("Opaque Catalog Name")
+        subject = LabSubject(
+            server_id="server_1",
+            stream_id="101",
+            channel_name="Approved Alias",
+            category_id="general",
+            category_name="US | General",
+            row_guard_sha256=SHA_A,
+            provider_identity_sha256=SHA_B,
+            route_explicit=True,
+            market="US",
+            route_plan=("US",),
+            views=NameViews.from_context(subject_context),
+            semantics=ProtectedSemantics(market="US"),
+            context=subject_context,
+        )
+        raw = {
+            "epg_id": "opaque.station.ca",
+            "display_name": "Opaque Catalog Name",
+            "feed": "CA1",
+            "region": "CA",
+        }
+        with mock.patch.object(
+            retrieval,
+            "parse_candidate_context_v8",
+            return_value=candidate_context,
+        ):
+            index = CandidateIndex(engine=object(), candidates=[raw])
+        index.attach_resolver(
+            SimpleNamespace(
+                _approved_alias_match=mock.Mock(
+                    return_value={"epg_id": "opaque.station.ca"}
+                )
+            )
+        )
+
+        ranked = index.rank(subject)
+
+        self.assertEqual(ranked.candidates, ())
+        self.assertEqual(ranked.work_candidates, 0)
+
+    def test_curated_alias_target_absent_from_current_catalog_is_ignored(self) -> None:
+        subject_context = _fake_context("Approved Alias")
+        candidate_context = _fake_context("Opaque Catalog Name")
+        subject = LabSubject(
+            server_id="server_1",
+            stream_id="101",
+            channel_name="Approved Alias",
+            category_id="general",
+            category_name="US | General",
+            row_guard_sha256=SHA_A,
+            provider_identity_sha256=SHA_B,
+            route_explicit=True,
+            market="US",
+            route_plan=("US",),
+            views=NameViews.from_context(subject_context),
+            semantics=ProtectedSemantics(market="US"),
+            context=subject_context,
+        )
+        raw = {
+            "epg_id": "opaque.station.us2",
+            "display_name": "Opaque Catalog Name",
+            "feed": "US2",
+            "region": "US",
+        }
+        with mock.patch.object(
+            retrieval,
+            "parse_candidate_context_v8",
+            return_value=candidate_context,
+        ):
+            index = CandidateIndex(engine=object(), candidates=[raw])
+        index.attach_resolver(
+            SimpleNamespace(
+                _approved_alias_match=mock.Mock(
+                    return_value={"epg_id": "missing.station.us2"}
+                )
+            )
+        )
+
+        ranked = index.rank(subject)
+
+        self.assertEqual(ranked.candidates, ())
+        self.assertEqual(ranked.work_candidates, 0)
+
     def test_attached_frozen_scorer_failure_aborts_instead_of_falling_back(self) -> None:
         context = _fake_context("Alpha News")
         subject = LabSubject(

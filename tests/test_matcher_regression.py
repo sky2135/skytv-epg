@@ -387,6 +387,143 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertEqual(brand.route_plan, ("US",))
         self.assertEqual(brand.wrapper_tokens, ())
 
+    def test_country_topics_override_only_coarse_provider_namespaces(self) -> None:
+        engine = load_engine("skytv_v8_country_topic_routes")
+        install_contextual_v8(engine)
+        cases = [
+            ("AR | Arabic", "MENA"),
+            ("AR | Argentina", "AR"),
+            ("SA | Latin", "LATAM"),
+            ("SA | Latin America", "LATAM"),
+            ("SA | South America", "LATAM"),
+            ("AM | Central America", "LATAM"),
+            ("SA | Saudi Arabia", "SA"),
+            ("|AR| SAOUDI", "SA"),
+            ("AF | Africa", "AFRICA"),
+            ("AF | Afghanistan", "AF"),
+            ("|BLN| GENERAL", "EXYU"),
+            ("|BLN| SERBIA", "RS"),
+            ("|BLN| BOSNIA", "BA"),
+            ("|EU| RUSSIA", "RU"),
+            ("EUROPE | TURKEY", "TR"),
+            ("|EU| ISRAEL", "IL"),
+            ("|AS| PAKISTAN", "PK"),
+            ("|AS| MALAYSIA", "MY"),
+            ("|AR| UAE", "AE"),
+            ("|AS| AUSTRALIA", "AU"),
+            ("|AS| NEW ZEALAND", "NZ"),
+            ("|AS| PHILIPPINES", "PH"),
+            ("|EU| GERMANY", "DE"),
+            ("|EU| AUSTRIA", "AT"),
+            ("|EU| NORWAY", "NO"),
+            ("|EU| FINLAND", "FI"),
+            ("|EU| FRANCE SPORTS", "FR"),
+            ("|AM| CANADA DAZN PPV", "CA"),
+        ]
+        for category, expected_market in cases:
+            with self.subTest(category=category):
+                query = engine.parse_channel_context_v8("Example Channel", category)
+                self.assertEqual(query.explicit_market, expected_market)
+                self.assertEqual(query.route_plan, (expected_market,))
+                self.assertTrue(query.route_explicit)
+
+    def test_event_titles_do_not_override_coarse_provider_namespaces(self) -> None:
+        engine = load_engine("skytv_v8_country_event_title_routes")
+        install_contextual_v8(engine)
+        cases = [
+            ("|AR| AUSTRALIAN OPEN", "MENA"),
+            ("|EU| FRENCH OPEN", "EU"),
+            ("|EU| FRENCH CONNECTION", "EU"),
+            ("|AR| TURKISH AIRLINES EUROLEAGUE", "MENA"),
+        ]
+        for category, expected_market in cases:
+            with self.subTest(category=category):
+                query = engine.parse_channel_context_v8("Example Channel", category)
+                self.assertEqual(query.explicit_market, expected_market)
+                self.assertEqual(query.route_plan, (expected_market,))
+                self.assertTrue(query.route_explicit)
+
+    def test_canadian_language_namespace_stays_canadian(self) -> None:
+        engine = load_engine("skytv_v8_canadian_language_namespace")
+        install_contextual_v8(engine)
+
+        context_only = engine.parse_channel_context_v8("Example Channel", "CA | French")
+        self.assertEqual(context_only.category_namespace, "CA")
+        self.assertEqual(context_only.category_market, "CA")
+        self.assertEqual(context_only.route_plan, ("CA",))
+        self.assertTrue(context_only.route_explicit)
+        self.assertIn("french", context_only.languages)
+
+        for channel, expected_core in (
+            ("CA Teletoon", "Teletoon"),
+            ("CA VISION", "VISION"),
+            ("CA Disney XD", "Disney XD"),
+            ("CA ICI Radio Tele Toronto HD", "ICI Radio Tele Toronto HD"),
+        ):
+            with self.subTest(channel=channel):
+                query = engine.parse_channel_context_v8(channel, "CA | French")
+                self.assertEqual(query.core_name, expected_core)
+                self.assertEqual(query.route_plan, ("CA",))
+                self.assertTrue(query.route_explicit)
+
+    def test_anchored_parenthetical_country_wrappers_are_conservative(self) -> None:
+        engine = load_engine("skytv_v8_parenthetical_country_routes")
+        install_contextual_v8(engine)
+
+        mexico = engine.parse_channel_context_v8("(MX) Canal Once", "Latin")
+        self.assertEqual(mexico.core_name, "Canal Once")
+        self.assertEqual(mexico.route_plan, ("MX",))
+        self.assertEqual(mexico.wrapper_tokens, ("(MX)",))
+
+        nested_provider = engine.parse_channel_context_v8(
+            "(MX) (IZ) Canal Once", "Latin"
+        )
+        self.assertEqual(nested_provider.core_name, "Canal Once")
+        self.assertEqual(nested_provider.route_plan, ("MX",))
+        self.assertEqual(nested_provider.wrapper_tokens, ("(MX)", "(IZ)"))
+
+        ambiguous_arabic = engine.parse_channel_context_v8(
+            "(AR) Arabic News", "AR | Arabic"
+        )
+        self.assertEqual(ambiguous_arabic.core_name, "(AR) Arabic News")
+        self.assertEqual(ambiguous_arabic.route_plan, ("MENA",))
+        self.assertEqual(ambiguous_arabic.wrapper_tokens, ())
+
+        ambiguous_saudi = engine.parse_channel_context_v8(
+            "(SA) Latin News", "SA | Latin"
+        )
+        self.assertEqual(ambiguous_saudi.core_name, "(SA) Latin News")
+        self.assertEqual(ambiguous_saudi.route_plan, ("LATAM",))
+        self.assertEqual(ambiguous_saudi.wrapper_tokens, ())
+
+        ambiguous_afghan = engine.parse_channel_context_v8(
+            "(AF) Africa News", "AF | Africa"
+        )
+        self.assertEqual(ambiguous_afghan.core_name, "(AF) Africa News")
+        self.assertEqual(ambiguous_afghan.route_plan, ("AFRICA",))
+        self.assertEqual(ambiguous_afghan.wrapper_tokens, ())
+
+        argentina = engine.parse_channel_context_v8(
+            "(AR) Claro 24H TVE", "Argentina"
+        )
+        self.assertEqual(argentina.core_name, "Claro 24H TVE")
+        self.assertEqual(argentina.route_plan, ("AR",))
+        self.assertEqual(argentina.wrapper_tokens, ("(AR)",))
+
+        # IZ is not globally disposable, and an arbitrary second parenthetical
+        # remains part of the brand even after a valid country wrapper.
+        standalone_unknown = engine.parse_channel_context_v8(
+            "(IZ) Canal Once", "Latin"
+        )
+        self.assertEqual(standalone_unknown.core_name, "(IZ) Canal Once")
+        self.assertEqual(standalone_unknown.wrapper_tokens, ())
+
+        arbitrary_nested = engine.parse_channel_context_v8(
+            "(MX) (Cinema) Canal Once", "Latin"
+        )
+        self.assertEqual(arbitrary_nested.core_name, "(Cinema) Canal Once")
+        self.assertEqual(arbitrary_nested.wrapper_tokens, ("(MX)",))
+
     def test_fuzzy_similarity_is_never_automatic(self) -> None:
         engine = load_engine("skytv_v8_fuzzy_policy")
         resolver = install_contextual_v8(engine)
@@ -435,6 +572,102 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertEqual(match["action"], "AUTO_EPGSHARE")
         self.assertEqual(str(match["epg_id"]).casefold(), "ptc.punjabi.in")
         self.assertEqual(match["match_method"], "approved_knowledge")
+
+    def test_reviewed_cross_server_aliases_are_market_and_variant_scoped(self) -> None:
+        engine = load_engine("skytv_v8_reviewed_cross_server_aliases")
+        resolver = install_contextual_v8(engine)
+        catalog_rows = (
+            ("RTSH.1.al", "ALL_AL", "AL"),
+            ("Realitatea.Plus.ro", "ALL_RO", "RO"),
+            ("SkyRacing1.au", "ALL_AU", "AU"),
+            ("SkyRacing2.au", "ALL_AU", "AU"),
+            ("7Sydney.au", "ALL_AU", "AU"),
+            ("9Perth.au", "ALL_AU", "AU"),
+            ("[HORSECT].Horse.&.Country.TV.se", "ALL_SE", "SE"),
+            ("3.Plus.al", "ALL_AL", "AL"),
+            ("TLC.Balkans.bg", "ALL_BG", "BG"),
+            ("National.Geographic.Wild.ro", "ALL_RO", "RO"),
+            ("STAR.gr", "ALL_GR", "GR"),
+            ("Etno.TV.ro", "ALL_RO", "RO"),
+            ("BBC.Two.HD.uk", "UK1", "UK"),
+            ("FILM.CAFE.ro", "ALL_RO", "RO"),
+            ("EXP.Histori.al", "ALL_AL", "AL"),
+            ("Canal+.Sport.fr", "ALL_FR", "FR"),
+            ("News24.au", "ALL_AU", "AU"),
+            ("USA.Network.HD.us2", "US2", "US"),
+            ("Hub.Premier.1.sg", "ALL_SG", "SG"),
+            ("TVJ.Sports.jm", "ALL_JM", "JM"),
+        )
+        candidates = []
+        for epg_id, feed, region in catalog_rows:
+            display_name = engine.epg_id_to_name(epg_id)
+            candidates.append(
+                {
+                    "epg_id": epg_id,
+                    "feed": feed,
+                    "region": region,
+                    "display_name": display_name,
+                    "normalized": engine.normalize_name(display_name),
+                }
+            )
+        resolver.prepare(candidates, {})
+        resolver.load_approved_aliases(APPROVED_ALIASES_PATH)
+
+        cases = (
+            ("EUROPE | ALBANIA", "ALB: RTSH 1", "RTSH.1.al"),
+            ("EUROPE | ROMANIA", "RO: REALITATEA PLUS", "Realitatea.Plus.ro"),
+            ("AUSTRALIA", "AU: SKY RACING 1 HD", "SkyRacing1.au"),
+            ("|AU| AUSTRALIA", "AU - SKY RACING 1 HD", "SkyRacing1.au"),
+            ("ASIA | AUSTRALIA", "|AU| SKY Racing 2 HD", "SkyRacing2.au"),
+            ("|AU| AUSTRALIA", "AU - SKY RACING 2 HD", "SkyRacing2.au"),
+            ("ASIA | AUSTRALIA", "|AU| Channel 7 Sydney HD", "7Sydney.au"),
+            ("|AU| AUSTRALIA", "AU - CHANNEL 7 SYDNEY HD", "7Sydney.au"),
+            ("ASIA | AUSTRALIA", "|AU| Channel 9 Perth", "9Perth.au"),
+            ("|AU| AUSTRALIA", "AU - CHANNEL 9 PERTH", "9Perth.au"),
+            ("EUROPE | SWEDEN", "SE: Horse & Country", "[HORSECT].Horse.&.Country.TV.se"),
+            ("|EU| SWEDEN HD", "SE - HORSE & COUNTRY", "[HORSECT].Horse.&.Country.TV.se"),
+            ("EUROPE | ALBANIA", "ALB: Tring 3+", "3.Plus.al"),
+            ("EUROPE | BULGARIA", "BG: TLC", "TLC.Balkans.bg"),
+            ("EUROPE | ROMANIA", "RO: NAT GEO WILD", "National.Geographic.Wild.ro"),
+            ("EUROPE | GREEK", "GR: STAR", "STAR.gr"),
+            ("EUROPE | ROMANIA", "RO: ETNO", "Etno.TV.ro"),
+            ("|UK| GENERAL", "UK - BBC TWO SCOTLAND", "BBC.Two.HD.uk"),
+            ("EUROPE | ROMANIA", "RO: FILM CAFE", "FILM.CAFE.ro"),
+            ("EUROPE | ALBANIA", "ALB: Explorer Histori", "EXP.Histori.al"),
+            ("|EU| FRANCE SPORTS", "FR - CANAL+ SPORT", "Canal+.Sport.fr"),
+        )
+        for category, channel, expected in cases:
+            with self.subTest(channel=channel):
+                _query, match = resolver.resolve(
+                    {"category_name": category, "channel_name": channel}
+                )
+                self.assertEqual(match["action"], "AUTO_EPGSHARE")
+                self.assertEqual(match["epg_id"], expected)
+                self.assertEqual(match["match_method"], "approved_knowledge")
+
+        approved_aliases = {
+            str(row.get("alias", "")) for row in resolver.approved_aliases
+        }
+        self.assertNotIn("au abc news 24", approved_aliases)
+        self.assertNotIn("usa network", approved_aliases)
+
+        for category, channel in (
+            ("EUROPE | ROMANIA", "RTSH 1"),
+            ("EUROPE | ALBANIA", "RTSH 2"),
+            ("EUROPE | ROMANIA", "REALITATEA"),
+            ("ASIA | AUSTRALIA", "AU | ABC News 24 HD"),
+            ("USA", "USA Network West"),
+            ("OTHER | HUB PREMIER", "Hub Premier 1 FHD"),
+            ("AFRICA | CARIBBEAN", "Carib TVJ Sports"),
+            ("|EU| FRANCE SPORTS", "FR - CANAL+ SPORT 360"),
+            ("|EU| FRANCE SPORTS", "FR - CANAL+ SPORT 1"),
+            ("EUROPE | POLAND", "PL - CANAL+ SPORT"),
+        ):
+            with self.subTest(blocked_channel=channel):
+                _query, match = resolver.resolve(
+                    {"category_name": category, "channel_name": channel}
+                )
+                self.assertNotEqual(match.get("match_method"), "approved_knowledge")
 
     def test_schedule_fingerprint_equivalence(self) -> None:
         engine = load_engine("skytv_v8_schedule")

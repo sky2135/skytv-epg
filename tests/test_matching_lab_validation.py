@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 from unittest import mock
 
 from matching_lab import LAB_VERSION, PROPOSAL_SCHEMA, RUN_MANIFEST_SCHEMA
+import matching_lab.ai as lab_ai
 import matching_lab.validation as validation
 from matching_lab.ai import PROMPT_VERSION
 from matching_lab.artifacts import package_code_sha256, write_private_bundle
@@ -31,7 +32,11 @@ from matching_lab.models import (
 )
 from matching_lab.normalization import lexical_cohort_risk_codes
 from matching_lab.policy import DEFAULT_POLICY
-from matching_lab.retrieval import mapping_row_guard, provider_identity_guard
+from matching_lab.retrieval import (
+    mapping_row_guard,
+    provider_identity_guard,
+    repository_curated_alias_targets,
+)
 from matching_lab.validation import validate_bundle
 
 
@@ -193,6 +198,7 @@ class MatchingLabValidationTests(unittest.TestCase):
             "maximum_requests": 10 if ai_enabled else 0,
         }
         input_hashes = {
+            "APPROVED_ALIASES": repository_curated_alias_targets()[1],
             "MAPPING_FILE": sha256_bytes(mapping_content),
             "MAPPING_TABLE": sync.mapping_table_fingerprint(table),
             "ALERTS_FILE": sha256_bytes(alert_content),
@@ -409,6 +415,16 @@ class MatchingLabValidationTests(unittest.TestCase):
         self.assertTrue(result.alerts_checked)
         self.assertEqual(result.counts["AI_REQUESTED"], 0)
 
+    def test_quality_upgrade_conflict_is_part_of_candidate_schema(self) -> None:
+        raw = _candidate("quality", 1).public_dict()
+        raw["conflicts"] = ["QUALITY_UPGRADE_MISMATCH"]
+        raw["semantics"]["quality"] = "UHD"
+
+        candidate = validation._parse_candidate(raw, line_number=1)
+
+        self.assertEqual(candidate.conflicts, ("QUALITY_UPGRADE_MISMATCH",))
+        self.assertEqual(candidate.semantics.quality, "UHD")
+
     def test_noncanonical_and_unknown_json_fields_fail_closed(self) -> None:
         noncanonical = self._build_bundle()
         manifest_path = noncanonical.bundle_dir / "manifest.json"
@@ -468,6 +484,30 @@ class MatchingLabValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "proposal_id"):
             validate_bundle(proposal_tamper.bundle_dir, as_of=VALID_AS_OF)
 
+    def test_resealed_bundle_cannot_hide_uhd_upgrade_conflict(self) -> None:
+        fixture = self._build_bundle()
+        proposal_path = fixture.bundle_dir / "proposals.jsonl"
+        manifest_path = fixture.bundle_dir / "manifest.json"
+        record = json.loads(proposal_path.read_text(encoding="utf-8"))
+        candidate = record["candidates"][0]
+        candidate["epg_id"] = "Example.Channel.1.UHD.us"
+        candidate["display_name"] = "Example Channel 1 UHD"
+        candidate["semantics"]["quality"] = "UHD"
+        self.assertNotIn("QUALITY_UPGRADE_MISMATCH", candidate["conflicts"])
+        record["proposal_id"] = sha256_json(
+            {key: value for key, value in record.items() if key != "proposal_id"}
+        )
+        proposal_content = canonical_json_bytes(record) + b"\n"
+        proposal_path.write_bytes(proposal_content)
+        manifest = _json(manifest_path)
+        manifest["proposals_sha256"] = sha256_bytes(proposal_content)
+        _write_json(manifest_path, manifest)
+
+        with self.assertRaisesRegex(
+            ContractError, "quality-conflict evidence is inconsistent"
+        ):
+            validate_bundle(fixture.bundle_dir, as_of=VALID_AS_OF)
+
     def test_duplicate_and_out_of_order_records_are_rejected(self) -> None:
         duplicate = self._build_bundle()
         proposal_path = duplicate.bundle_dir / "proposals.jsonl"
@@ -496,6 +536,649 @@ class MatchingLabValidationTests(unittest.TestCase):
         fixture = self._build_bundle(auto_apply=True)
         with self.assertRaisesRegex(ContractError, "requests auto-apply"):
             validate_bundle(fixture.bundle_dir, as_of=VALID_AS_OF)
+
+    def test_trusted_alias_score_override_is_exactly_scoped(self) -> None:
+        def reseal(
+            fixture: BundleFixture,
+            mutate: Any,
+        ) -> None:
+            proposal_path = fixture.bundle_dir / "proposals.jsonl"
+            manifest_path = fixture.bundle_dir / "manifest.json"
+            record = json.loads(proposal_path.read_text(encoding="utf-8"))
+            mutate(record)
+            record["proposal_id"] = sha256_json(
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != "proposal_id"
+                }
+            )
+            proposal_content = canonical_json_bytes(record) + b"\n"
+            proposal_path.write_bytes(proposal_content)
+            manifest = _json(manifest_path)
+            manifest["proposals_sha256"] = sha256_bytes(proposal_content)
+            _write_json(manifest_path, manifest)
+
+        def make_low_score_alias(record: dict[str, Any]) -> None:
+            top_score = DEFAULT_POLICY.strong_proposal_score_ppm - 1
+            second_score = DEFAULT_POLICY.human_review_score_ppm
+            for candidate, score in zip(
+                record["candidates"],
+                (top_score, second_score),
+                strict=True,
+            ):
+                candidate["score_ppm"] = score
+                candidate["features_ppm"] = {
+                    name: score for name in candidate["features_ppm"]
+                }
+            record["decision"]["score_ppm"] = top_score
+            record["decision"]["margin_ppm"] = top_score - second_score
+            record["decision"]["auto_apply_eligible"] = False
+            reasons = set(record["decision"]["reason_codes"])
+            reasons.add("TRUSTED_ALIAS_SCORE_OVERRIDE")
+            record["decision"]["reason_codes"] = sorted(reasons)
+
+        valid = self._build_bundle(auto_apply=True)
+        reseal(valid, make_low_score_alias)
+        result = validate_bundle(valid.bundle_dir, as_of=VALID_AS_OF)
+        self.assertEqual(result.proposals[0].state, DecisionState.AUTO_ELIGIBLE)
+        self.assertLess(
+            result.proposals[0].score_ppm,
+            DEFAULT_POLICY.strong_proposal_score_ppm,
+        )
+        self.assertIn(
+            "TRUSTED_ALIAS_SCORE_OVERRIDE",
+            result.proposals[0].reason_codes,
+        )
+
+        missing_reason = self._build_bundle(auto_apply=True)
+
+        def remove_required_reason(record: dict[str, Any]) -> None:
+            make_low_score_alias(record)
+            record["decision"]["reason_codes"].remove(
+                "TRUSTED_ALIAS_SCORE_OVERRIDE"
+            )
+
+        reseal(missing_reason, remove_required_reason)
+        with self.assertRaisesRegex(ContractError, "AUTO_ELIGIBLE evidence"):
+            validate_bundle(missing_reason.bundle_dir, as_of=VALID_AS_OF)
+
+        strong_alias = self._build_bundle(auto_apply=True)
+
+        def add_override_to_strong_alias(record: dict[str, Any]) -> None:
+            record["decision"]["auto_apply_eligible"] = False
+            reasons = set(record["decision"]["reason_codes"])
+            reasons.add("TRUSTED_ALIAS_SCORE_OVERRIDE")
+            record["decision"]["reason_codes"] = sorted(reasons)
+
+        reseal(strong_alias, add_override_to_strong_alias)
+        with self.assertRaisesRegex(ContractError, "AUTO_ELIGIBLE evidence"):
+            validate_bundle(strong_alias.bundle_dir, as_of=VALID_AS_OF)
+
+        non_alias = self._build_bundle(
+            stream_ids=("alpha",),
+            auto_apply=True,
+        )
+
+        def add_override_to_non_alias(record: dict[str, Any]) -> None:
+            record["decision"]["auto_apply_eligible"] = False
+            record["candidates"][0]["methods"] = ["STRICT_EXACT"]
+            reasons = set(record["decision"]["reason_codes"])
+            reasons.difference_update(
+                {"CURATED_ALIAS_EXACT", "LANE_TRUSTED_ALIAS"}
+            )
+            reasons.update(
+                {
+                    "LANE_STANDARD_STRONG",
+                    "STANDARD_LANE_THRESHOLD_PASSED",
+                    "TRUSTED_ALIAS_SCORE_OVERRIDE",
+                }
+            )
+            record["decision"]["reason_codes"] = sorted(reasons)
+
+        reseal(non_alias, add_override_to_non_alias)
+        with self.assertRaisesRegex(ContractError, "AUTO_ELIGIBLE evidence"):
+            validate_bundle(non_alias.bundle_dir, as_of=VALID_AS_OF)
+
+    def test_standard_lane_accepts_only_explained_supplemental_frozen_exact(self) -> None:
+        def reseal(
+            fixture: BundleFixture,
+            *,
+            remove_reason: str = "",
+            target_route_mismatch: bool = False,
+        ) -> None:
+            proposal_path = fixture.bundle_dir / "proposals.jsonl"
+            manifest_path = fixture.bundle_dir / "manifest.json"
+            record = json.loads(proposal_path.read_text(encoding="utf-8"))
+            record["candidates"][0]["methods"] = [
+                "FROZEN_RESOLVER_EXACT",
+                "STRICT_EXACT",
+            ]
+            decision = record["decision"]
+            decision["auto_apply_eligible"] = False
+            reasons = set(decision["reason_codes"])
+            reasons.difference_update(
+                {"CURATED_ALIAS_EXACT", "LANE_TRUSTED_ALIAS"}
+            )
+            reasons.update(
+                {
+                    "FROZEN_RESOLVER_EXACT_TOP",
+                    "LANE_STANDARD_STRONG",
+                    "STANDARD_LANE_THRESHOLD_PASSED",
+                    "TARGET_ROUTE_AGREES",
+                }
+            )
+            if target_route_mismatch:
+                record["candidates"][0]["region"] = "CA"
+                reasons.remove("TARGET_ROUTE_AGREES")
+                reasons.add("TARGET_ROUTE_MISMATCH")
+            if remove_reason:
+                reasons.remove(remove_reason)
+            decision["reason_codes"] = sorted(reasons)
+            record["proposal_id"] = sha256_json(
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != "proposal_id"
+                }
+            )
+            proposal_content = canonical_json_bytes(record) + b"\n"
+            proposal_path.write_bytes(proposal_content)
+            manifest = _json(manifest_path)
+            manifest["proposals_sha256"] = sha256_bytes(proposal_content)
+            _write_json(manifest_path, manifest)
+
+        valid = self._build_bundle(stream_ids=("alpha",), auto_apply=True)
+        reseal(valid)
+        proposal = validate_bundle(
+            valid.bundle_dir,
+            as_of=VALID_AS_OF,
+        ).proposals[0]
+        self.assertIs(proposal.state, DecisionState.AUTO_ELIGIBLE)
+        self.assertIn("LANE_STANDARD_STRONG", proposal.reason_codes)
+        self.assertIn("FROZEN_RESOLVER_EXACT_TOP", proposal.reason_codes)
+        self.assertNotIn("LANE_FROZEN_RESOLVER_EXACT", proposal.reason_codes)
+
+        incomplete = self._build_bundle(
+            stream_ids=("beta",),
+            auto_apply=True,
+        )
+        reseal(incomplete, remove_reason="FROZEN_RESOLVER_EXACT_TOP")
+        with self.assertRaisesRegex(
+            ContractError,
+            "frozen-resolver selection evidence",
+        ):
+            validate_bundle(incomplete.bundle_dir, as_of=VALID_AS_OF)
+
+        route_mismatch = self._build_bundle(
+            stream_ids=("gamma",),
+            auto_apply=True,
+        )
+        reseal(route_mismatch, target_route_mismatch=True)
+        with self.assertRaisesRegex(ContractError, "AUTO_ELIGIBLE evidence"):
+            validate_bundle(route_mismatch.bundle_dir, as_of=VALID_AS_OF)
+
+    def test_repository_curated_alias_override_is_independently_revalidated(self) -> None:
+        def reseal(
+            fixture: BundleFixture,
+            mutate: Any | None = None,
+            *,
+            with_frozen_exact: bool = False,
+        ) -> None:
+            proposal_path = fixture.bundle_dir / "proposals.jsonl"
+            manifest_path = fixture.bundle_dir / "manifest.json"
+            record = json.loads(proposal_path.read_text(encoding="utf-8"))
+            record["identity"]["channel_name"] = "US FXM"
+            record["identity"]["category_name"] = "US | Movies"
+            top_score = DEFAULT_POLICY.minimum_candidate_score_ppm - 1
+            top = record["candidates"][0]
+            top["epg_id"] = "FX.Movie.Channel.HD.us2"
+            top["display_name"] = "FX Movie Channel"
+            top["feed"] = "US2"
+            top["region"] = "US"
+            top["semantics"]["quality"] = "HD"
+            top["methods"] = [
+                "CURATED_ALIAS_EXACT",
+                "REPOSITORY_CURATED_ALIAS_EXACT",
+            ]
+            if with_frozen_exact:
+                top["methods"].insert(1, "FROZEN_RESOLVER_EXACT")
+            top["score_ppm"] = top_score
+            top["features_ppm"] = {
+                name: top_score for name in top["features_ppm"]
+            }
+            decision = record["decision"]
+            decision["score_ppm"] = top_score
+            decision["margin_ppm"] = 0
+            decision["auto_apply_eligible"] = False
+            reasons = set(decision["reason_codes"])
+            reasons.difference_update(
+                {
+                    "CURATED_ALIAS_EXACT",
+                    "LANE_TRUSTED_ALIAS",
+                    "MARGIN_GATE_PASSED",
+                }
+            )
+            reasons.update(
+                {
+                    "LANE_REPOSITORY_CURATED_ALIAS",
+                    "REPOSITORY_CURATED_ALIAS_ALLOWLISTED",
+                    "REPOSITORY_CURATED_ALIAS_MARGIN_OVERRIDE",
+                    "REPOSITORY_CURATED_ALIAS_SCORE_OVERRIDE",
+                }
+            )
+            if with_frozen_exact:
+                reasons.update(
+                    {
+                        "FROZEN_RESOLVER_EXACT_TOP",
+                        "TARGET_ROUTE_AGREES",
+                    }
+                )
+            decision["reason_codes"] = sorted(reasons)
+            if mutate is not None:
+                mutate(record)
+            record["proposal_id"] = sha256_json(
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != "proposal_id"
+                }
+            )
+            proposal_content = canonical_json_bytes(record) + b"\n"
+            proposal_path.write_bytes(proposal_content)
+            manifest = _json(manifest_path)
+            manifest["proposals_sha256"] = sha256_bytes(proposal_content)
+            _write_json(manifest_path, manifest)
+
+        valid = self._build_bundle(stream_ids=("alpha",), auto_apply=True)
+        reseal(valid)
+        proposal = validate_bundle(
+            valid.bundle_dir,
+            as_of=VALID_AS_OF,
+        ).proposals[0]
+        self.assertIs(proposal.state, DecisionState.AUTO_ELIGIBLE)
+        self.assertIn(
+            "LANE_REPOSITORY_CURATED_ALIAS",
+            proposal.reason_codes,
+        )
+        self.assertLess(
+            proposal.score_ppm,
+            DEFAULT_POLICY.minimum_candidate_score_ppm,
+        )
+        self.assertEqual(proposal.margin_ppm, 0)
+
+        combined = self._build_bundle(
+            stream_ids=("combined-frozen",),
+            auto_apply=True,
+        )
+        reseal(combined, with_frozen_exact=True)
+        combined_proposal = validate_bundle(
+            combined.bundle_dir,
+            as_of=VALID_AS_OF,
+        ).proposals[0]
+        self.assertIn(
+            "LANE_REPOSITORY_CURATED_ALIAS",
+            combined_proposal.reason_codes,
+        )
+        self.assertIn(
+            "FROZEN_RESOLVER_EXACT_TOP",
+            combined_proposal.reason_codes,
+        )
+        self.assertIn("TARGET_ROUTE_AGREES", combined_proposal.reason_codes)
+        self.assertNotIn(
+            "LANE_FROZEN_RESOLVER_EXACT",
+            combined_proposal.reason_codes,
+        )
+
+        def add_second_curated_target(record: dict[str, Any]) -> None:
+            second = record["candidates"][1]
+            second["epg_id"] = "ZZZ.Other.Curated.us2"
+            second["methods"] = ["CURATED_ALIAS_EXACT", "STRICT_EXACT"]
+            second["score_ppm"] = record["candidates"][0]["score_ppm"]
+            second["features_ppm"] = dict(
+                record["candidates"][0]["features_ppm"]
+            )
+
+        def add_competing_frozen_target(record: dict[str, Any]) -> None:
+            record["candidates"][1]["methods"] = ["FROZEN_RESOLVER_EXACT"]
+
+        invalid_cases = (
+            (
+                "non-repository method",
+                lambda record: record["candidates"][0].__setitem__(
+                    "methods", ["CURATED_ALIAS_EXACT"]
+                ),
+                "repository-curated reasons without candidate evidence",
+            ),
+            (
+                "different alias",
+                lambda record: record["identity"].__setitem__(
+                    "channel_name", "US Made Up Alias"
+                ),
+                "repository-curated alias evidence",
+            ),
+            (
+                "different target",
+                lambda record: record["candidates"][0].__setitem__(
+                    "epg_id", "Turner.Classic.Movies.HD.us2"
+                ),
+                "repository-curated alias evidence",
+            ),
+            (
+                "second curated target",
+                add_second_curated_target,
+                "AUTO_ELIGIBLE evidence",
+            ),
+            (
+                "competing frozen target",
+                add_competing_frozen_target,
+                "AUTO_ELIGIBLE evidence",
+            ),
+            (
+                "wrong target route",
+                lambda record: record["candidates"][0].__setitem__(
+                    "region", "CA"
+                ),
+                "repository-curated alias evidence",
+            ),
+            (
+                "missing score override",
+                lambda record: record["decision"]["reason_codes"].remove(
+                    "REPOSITORY_CURATED_ALIAS_SCORE_OVERRIDE"
+                ),
+                "AUTO_ELIGIBLE evidence",
+            ),
+            (
+                "missing margin override",
+                lambda record: record["decision"]["reason_codes"].remove(
+                    "REPOSITORY_CURATED_ALIAS_MARGIN_OVERRIDE"
+                ),
+                "AUTO_ELIGIBLE evidence",
+            ),
+        )
+        for label, mutate, message in invalid_cases:
+            with self.subTest(label=label):
+                fixture = self._build_bundle(
+                    stream_ids=(f"invalid-{label}",),
+                    auto_apply=True,
+                )
+                reseal(fixture, mutate)
+                with self.assertRaisesRegex(ContractError, message):
+                    validate_bundle(fixture.bundle_dir, as_of=VALID_AS_OF)
+
+        alias_hash_tamper = self._build_bundle()
+        manifest_path = alias_hash_tamper.bundle_dir / "manifest.json"
+        manifest = _json(manifest_path)
+        manifest["input_sha256"]["APPROVED_ALIASES"] = "0" * 64
+        _write_json(manifest_path, manifest)
+        with self.assertRaisesRegex(ContractError, "repository alias file"):
+            validate_bundle(alias_hash_tamper.bundle_dir, as_of=VALID_AS_OF)
+
+    def test_frozen_resolver_exact_lane_is_strictly_revalidated(self) -> None:
+        def reseal(
+            fixture: BundleFixture,
+            mutate: Any | None = None,
+        ) -> None:
+            proposal_path = fixture.bundle_dir / "proposals.jsonl"
+            manifest_path = fixture.bundle_dir / "manifest.json"
+            record = json.loads(proposal_path.read_text(encoding="utf-8"))
+            # A fuzzy runner-up may remain in the retained shortlist.  The
+            # frozen resolver lane requires one exact-tier family, not one
+            # compatible candidate in the entire routed catalog.
+            top_score = DEFAULT_POLICY.minimum_candidate_score_ppm - 1
+            record["candidates"][0]["methods"] = ["FROZEN_RESOLVER_EXACT"]
+            record["candidates"][0]["score_ppm"] = top_score
+            record["candidates"][0]["features_ppm"] = {
+                name: top_score
+                for name in record["candidates"][0]["features_ppm"]
+            }
+            runner_up_score = top_score - 200_000
+            record["candidates"][1]["methods"] = [
+                "CHAR_NGRAM_RETRIEVAL",
+                "TOKEN_RETRIEVAL",
+            ]
+            record["candidates"][1]["score_ppm"] = runner_up_score
+            record["candidates"][1]["features_ppm"] = {
+                name: runner_up_score
+                for name in record["candidates"][1]["features_ppm"]
+            }
+            decision = record["decision"]
+            decision["score_ppm"] = top_score
+            decision["margin_ppm"] = top_score - runner_up_score
+            decision["auto_apply_eligible"] = False
+            reasons = set(decision["reason_codes"])
+            reasons.difference_update(
+                {
+                    "CURATED_ALIAS_EXACT",
+                    "LANE_TRUSTED_ALIAS",
+                }
+            )
+            reasons.update(
+                {
+                    "FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE",
+                    "FROZEN_RESOLVER_EXACT_TOP",
+                    "LANE_FROZEN_RESOLVER_EXACT",
+                    "TARGET_ROUTE_AGREES",
+                }
+            )
+            decision["reason_codes"] = sorted(reasons)
+            if mutate is not None:
+                mutate(record)
+            record["proposal_id"] = sha256_json(
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != "proposal_id"
+                }
+            )
+            proposal_content = canonical_json_bytes(record) + b"\n"
+            proposal_path.write_bytes(proposal_content)
+            summary_path = fixture.bundle_dir / "summary.json"
+            summary = _json(summary_path)
+            summary["counts"]["PROGRAMME_IDS_CHECKED"] = len(
+                {candidate["epg_id"] for candidate in record["candidates"]}
+            )
+            summary_content = _write_json(summary_path, summary)
+            manifest = _json(manifest_path)
+            manifest["counts"] = dict(summary["counts"])
+            manifest["proposals_sha256"] = sha256_bytes(proposal_content)
+            manifest["summary_sha256"] = sha256_bytes(summary_content)
+            _write_json(manifest_path, manifest)
+
+        valid = self._build_bundle(
+            stream_ids=("alpha",),
+            auto_apply=True,
+        )
+        reseal(valid)
+        result = validate_bundle(valid.bundle_dir, as_of=VALID_AS_OF)
+        proposal = result.proposals[0]
+        self.assertIs(proposal.state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(proposal.margin_ppm, 200_000)
+        self.assertLess(
+            proposal.score_ppm,
+            DEFAULT_POLICY.minimum_candidate_score_ppm,
+        )
+        self.assertIn("FROZEN_RESOLVER_EXACT", proposal.candidates[0].methods)
+        self.assertNotIn(
+            "FROZEN_RESOLVER_EXACT", proposal.candidates[1].methods
+        )
+        self.assertIn("MARGIN_GATE_PASSED", proposal.reason_codes)
+        self.assertFalse(proposal.auto_apply_eligible)
+
+        # The original audited lane remains valid when there is exactly one
+        # compatible target.  Its score/margin override and legacy handling of
+        # protected/prefilled evidence must not be tightened by the expansion.
+        def make_legacy_single(record: dict[str, Any]) -> None:
+            record["candidates"] = record["candidates"][:1]
+            legacy_score = DEFAULT_POLICY.strong_margin_ppm - 1
+            record["candidates"][0]["score_ppm"] = legacy_score
+            record["candidates"][0]["features_ppm"] = {
+                name: legacy_score
+                for name in record["candidates"][0]["features_ppm"]
+            }
+            record["candidates"][0]["semantics"]["numbers"] = ["2"]
+            record["decision"]["score_ppm"] = legacy_score
+            record["decision"]["margin_ppm"] = legacy_score
+            reasons = set(record["decision"]["reason_codes"])
+            reasons.discard("COHORT_STANDARD")
+            reasons.discard("MARGIN_GATE_PASSED")
+            reasons.update(
+                {
+                    "COHORT_CONSERVATIVE",
+                    "PREFILLED_ID_NOT_CORROBORATED",
+                    "PREFILLED_ID_UNTRUSTED_EVIDENCE",
+                    "RISK_EXPLICIT_NUMBER",
+                }
+            )
+            record["decision"]["reason_codes"] = sorted(reasons)
+
+        legacy = self._build_bundle(
+            stream_ids=("alpha",),
+            auto_apply=True,
+        )
+        reseal(legacy, make_legacy_single)
+        legacy_proposal = validate_bundle(
+            legacy.bundle_dir,
+            as_of=VALID_AS_OF,
+        ).proposals[0]
+        self.assertIs(legacy_proposal.state, DecisionState.AUTO_ELIGIBLE)
+        self.assertEqual(len(legacy_proposal.candidates), 1)
+        self.assertLess(
+            legacy_proposal.margin_ppm,
+            DEFAULT_POLICY.strong_margin_ppm,
+        )
+        self.assertIn("RISK_EXPLICIT_NUMBER", legacy_proposal.reason_codes)
+        self.assertIn(
+            "PREFILLED_ID_UNTRUSTED_EVIDENCE",
+            legacy_proposal.reason_codes,
+        )
+        self.assertNotIn("MARGIN_GATE_PASSED", legacy_proposal.reason_codes)
+
+        evidence = AIReviewEvidence(
+            request_sha256="9" * 64,
+            model=lab_ai.DEFAULT_MODEL,
+            prompt_version=lab_ai.PROMPT_VERSION,
+            decision="ABSTAIN",
+            candidate_key="",
+            confidence="NONE",
+            cached=False,
+        )
+        outcome = lab_ai.AdvisoryOutcome(
+            review_id=proposal.proposal_id,
+            disposition=lab_ai.AdvisoryDisposition.ABSTAINED,
+            evidence=evidence,
+            suggested_candidate_key="",
+            requires_review=True,
+        )
+        demoted = lab_ai.attach_advisory(proposal, outcome)
+        self.assertIs(demoted.state, DecisionState.NEEDS_REVIEW)
+        self.assertNotIn("LANE_FROZEN_RESOLVER_EXACT", demoted.reason_codes)
+        self.assertNotIn(
+            "FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE", demoted.reason_codes
+        )
+        self.assertIn("FROZEN_RESOLVER_EXACT_TOP", demoted.reason_codes)
+        self.assertIn("TARGET_ROUTE_AGREES", demoted.reason_codes)
+
+        def make_second_candidate_exact(record: dict[str, Any]) -> None:
+            record["candidates"][1]["methods"] = ["STRICT_EXACT"]
+
+        def reduce_margin(record: dict[str, Any]) -> None:
+            top_score = record["candidates"][0]["score_ppm"]
+            runner_up_score = (
+                top_score - DEFAULT_POLICY.strong_margin_ppm + 1
+            )
+            record["candidates"][1]["score_ppm"] = runner_up_score
+            record["candidates"][1]["features_ppm"] = {
+                name: runner_up_score
+                for name in record["candidates"][1]["features_ppm"]
+            }
+            record["decision"]["margin_ppm"] = (
+                DEFAULT_POLICY.strong_margin_ppm - 1
+            )
+
+        def add_prefilled_warning(record: dict[str, Any]) -> None:
+            reasons = set(record["decision"]["reason_codes"])
+            reasons.update(
+                {
+                    "PREFILLED_ID_NOT_CORROBORATED",
+                    "PREFILLED_ID_UNTRUSTED_EVIDENCE",
+                }
+            )
+            record["decision"]["reason_codes"] = sorted(reasons)
+
+        def add_protected_risk(record: dict[str, Any]) -> None:
+            record["candidates"][0]["semantics"]["numbers"] = ["2"]
+            reasons = set(record["decision"]["reason_codes"])
+            reasons.remove("COHORT_STANDARD")
+            reasons.update(
+                {"COHORT_CONSERVATIVE", "RISK_EXPLICIT_NUMBER"}
+            )
+            record["decision"]["reason_codes"] = sorted(reasons)
+
+        invalid_cases = (
+            (
+                "missing exact method",
+                lambda record: record["candidates"][0].__setitem__(
+                    "methods", ["CURATED_ALIAS_EXACT"]
+                ),
+                "frozen-resolver selection reasons",
+            ),
+            (
+                "target route mismatch",
+                lambda record: record["candidates"][0].__setitem__("region", "CA"),
+                "target route",
+            ),
+            (
+                "missing score override",
+                lambda record: record["decision"]["reason_codes"].remove(
+                    "FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE"
+                ),
+                "AUTO_ELIGIBLE evidence",
+            ),
+            (
+                "missing margin reason",
+                lambda record: record["decision"]["reason_codes"].remove(
+                    "MARGIN_GATE_PASSED"
+                ),
+                "AUTO_ELIGIBLE evidence",
+            ),
+            (
+                "missing lane",
+                lambda record: record["decision"]["reason_codes"].remove(
+                    "LANE_FROZEN_RESOLVER_EXACT"
+                ),
+                "AUTO_ELIGIBLE evidence",
+            ),
+            (
+                "second exact-tier family",
+                make_second_candidate_exact,
+                "AUTO_ELIGIBLE evidence",
+            ),
+            (
+                "low margin",
+                reduce_margin,
+                "AUTO_ELIGIBLE evidence",
+            ),
+            (
+                "prefilled-ID warning",
+                add_prefilled_warning,
+                "AUTO_ELIGIBLE evidence",
+            ),
+            (
+                "protected risk",
+                add_protected_risk,
+                "AUTO_ELIGIBLE evidence",
+            ),
+        )
+        for label, mutate, message in invalid_cases:
+            with self.subTest(label=label):
+                fixture = self._build_bundle(
+                    stream_ids=("alpha",),
+                    auto_apply=True,
+                )
+                reseal(fixture, mutate)
+                with self.assertRaisesRegex(ContractError, message):
+                    validate_bundle(fixture.bundle_dir, as_of=VALID_AS_OF)
 
     def test_resealed_auto_state_without_alias_evidence_is_rejected(self) -> None:
         fixture = self._build_bundle()
@@ -555,6 +1238,37 @@ class MatchingLabValidationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ContractError, "passing programme evidence"):
             validate_bundle(fixture.bundle_dir, as_of=VALID_AS_OF)
+
+    def test_quarantined_programme_ids_are_replayed_by_exact_id(self) -> None:
+        self.assertEqual(
+            validation._expected_programme_quarantine_reason("KSA.sports.1.ae"),
+            "The exact EPG ID is quarantined for a cross-wired schedule.",
+        )
+        self.assertEqual(
+            validation._expected_programme_quarantine_reason("prime.tv.AL"),
+            "The exact EPG ID is quarantined because its guide contains only holding blocks.",
+        )
+        self.assertEqual(
+            validation._expected_programme_quarantine_reason("Al.Anwar.TV.2.ae"),
+            "The exact EPG ID is quarantined because unrelated IDs carry the same schedule.",
+        )
+        self.assertEqual(
+            validation._expected_programme_quarantine_reason("Safe.Channel.us"),
+            "",
+        )
+
+        proposal = self._build_bundle().proposals[0]
+        unsafe_candidate = replace(
+            proposal.candidates[0], epg_id="KSA.sports.1.ae"
+        )
+        unsafe_proposal = replace(
+            proposal,
+            candidates=(unsafe_candidate, *proposal.candidates[1:]),
+        )
+        with self.assertRaisesRegex(ContractError, "passing programme evidence"):
+            validation._validate_proposal_decision(
+                unsafe_proposal, line_number=1
+            )
 
     def test_resealed_candidate_score_without_feature_support_is_rejected(self) -> None:
         fixture = self._build_bundle()

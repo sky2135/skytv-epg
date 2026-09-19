@@ -15,13 +15,16 @@ from . import LAB_VERSION, PROPOSAL_SCHEMA, RUN_MANIFEST_SCHEMA
 from .ai import (
     DEFAULT_MODEL as DEFAULT_AI_MODEL,
     MAX_ADVISORY_REQUESTS,
+    MAX_ADVISORY_SHARDS,
     PROMPT_VERSION as AI_PROMPT_VERSION,
     AdvisoryCacheError,
     AdvisoryDisposition,
     attach_advisory,
+    proposals_for_advisory_shard,
     replay_cache_namespace_sha256,
     requests_from_proposals,
     review_advisories,
+    validate_advisory_shard,
     validate_model_name,
 )
 from .artifacts import (
@@ -37,6 +40,7 @@ from .models import (
     ProgrammeState,
     ProposalRecord,
     RunManifest,
+    retained_exact_tier_families,
     sha256_bytes,
     sha256_json,
 )
@@ -62,6 +66,30 @@ class ShadowRunResult:
     run_id: str
     proposal_count: int
     counts: Mapping[str, int]
+
+
+def _ai_config_sha256(
+    *,
+    enabled: bool,
+    model: str,
+    maximum_requests: int,
+    shard_count: int,
+    shard_index: int,
+    cache_namespace_sha256: str,
+) -> str:
+    """Bind the complete local advisory selection configuration to a run."""
+
+    return sha256_json(
+        {
+            "enabled": enabled,
+            "model": str(model or "") if enabled else "",
+            "prompt_version": AI_PROMPT_VERSION if enabled else "",
+            "maximum_requests": int(maximum_requests) if enabled else 0,
+            "shard_count": int(shard_count) if enabled else 0,
+            "shard_index": int(shard_index) if enabled else 0,
+            "cache_namespace_sha256": cache_namespace_sha256,
+        }
+    )
 
 
 def _parse_utc(value: str) -> datetime:
@@ -210,6 +238,44 @@ def _decision(
     if unsupported:
         reasons.update(("LANE_ABSTAIN", "UNSUPPORTED_CHANNEL_CLASS"))
         return DecisionState.ABSTAIN, tuple(sorted(reasons)), "", False
+    frozen_exact_conflicts = tuple(
+        candidate
+        for candidate in candidates
+        if "FROZEN_RESOLVER_EXACT" in candidate.methods and candidate.conflicts
+    )
+    if frozen_exact_conflicts:
+        reasons.update(
+            conflict
+            for candidate in frozen_exact_conflicts
+            for conflict in candidate.conflicts
+        )
+        reasons.update(
+            (
+                "FROZEN_RESOLVER_EXACT_SEMANTIC_CONFLICT",
+                "LANE_CONFLICT",
+                "PROTECTED_SEMANTICS_CONFLICT",
+            )
+        )
+        return DecisionState.CONFLICT, tuple(sorted(reasons)), "", False
+    storage_alias_conflicts = tuple(
+        candidate
+        for candidate in candidates
+        if "CURATED_STORAGE_ALIAS_EXACT" in candidate.methods and candidate.conflicts
+    )
+    if storage_alias_conflicts:
+        reasons.update(
+            conflict
+            for candidate in storage_alias_conflicts
+            for conflict in candidate.conflicts
+        )
+        reasons.update(
+            (
+                "CURATED_STORAGE_ALIAS_SEMANTIC_CONFLICT",
+                "LANE_CONFLICT",
+                "PROTECTED_SEMANTICS_CONFLICT",
+            )
+        )
+        return DecisionState.CONFLICT, tuple(sorted(reasons)), "", False
     compatible = tuple(candidate for candidate in candidates if not candidate.conflicts)
     if not compatible:
         if candidates:
@@ -219,18 +285,159 @@ def _decision(
         reasons.update(("LANE_ABSTAIN", "NO_CANDIDATE"))
         return DecisionState.ABSTAIN, tuple(sorted(reasons)), "", False
     top = compatible[0]
-    if top.score_ppm < policy.minimum_candidate_score_ppm:
+    frozen_resolver_exact_top = "FROZEN_RESOLVER_EXACT" in top.methods
+    curated_storage_alias_top = "CURATED_STORAGE_ALIAS_EXACT" in top.methods
+    repository_curated_alias_top = (
+        "REPOSITORY_CURATED_ALIAS_EXACT" in top.methods
+    )
+    one_explicit_route = bool(
+        subject.route_explicit and subject.market and len(subject.route_plan) == 1
+    )
+    target_route_agrees = bool(
+        one_explicit_route
+        and str(top.region or "").upper() == str(subject.route_plan[0]).upper()
+        and str(subject.market or "").upper() == str(subject.route_plan[0]).upper()
+    )
+    curated_alias_candidates = tuple(
+        candidate
+        for candidate in candidates
+        if "CURATED_ALIAS_EXACT" in candidate.methods
+    )
+    competing_frozen_exact = any(
+        candidate.candidate_key != top.candidate_key
+        and "FROZEN_RESOLVER_EXACT" in candidate.methods
+        and candidate.programme_state is not ProgrammeState.FAIL
+        for candidate in compatible
+    )
+    repository_curated_alias_gates_passed = bool(
+        repository_curated_alias_top
+        and "CURATED_ALIAS_EXACT" in top.methods
+        and len(curated_alias_candidates) == 1
+        and curated_alias_candidates[0].candidate_key == top.candidate_key
+        and not competing_frozen_exact
+        and one_explicit_route
+        and target_route_agrees
+        and alert_snapshot_present
+        and top.programme_state is ProgrammeState.PASS
+    )
+    repository_curated_alias_override_ready = bool(
+        repository_curated_alias_gates_passed
+        and (
+            top.score_ppm < policy.minimum_candidate_score_ppm
+            or ranking.margin_ppm < policy.strong_margin_ppm
+        )
+    )
+    if (
+        top.score_ppm < policy.minimum_candidate_score_ppm
+        and not frozen_resolver_exact_top
+        and not curated_storage_alias_top
+        and not repository_curated_alias_override_ready
+    ):
         reasons.update(("LANE_ABSTAIN", "LOW_CALIBRATED_CONFIDENCE"))
         return DecisionState.ABSTAIN, tuple(sorted(reasons)), "", False
     selected = top.candidate_key
     reasons.add("PROVIDER_REVALIDATION_REQUIRED")
     if not alert_snapshot_present:
         reasons.add("ALERT_SNAPSHOT_MISSING")
-    if not subject.route_explicit or not subject.market or len(subject.route_plan) != 1:
+    if not one_explicit_route:
         reasons.add("MARKET_UNKNOWN")
     else:
         reasons.add("MARKET_ROUTE_EXPLICIT")
-    if len(compatible) > 1 and ranking.margin_ppm < policy.strong_margin_ppm:
+    strong = (
+        top.score_ppm >= policy.strong_proposal_score_ppm
+        and ranking.margin_ppm >= policy.strong_margin_ppm
+        and one_explicit_route
+        and alert_snapshot_present
+    )
+    alias_exact = bool(
+        set(top.methods).intersection(
+            {
+                "HUMAN_ALIAS_EXACT",
+                "CURATED_ALIAS_EXACT",
+                "CURATED_STORAGE_ALIAS_EXACT",
+            }
+        )
+    )
+    trusted_alias_ready = (
+        alias_exact
+        and ranking.margin_ppm >= policy.strong_margin_ppm
+        and one_explicit_route
+        and (
+            not curated_storage_alias_top
+            or bool(
+                subject.market
+                and str(subject.market).upper()
+                == str(subject.route_plan[0]).upper()
+            )
+        )
+        and alert_snapshot_present
+    )
+    unique_strict_exact = bool(
+        "STRICT_EXACT" in top.methods and ranking.compatible_count == 1
+    )
+    exact_tier_families = retained_exact_tier_families(compatible)
+    unique_retained_exact_family = bool(
+        len(exact_tier_families) == 1
+        and exact_tier_families[0].candidate_key == top.candidate_key
+    )
+    untrusted_prefilled_id = bool(
+        {
+            "PREFILLED_ID_NOT_CORROBORATED",
+            "PREFILLED_ID_UNTRUSTED_EVIDENCE",
+        }.intersection(evidence_reason_codes)
+    )
+    legacy_single_compatible_exact = ranking.compatible_count == 1
+    expanded_exact_family_ready = bool(
+        ranking.compatible_count > 1
+        and unique_retained_exact_family
+        and ranking.margin_ppm >= policy.strong_margin_ppm
+        and not cohort_risk_codes
+        and not untrusted_prefilled_id
+    )
+    supplemental_exact_route_ready = bool(
+        not frozen_resolver_exact_top or target_route_agrees
+    )
+    trusted_alias_lane_ready = bool(
+        trusted_alias_ready and supplemental_exact_route_ready
+    )
+    conservative_strict_lane_ready = bool(
+        strong
+        and cohort_risk_codes
+        and unique_strict_exact
+        and supplemental_exact_route_ready
+    )
+    standard_strong_lane_ready = bool(
+        strong and not cohort_risk_codes and supplemental_exact_route_ready
+    )
+    independent_auto_lane_ready = bool(
+        trusted_alias_lane_ready
+        or conservative_strict_lane_ready
+        or standard_strong_lane_ready
+    )
+    if frozen_resolver_exact_top:
+        reasons.add("FROZEN_RESOLVER_EXACT_TOP")
+        reasons.add(
+            "TARGET_ROUTE_AGREES"
+            if target_route_agrees
+            else "TARGET_ROUTE_MISMATCH"
+        )
+    if repository_curated_alias_override_ready:
+        # A unique exact target from the pinned repository CSV does not depend
+        # on lexical score or fuzzy-candidate separation.
+        pass
+    elif frozen_resolver_exact_top:
+        if independent_auto_lane_ready:
+            # The independent lanes have already passed their ordinary margin
+            # threshold; exact resolver evidence is only supplemental here.
+            reasons.add("MARGIN_GATE_PASSED")
+        elif not legacy_single_compatible_exact:
+            if not unique_retained_exact_family:
+                reasons.add("AMBIGUOUS_CANDIDATES")
+            if ranking.margin_ppm < policy.strong_margin_ppm:
+                reasons.add("LOW_MARGIN")
+            else:
+                reasons.add("MARGIN_GATE_PASSED")
+    elif len(compatible) > 1 and ranking.margin_ppm < policy.strong_margin_ppm:
         reasons.update(("AMBIGUOUS_CANDIDATES", "LOW_MARGIN"))
     else:
         reasons.add("MARGIN_GATE_PASSED")
@@ -245,28 +452,40 @@ def _decision(
         reasons.add("LANE_PROGRAMME_VERIFICATION")
         return DecisionState.PENDING_PROGRAMME, tuple(sorted(reasons)), selected, False
     reasons.add("PROGRAMME_GATE_PASSED")
-    strong = (
-        top.score_ppm >= policy.strong_proposal_score_ppm
-        and ranking.margin_ppm >= policy.strong_margin_ppm
-        and subject.route_explicit
-        and len(subject.route_plan) == 1
-        and alert_snapshot_present
-    )
-    alias_exact = bool(
-        set(top.methods).intersection({"HUMAN_ALIAS_EXACT", "CURATED_ALIAS_EXACT"})
-    )
-    if strong and alias_exact:
-        reasons.add("CURATED_ALIAS_EXACT" if "CURATED_ALIAS_EXACT" in top.methods else "LEARNED_ALIAS_EXACT")
+    if repository_curated_alias_override_ready:
+        reasons.update(
+            (
+                "LANE_REPOSITORY_CURATED_ALIAS",
+                "REPOSITORY_CURATED_ALIAS_ALLOWLISTED",
+                "SHADOW_ONLY_NO_WRITE_AUTHORITY",
+            )
+        )
+        if top.score_ppm < policy.minimum_candidate_score_ppm:
+            reasons.add("REPOSITORY_CURATED_ALIAS_SCORE_OVERRIDE")
+        if ranking.margin_ppm < policy.strong_margin_ppm:
+            reasons.add("REPOSITORY_CURATED_ALIAS_MARGIN_OVERRIDE")
+        return DecisionState.AUTO_ELIGIBLE, tuple(sorted(reasons)), selected, False
+
+    if trusted_alias_lane_ready:
+        if curated_storage_alias_top:
+            reasons.update(
+                ("CURATED_STORAGE_ALIAS_EXACT", "STATIC_STORAGE_ROUTE_ALLOWLISTED")
+            )
+        else:
+            reasons.add(
+                "CURATED_ALIAS_EXACT"
+                if "CURATED_ALIAS_EXACT" in top.methods
+                else "LEARNED_ALIAS_EXACT"
+            )
+        if top.score_ppm < policy.strong_proposal_score_ppm:
+            reasons.add("TRUSTED_ALIAS_SCORE_OVERRIDE")
         # The shadow package has no Sheet writer.  AUTO_ELIGIBLE describes the
         # evidence tier; auto_apply_eligible stays false until a signed,
         # calibrated production policy is installed in the guarded writer.
         reasons.update(("LANE_TRUSTED_ALIAS", "SHADOW_ONLY_NO_WRITE_AUTHORITY"))
         return DecisionState.AUTO_ELIGIBLE, tuple(sorted(reasons)), selected, False
 
-    unique_strict_exact = bool(
-        "STRICT_EXACT" in top.methods and ranking.compatible_count == 1
-    )
-    if strong and cohort_risk_codes and unique_strict_exact:
+    if conservative_strict_lane_ready:
         # Conservative cohorts may cross the shadow evidence boundary only for
         # a genuinely unique strict identity.  Fuzzy, relaxed, compact and bag
         # matches remain human-reviewable even when their aggregate score is high.
@@ -279,7 +498,7 @@ def _decision(
         )
         return DecisionState.AUTO_ELIGIBLE, tuple(sorted(reasons)), selected, False
 
-    if strong and not cohort_risk_codes:
+    if standard_strong_lane_ready:
         reasons.update(
             (
                 "LANE_STANDARD_STRONG",
@@ -288,6 +507,32 @@ def _decision(
             )
         )
         return DecisionState.AUTO_ELIGIBLE, tuple(sorted(reasons)), selected, False
+
+    if frozen_resolver_exact_top:
+        if (
+            alert_snapshot_present
+            and one_explicit_route
+            and target_route_agrees
+            and (
+                legacy_single_compatible_exact
+                or expanded_exact_family_ready
+            )
+        ):
+            if top.score_ppm < policy.strong_proposal_score_ppm:
+                reasons.add("FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE")
+            reasons.update(
+                (
+                    "LANE_FROZEN_RESOLVER_EXACT",
+                    "SHADOW_ONLY_NO_WRITE_AUTHORITY",
+                )
+            )
+            return DecisionState.AUTO_ELIGIBLE, tuple(sorted(reasons)), selected, False
+        # Supplemental exact evidence cannot downgrade an independently safe
+        # lane. Preserve the original one-compatible-target path; expansion to
+        # a fuzzy shortlist requires one exact family and the additional
+        # margin, cohort, and prefilled-ID gates above.
+        reasons.update(("FROZEN_RESOLVER_EXACT_GATES_FAILED", "LANE_HUMAN_REVIEW"))
+        return DecisionState.NEEDS_REVIEW, tuple(sorted(reasons)), selected, False
 
     reasons.add("LANE_HUMAN_REVIEW")
     if strong:
@@ -366,6 +611,8 @@ def run_shadow(
     ai_model: str = DEFAULT_AI_MODEL,
     ai_cache_path: Path | None = None,
     ai_max_requests: int = MAX_ADVISORY_REQUESTS,
+    ai_shard_count: int = 1,
+    ai_shard_index: int = 0,
     ai_transport: Any | None = None,
     ai_sensitive_values: Sequence[str] = (),
     ledger_path: Path | None = None,
@@ -429,6 +676,12 @@ def run_shadow(
     expires_at = _utc_text(as_of_dt + timedelta(seconds=policy.expiry_seconds))
     as_of_epoch = int(as_of_dt.timestamp())
     ai_enabled = bool(str(ai_api_key or "").strip())
+    ai_shard_count, ai_shard_index = validate_advisory_shard(
+        ai_shard_count,
+        ai_shard_index,
+    )
+    if not ai_enabled and (ai_shard_count != 1 or ai_shard_index != 0):
+        raise ContractError("AI sharding is only valid when AI review is enabled.")
     if ai_enabled and ai_cache_path is None:
         raise ContractError("AI review requires a durable --ai-cache for replay safety.")
     ai_cache_namespace_sha256 = ""
@@ -526,6 +779,7 @@ def run_shadow(
             candidates=shared_candidates,
             xml_display_names=xml_names,
             aliases=aliases,
+            repository_aliases_sha256=runtime.approved_aliases_sha256,
             policy=policy,
         )
         index.attach_resolver(runtime.resolver)
@@ -579,6 +833,7 @@ def run_shadow(
         [[server_id, stream_id] for server_id, stream_id in sorted(open_alerts)]
     )
     input_hashes = {
+        "APPROVED_ALIASES": runtime_box[0].approved_aliases_sha256,
         "MAPPING_FILE": mapping_file_sha256,
         "MAPPING_TABLE": mapping_table_sha256,
         "ALERTS_FILE": alerts_file_sha256,
@@ -587,14 +842,13 @@ def run_shadow(
         "EPG_XML_CATALOG": one_pass.catalog.fingerprint_sha256,
         "EPG_TEXT": text_catalog_sha256,
         "EPG_TEXT_CATALOG": text_catalog.fingerprint_sha256,
-        "AI_CONFIG": sha256_json(
-            {
-                "enabled": ai_enabled,
-                "model": str(ai_model or "") if ai_enabled else "",
-                "prompt_version": AI_PROMPT_VERSION if ai_enabled else "",
-                "maximum_requests": int(ai_max_requests) if ai_enabled else 0,
-                "cache_namespace_sha256": ai_cache_namespace_sha256,
-            }
+        "AI_CONFIG": _ai_config_sha256(
+            enabled=ai_enabled,
+            model=ai_model,
+            maximum_requests=int(ai_max_requests),
+            shard_count=ai_shard_count,
+            shard_index=ai_shard_index,
+            cache_namespace_sha256=ai_cache_namespace_sha256,
         ),
     }
     run_id = sha256_json(
@@ -661,13 +915,43 @@ def run_shadow(
     )
     if ai_enabled:
         eligible_requests = requests_from_proposals(proposals)
+        if (
+            ai_shard_count > 1
+            and len(eligible_requests) > ai_shard_count * int(ai_max_requests)
+        ):
+            minimum_shards = (
+                len(eligible_requests) + int(ai_max_requests) - 1
+            ) // int(ai_max_requests)
+            raise ContractError(
+                "The AI shard plan cannot cover every eligible proposal; increase "
+                f"ai_shard_count to at least {minimum_shards} "
+                f"(maximum {MAX_ADVISORY_SHARDS})."
+            )
+        eligible_request_ids = {request.review_id for request in eligible_requests}
+        shard_proposals = proposals_for_advisory_shard(
+            (
+                proposal
+                for proposal in proposals
+                if proposal.proposal_id in eligible_request_ids
+            ),
+            shard_count=ai_shard_count,
+            shard_index=ai_shard_index,
+        )
+        shard_proposal_ids = {
+            proposal.proposal_id for proposal in shard_proposals
+        }
+        shard_requests = tuple(
+            request
+            for request in eligible_requests
+            if request.review_id in shard_proposal_ids
+        )
         server_by_proposal = {
             proposal.proposal_id: proposal.server_id for proposal in proposals
         }
         request_queues = {
             server_id: deque(
                 request
-                for request in eligible_requests
+                for request in shard_requests
                 if server_by_proposal[request.review_id] == server_id
             )
             for server_id in selected_servers

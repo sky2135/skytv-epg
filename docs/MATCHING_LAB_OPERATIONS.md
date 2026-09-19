@@ -140,6 +140,40 @@ inputs and `--as-of`. The three output files should be byte-identical. A
 changed input, changed policy/code/dependency, or changed evidence time must
 produce a different run identity.
 
+To inspect verified no-schedule streams separately, run the production dummy
+classifier against the same saved snapshot. It uses the complete saved lineup
+for numbered-bank evidence, requires the exact dummy ID in both XML and TXT,
+and keeps every OPEN-alert identity blocked:
+
+```bash
+mkdir -p .build/matching-lab/dummy-output
+.venv/bin/python -m matching_lab dummy-shadow \
+  --mappings-csv /absolute/private/snapshot/mappings.csv \
+  --alerts-csv /absolute/private/snapshot/sync_alerts.csv \
+  --epg-xml /absolute/private/snapshot/epgshare.xml.gz \
+  --epg-text /absolute/private/snapshot/epgshare.txt \
+  --as-of 2026-09-17T03:00:00Z \
+  --output-dir .build/matching-lab/dummy-output
+```
+
+This sibling directory contains `classifications.jsonl`, `summary.json`, and
+`manifest.json`. It is private and is not a normal Matching Lab proposal
+bundle. Every classification explicitly has `apply_eligible=false` and
+`write_authority=false`; the command has no Sheet writer. The audited ESPN+
+and FLO numbered-bank method is also excluded from the live production-write
+allowlist, so it can appear only as review evidence.
+
+Validate that private sidecar, including its hashes, read-only flags, exact
+dummy evidence, current Mapping row guards, and OPEN-alert state:
+
+```bash
+.venv/bin/python -m matching_lab validate-dummy \
+  --bundle-dir .build/matching-lab/dummy-output \
+  --mappings-csv /absolute/private/snapshot/mappings.csv \
+  --alerts-csv /absolute/private/snapshot/sync_alerts.csv \
+  --as-of 2026-09-17T03:01:00Z
+```
+
 Validate the canonical bundle, hashes, expiry, decisions, and current private
 row/alert guards without writing anything:
 
@@ -321,6 +355,16 @@ export GEMINI_API_KEY
   --ledger .build/matching-lab/history.sqlite3
 unset GEMINI_API_KEY
 ```
+
+One AI run reviews at most 1,000 eligible proposals. To cover a larger frozen
+pool without selecting the same first 1,000 again, keep every input, `--as-of`,
+cache, model, and shard count unchanged, then run each zero-based shard index
+into its own empty output directory. For example, four sibling runs use
+`--ai-shard-count 4` with `--ai-shard-index 0`, `1`, `2`, and `3`. Assignment is
+deterministic, disjoint, and complete across those four runs. If the chosen
+shard count cannot fit the full eligible pool under `--ai-limit`, the command
+stops before calling the model and reports the minimum shard count. The shard
+count and index are part of the hashed run inputs.
 
 ## Build and test the container locally
 

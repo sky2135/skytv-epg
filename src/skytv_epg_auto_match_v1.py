@@ -8,6 +8,8 @@ This module deliberately adds a narrower production boundary around it:
 * Server 1's native EPG ID is never supplied to the matcher;
 * only an explicit set of deterministic structural matcher methods may become
   automatic; fuzzy, containment, near-exact, and legacy methods remain REVIEW;
+* an audited cross-storage alias is accepted only when the pinned resolver
+  independently replays the same exact static-knowledge target;
 * a candidate is not enabled until the same combined XMLTV source snapshot
   declares the exact case-sensitive ID and its programme gate proves at least
   two informative entries spanning a six-hour future horizon;
@@ -36,7 +38,7 @@ from typing import Any, Iterable, Mapping, Sequence
 STRICT_MATCHER_VERSION = "8.4"
 STRICT_MATCHER_BUILD_ID = "SKYTV-CONTEXTUAL-RULES-8.4-2026-07-19"
 STRICT_MATCHER_SOURCE_SHA256 = (
-    "289d19993cf33caef3358f9f5b5d2989625c7659adc48494cb81c02610034f99"
+    "c051b3359e9bff43a8b05768922819ebcd76f56e7ab81f9432549630d7a09600"
 )
 STRICT_ENGINE_SOURCE_SHA256 = (
     "8040562b85758a6b0c7b59a7d0e7918f313f3ccf7829498401a8815d097bddf4"
@@ -51,6 +53,7 @@ MIN_FUTURE_HORIZON_SECONDS = 6 * 60 * 60
 SAFE_REAL_METHODS = frozenset(
     {
         "approved_knowledge",
+        "approved_storage_knowledge",
         "canonical_identity",
         "category_language_default",
         "descriptor_relaxed",
@@ -76,6 +79,7 @@ SAFE_DUMMY_METHODS = frozenset(
 DUMMY_REVIEW_METHODS = frozenset(
     {
         "safety_rule",
+        "exact_numbered_event_bank",
         "virtual_360_event_bank",
         "synthetic_numbered_genre_slot",
         "heading_placeholder",
@@ -351,6 +355,42 @@ def _has_adult_evidence(channel_name: str, category_name: str) -> bool:
     )
 
 
+def _exact_bank_category_key(value: object) -> str:
+    text = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", _text(value))).strip()
+    return re.sub(r"\s*\|\s*", "|", text).casefold()
+
+
+def _has_exact_numbered_event_bank_evidence(
+    *, epg_id: str, channel_name: str, category_name: str
+) -> bool:
+    """Independently recheck the v8.4 exact-bank claim at the write boundary."""
+    category = _exact_bank_category_key(category_name)
+    channel = re.sub(
+        r"\s+", " ", unicodedata.normalize("NFKC", _text(channel_name))
+    ).strip()
+    normalized_id = _text(epg_id).casefold()
+    if category == "sports|espn+" and normalized_id == "espn+.dummy.us":
+        return bool(re.fullmatch(
+            r"(?:\(\s*(?:US|AU)\s*\)\s+)?ESPN\s+PLAY\s+[1-9]\d{0,2}",
+            channel,
+            re.IGNORECASE,
+        ))
+    if category == "|na|usa espn+" and normalized_id == "espn+.dummy.us":
+        matched = re.fullmatch(
+            r"US\s*\(\s*ESPN\+\s+([0-9]{3})\s*\)\s*\|(?:\s*.*)?",
+            channel,
+            re.IGNORECASE,
+        )
+        return bool(matched and int(matched.group(1)) > 0)
+    if category == "|na|usa flo" and normalized_id == "flo.events.dummy.us":
+        return bool(re.fullmatch(
+            r"USA\s*-\s*FLO\s+[1-9]\d{0,2}\s*:(?:\s*.*)?",
+            channel,
+            re.IGNORECASE,
+        ))
+    return False
+
+
 def _safe_dummy_classification(
     *,
     method: str,
@@ -371,6 +411,13 @@ def _safe_dummy_classification(
     normalized_id = _text(epg_id).casefold()
     if normalized_method not in SAFE_DUMMY_METHODS:
         return False
+
+    if normalized_method == "exact_numbered_event_bank":
+        return _has_exact_numbered_event_bank_evidence(
+            epg_id=epg_id,
+            channel_name=channel_name,
+            category_name=category_name,
+        )
 
     numbered_targets = _NUMBERED_BANK_DUMMY_IDS.get(normalized_method)
     if numbered_targets is not None:
@@ -908,6 +955,39 @@ def _canonical_target(match: Mapping[str, Any]) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def _verified_storage_alias_replay(
+    resolver: Any,
+    query: Any,
+    match: Mapping[str, Any],
+) -> bool:
+    """Require the pinned resolver to replay one exact cross-storage alias."""
+
+    if _text(match.get("match_method")).casefold() != "approved_storage_knowledge":
+        return False
+    checker = getattr(resolver, "_approved_alias_match", None)
+    if not callable(checker):
+        return False
+    try:
+        replay = checker(query)
+    except Exception:
+        return False
+    if not isinstance(replay, Mapping):
+        return False
+    original_source, _original_feed, original_id = _canonical_target(match)
+    replay_source, _replay_feed, replay_id = _canonical_target(replay)
+    return bool(
+        original_id
+        and original_source == "epgshare01"
+        and replay_source == "epgshare01"
+        and replay_id == original_id
+        and _text(replay.get("action")).upper() == "AUTO_EPGSHARE"
+        and _text(replay.get("match_method")).casefold()
+        == "approved_storage_knowledge"
+        and not _text(match.get("second_epg_id"))
+        and not _text(replay.get("second_epg_id"))
+    )
+
+
 def _resolve_without_review_only_scans(
     resolver: Any,
     row: Mapping[str, Any],
@@ -1017,6 +1097,7 @@ def _proposal_from_match(
     query: Any,
     identity: MatcherIdentity,
     catalog: CatalogSnapshot,
+    storage_alias_verified: bool = False,
 ) -> MatchProposal:
     action = _text(match.get("action")).upper()
     method = _text(match.get("match_method")).casefold()
@@ -1086,7 +1167,19 @@ def _proposal_from_match(
         if _DUMMY_ID_RE.search(target_epg_id) or target_kinds != frozenset({"real"}):
             eligible = False
             rejection = "Target is a dummy or lacks unambiguous real-catalog type evidence"
-        elif len(target_regions) != 1 or _market_code(explicit_market) not in target_regions:
+        elif len(target_regions) != 1:
+            eligible = False
+            rejection = "Target catalog region is missing or ambiguous"
+        elif method == "approved_storage_knowledge":
+            if not storage_alias_verified:
+                eligible = False
+                rejection = (
+                    "Cross-storage target was not replayed from fixed approved knowledge"
+                )
+            elif _market_code(explicit_market) in target_regions:
+                eligible = False
+                rejection = "Cross-storage method returned a same-market target"
+        elif _market_code(explicit_market) not in target_regions:
             eligible = False
             rejection = "Target catalog region does not match the explicit channel market"
     elif action == "AUTO_DUMMY":
@@ -1299,6 +1392,11 @@ def propose_new_channel_matches(
             )
             if not isinstance(raw_match, Mapping):
                 raise TypeError("matcher result is not a mapping")
+            storage_alias_verified = _verified_storage_alias_replay(
+                resolver,
+                query,
+                raw_match,
+            )
             proposal = _proposal_from_match(
                 server_id=normalized_server,
                 stream_id=stream_id,
@@ -1308,6 +1406,7 @@ def propose_new_channel_matches(
                 query=query,
                 identity=matcher_identity,
                 catalog=catalog,
+                storage_alias_verified=storage_alias_verified,
             )
         except Exception as exc:  # Keep inventory sync useful while disabling automation.
             proposal = _review_only_proposal(
