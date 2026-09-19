@@ -8,6 +8,7 @@ import unittest
 import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,28 @@ PRIVATE_IDENTITY_COLUMNS = {
     "password",
 }
 CC0_URL = "https://creativecommons.org/publicdomain/zero/1.0/"
+CREATIVE_COMMONS_LICENSE_PATHS = {
+    "CC-BY-2.0": "/licenses/by/2.0",
+    "CC-BY-2.5": "/licenses/by/2.5",
+    "CC-BY-3.0": "/licenses/by/3.0",
+    "CC-BY-4.0": "/licenses/by/4.0",
+    "CC-BY-SA-2.0": "/licenses/by-sa/2.0",
+    "CC-BY-SA-3.0": "/licenses/by-sa/3.0",
+    "CC-BY-SA-4.0": "/licenses/by-sa/4.0",
+    "CC0-1.0": "/publicdomain/zero/1.0",
+}
+REVIEWED_PUBLIC_DOMAIN_LICENSES = frozenset(
+    {
+        "PD",
+        "PD-Bangladesh-PID",
+        "PD-Pakistan-US-1996",
+        "PD-Self",
+        "PD-US",
+        "PD-USGov",
+    }
+)
+LEGACY_CC0_DEED_URL = "http://creativecommons.org/publicdomain/zero/1.0/deed.en"
+PD_US_GOV_LICENSE_PATH = "/wiki/Template:PD-USGov-Military-Navy"
 SHA1_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
@@ -33,6 +56,43 @@ def read_catalog(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         reader = csv.DictReader(handle)
         rows = list(reader)
     return list(reader.fieldnames or ()), rows
+
+
+def assert_reviewed_portrait_license(
+    test: unittest.TestCase, row: dict[str, str]
+) -> None:
+    license_id = row["license_id"].strip()
+    license_url = row["license_url"].strip()
+    allowed_ids = set(CREATIVE_COMMONS_LICENSE_PATHS) | set(
+        REVIEWED_PUBLIC_DOMAIN_LICENSES
+    )
+    test.assertIn(license_id, allowed_ids)
+
+    parsed = urlparse(license_url)
+    test.assertIsNone(parsed.username)
+    test.assertIsNone(parsed.password)
+    test.assertFalse(parsed.query)
+
+    if license_id in CREATIVE_COMMONS_LICENSE_PATHS:
+        test.assertEqual(parsed.hostname, "creativecommons.org")
+        test.assertFalse(parsed.fragment)
+        expected_path = CREATIVE_COMMONS_LICENSE_PATHS[license_id]
+        if license_url == LEGACY_CC0_DEED_URL:
+            test.assertEqual(license_id, "CC0-1.0")
+        else:
+            test.assertEqual(parsed.scheme, "https")
+            test.assertEqual(parsed.path.rstrip("/"), expected_path)
+        return
+
+    test.assertEqual(parsed.scheme, "https")
+    test.assertEqual(parsed.hostname, "commons.wikimedia.org")
+    if license_id == "PD-USGov":
+        test.assertEqual(parsed.path, PD_US_GOV_LICENSE_PATH)
+        test.assertFalse(parsed.fragment)
+    else:
+        test.assertTrue(parsed.path.startswith("/wiki/File:"))
+        test.assertEqual(parsed.fragment, "Licensing")
+        test.assertEqual(license_url.removesuffix("#Licensing"), row["source_page_url"])
 
 
 def png_chunks(payload: bytes) -> list[tuple[bytes, bytes]]:
@@ -155,7 +215,7 @@ def assert_safe_background_free_svg(test: unittest.TestCase, path: Path) -> None
 class PublicIconCatalogTests(unittest.TestCase):
     def test_catalog_is_private_safe_and_assets_are_unique(self) -> None:
         fields, rows = read_catalog(CATALOG_PATH)
-        self.assertEqual(len(rows), 31)
+        self.assertGreaterEqual(len(rows), 31)
         self.assertTrue(
             PRIVATE_IDENTITY_COLUMNS.isdisjoint(field.casefold() for field in fields)
         )
@@ -263,7 +323,7 @@ class PublicIconCatalogTests(unittest.TestCase):
     def test_third_party_portraits_are_transparent_and_fully_attributed(self) -> None:
         _, rows = read_catalog(CATALOG_PATH)
         portraits = [row for row in rows if row["asset_kind"] == "person_photo"]
-        self.assertEqual(len(portraits), 7)
+        self.assertGreaterEqual(len(portraits), 7)
 
         for row in portraits:
             with self.subTest(asset=row["asset_id"]):
@@ -274,12 +334,7 @@ class PublicIconCatalogTests(unittest.TestCase):
                     )
                 )
                 self.assertTrue(row["creator"].strip())
-                self.assertTrue(row["license_id"].startswith("CC-"))
-                self.assertTrue(
-                    row["license_url"].startswith(
-                        "https://creativecommons.org/licenses/"
-                    )
-                )
+                assert_reviewed_portrait_license(self, row)
                 self.assertTrue(row["attribution_text"].strip())
                 self.assertIn("background removed", row["modifications"])
                 self.assertIsNotNone(

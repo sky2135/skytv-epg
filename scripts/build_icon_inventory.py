@@ -12,7 +12,6 @@ import csv
 import gzip
 import json
 import os
-import re
 import tempfile
 import unicodedata
 from dataclasses import dataclass
@@ -28,6 +27,7 @@ from icon_variant_rules import (
     select_icon_variant,
     series_pattern_key,
 )
+from named_person_subjects import classify_person_subject
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -85,12 +85,6 @@ FALLBACK_GENRES = frozenset(
 SUPPORTED_LOGO_EXTENSIONS = frozenset(
     {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
 )
-PERSON_CATEGORIES = {
-    "bollywood singers 24/7": "singer",
-    "punjabi singers 24/7": "singer",
-    "pakistani singers 24/7": "singer",
-    "bollywood movies/actors 24/7": "actor",
-}
 INVENTORY_COLUMNS = (
     "server_id",
     "stream_id",
@@ -632,54 +626,13 @@ def can_use_xmltv_source_icon(row: Mapping[str, str]) -> bool:
 
 
 def classify_person_channel(row: Mapping[str, str]) -> tuple[str, str]:
-    role = PERSON_CATEGORIES.get(canonical_label(row.get("category_name")), "")
-    if not role:
-        return "", ""
-
-    original = clean(row.get("channel_name"))
-    candidate = original
-    if role == "singer":
-        prefixes = (
-            r"^HINDI\s*[-|]\s*(?:SINGER\s+)?",
-            r"^PAKISTANI\s+SINGER\s*(?:[-|]\s*)?",
-            r"^PAKISTANI\s*[-|]\s*",
-            r"^PUNJABI\s*[-|]\s*SINGER\s*[-|]?\s*",
-        )
-    else:
-        prefixes = (r"^HINDI\s*[-|]\s*(?:ACTOR\s+)?",)
-
-    matched = False
-    for pattern in prefixes:
-        stripped, substitutions = re.subn(pattern, "", candidate, flags=re.IGNORECASE)
-        if substitutions:
-            candidate = stripped
-            matched = True
-            break
-    if not matched:
-        # A broad 24/7 category can contain a generic music/movie channel.
-        # Only a channel with the category's anchored person-name grammar is
-        # allowed into the portrait research queue.
-        return "", ""
-
-    if role == "singer":
-        candidate = re.sub(
-            r"\s+(?:SONGS?|SNOGS)\s*(?:HD|UHD|4K)?$",
-            "",
-            candidate,
-            flags=re.IGNORECASE,
-        )
-    else:
-        candidate = re.sub(
-            r"\s+MOVIES?\s*(?:HD|UHD|4K)?$",
-            "",
-            candidate,
-            flags=re.IGNORECASE,
-        )
-    candidate = re.sub(r"\s+(?:HD|UHD|4K)$", "", candidate, flags=re.IGNORECASE)
-    candidate = " ".join(candidate.split()).strip(" -|")
-    if not candidate or candidate.casefold() in {"bollywood", "hindi", "singer", "actor"}:
-        return role, ""
-    return role, candidate
+    role, subject = classify_person_subject(
+        row.get("category_name", ""), row.get("channel_name", "")
+    )
+    # The inventory research queue contains only channels with an extracted
+    # person. A broad category member without the anchored subject grammar is
+    # a normal category channel, not a person needing manual-name review.
+    return (role, subject) if subject else ("", "")
 
 
 def approved_person_asset(asset: CatalogAsset | None) -> bool:

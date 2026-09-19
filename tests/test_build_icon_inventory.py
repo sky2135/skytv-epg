@@ -38,6 +38,34 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> 
 
 
 class BuildIconInventoryTests(unittest.TestCase):
+    def test_person_classifier_uses_the_shared_reviewed_rules(self) -> None:
+        cases = (
+            (
+                {
+                    "category_name": "US : 24X7",
+                    "channel_name": "24/7: Hitchcock",
+                },
+                ("actor", "Alfred Hitchcock"),
+            ),
+            (
+                {
+                    "category_name": "KANNADA MOVIES 24/7",
+                    "channel_name": "KANNADA-SHIVA RAJKUMMAR MOVIES HD",
+                },
+                ("actor", "Shiva Rajkumar"),
+            ),
+            (
+                {
+                    "category_name": "US : 24X7",
+                    "channel_name": "24/7: A Series, Not a Person",
+                },
+                ("", ""),
+            ),
+        )
+        for row, expected in cases:
+            with self.subTest(row=row):
+                self.assertEqual(inventory.classify_person_channel(row), expected)
+
     def test_exact_identity_source_fallback_and_person_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -13,6 +13,15 @@ CC0 1.0. See `GENERATED_ART_LICENSE.md`. Third-party portrait cutouts under
 `people/` keep the individual licenses listed in `ATTRIBUTION.md` and
 `icon_catalog.csv`.
 
+Named-person source research is recorded in
+`named_person_portrait_source_audit.csv` and summarized in
+`docs/NAMED_PERSON_PORTRAIT_SOURCE_AUDIT.md`. Research approval does not add an
+image to production; only a finished, reviewed cutout belongs in
+`icon_catalog.csv`.
+
+The 2026-09-19 production pass accepted 100 new portrait cutouts; 33 processed
+candidates remain on the neutral role fallback after output QA.
+
 The generated v3 family is intentionally minimalist: every symbol has a solid
 off-white (`#F7F8FA`) interior, a dark (`#1B2230`) rounded outline, and a
 transparent outer canvas. It contains no gradients, shadows, text, or coloured
