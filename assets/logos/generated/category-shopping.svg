@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Shopping channel icon</title>
+  <desc id="desc">Original SKY TV fallback artwork for shopping channels.</desc>
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4e243c"/><stop offset="100%" stop-color="#bd4d7b"/></linearGradient></defs>
+  <rect width="512" height="512" rx="72" fill="url(#bg)"/>
+  <path d="M112 190h288l-22 235H134z" fill="none" stroke="white" stroke-width="26" stroke-linejoin="round"/><path d="M186 207v-36c0-48 28-83 70-83s70 35 70 83v36" fill="none" stroke="white" stroke-width="24" stroke-linecap="round"/><path d="m256 252 20 42 47 6-35 32 9 46-41-22-41 22 9-46-35-32 47-6z" fill="white"/>
+</svg>

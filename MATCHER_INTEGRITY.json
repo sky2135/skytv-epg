@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "createdUtc": "2026-07-21T22:16:51.259933Z",
-  "updatedUtc": "2026-09-18T21:38:17Z",
+  "updatedUtc": "2026-09-19T04:10:51Z",
   "matcherVersion": "8.4",
   "matcherBuildId": "SKYTV-CONTEXTUAL-RULES-8.4-2026-07-19",
   "builderVersion": "7.1",
@@ -14,10 +14,10 @@
   "legacyEngineSha256": "8040562b85758a6b0c7b59a7d0e7918f313f3ccf7829498401a8815d097bddf4",
   "contextualV8Sha256": "289d19993cf33caef3358f9f5b5d2989625c7659adc48494cb81c02610034f99",
   "optimizationSha256": "ca916503d1a9fc7106c5b452a53d304ef632a9ad6f5b75d356fc630b23e67464",
-  "iconLayerSha256": "e963b0018b9d8c7bbe1c839194b87b0214cf1f394a021b7ce65a0afbf4af9c58",
+  "iconLayerSha256": "c42f1e651603d4cf57fbb5520995bb01f55d2139bc174d311abfbb52052bc285",
   "productionRunnerSha256": "56dbadde8360bd177adfebcbcbe4fecd80044b8c9d6dded3bb06ef9da4a49ea3",
   "legacyProductionRunnerSha256": "56dbadde8360bd177adfebcbcbe4fecd80044b8c9d6dded3bb06ef9da4a49ea3",
-  "streamingRunnerSha256": "f561b0656dc5b2a6fc674c19b40ac28bf933685fa6a7b49d923f6857c047eeff",
+  "streamingRunnerSha256": "415467167a9070f7afbb9c4e8fb752d5341e5762e4a860e3c6494c8f712a97ca",
   "autoMatchAdapterSha256": "db49198de05cb6c618ff11a0408081eeba581eb9b9a05f231a0d04a3ce70d7e8",
   "autoMatchIntegrationSha256": "5e88f400c66fd7bcbd8876810660fcd123e78c925f9022faaf7070f7eb81c7a0",
   "backlogAnalyzerSha256": "d5af5112922e4d1a7ce85dd34ceffa3cb732d5680e60fb7e5e6eb2f4550d3ab2",
@@ -28,7 +28,7 @@
   "epgCatalogStreamSha256": "fb04f5f9097bffe96ba4f3a421b4d53f1ce6110dc80e390ee45a91f2d99a9821",
   "epgSelectionSpoolSha256": "c0ad4e485972b206515f2205e37cf056593cb1105035a6031ef95b5371cd1336",
   "sheetSeedExporterSha256": "c5530d0a2dd63c62b8ffafed102651859e0155fe9ba5b731d5ced1ab6e17d80b",
-  "workflowSha256": "a56c0ddc8cbbb675590b25d04ff432dac4b117d6d88a780b79f6752822de7aa4",
+  "workflowSha256": "d9210cb8ed28d722d804a31a0a54ff37a7ee87d537bf4a1639713e2c7cfd06f4",
   "channelInventoryRunnerSha256": "e91476606f3770063fca7c060d1cbd716040edfa1b5ceccbf034bfbdc48d6253",
   "channelInventoryWorkflowSha256": "239ca26c1fbd5c62668dd4609db786ee12da09d2dc9eebf34f5766ff3c74f72f",
   "channelInventoryRequirementsSha256": "cb80ac4377fa3656ea135c65273fdc1b6ba7f5ce198f1f14ccb13de0e3ed593f",
@@ -55,7 +55,7 @@
     "v8.ContextualMatcherV8._contextual_fuzzy_match": "64af0f04ffd2aedc69fb8686ec62f563da0f8ee9fdaf8dd86579a9a4da404bb3",
     "v8.ContextualMatcherV8.export_approved_alias_memory": "291be187a2cc7759a34b075ac6d2daf377431718988a22ba96cf8c3d7eb4d5c4",
     "icons.extract_source_icons": "9ec1f5adbf0344d8020fa97397685f8918e7d43c95fc0448d0eec4ce4aaddccf",
-    "icons.resolve_icon_assignments": "63f958a2b60ccf36c076df89856a776d6640a636a7cd0df8810688dcc3d540c4",
+    "icons.resolve_icon_assignments": "30cf18c34ba59707ac4a947cc1c1258a27c4747716395d5c64b670d5e497e961",
     "icons.inject_icons_into_xmltv": "c5ed3146a3434a63e5d055e892810dc4bb12b2f83353aa883968b5d8e8f13324"
   },
   "decisionBoundary": [
@@ -77,7 +77,7 @@
     "Servers 2 and 3 use native panel XMLTV only for explicit runtime-eligible panel rows.",
     "Native Server 2/3 panels may declare only an inert tv DOCTYPE with no internal subset and at most the exact xmltv.dtd SYSTEM identifier; external DTDs and entities are never loaded, while EPGShare and generated outputs remain DTD-free.",
     "The app guide retains schema v1 required fields and three-item programme tuples; personalization is emitted in a companion metadata file.",
-    "The icon layer is separate from channel matching and uses exact mapping, exact configured override, or exact EPGShare source XMLTV ID only.",
+    "The icon layer is separate from channel matching; Workflow 2 privately binds exact stream identities to a private mapping URL, an exact approved portrait or original named-person icon, a safe EPGShare source icon, or original category artwork, in that order.",
     "Logo filenames are never fuzzy matched automatically.",
     "Workflow 1 analyzes the eligible REVIEW scope but persists at most one explicit total cap of 0, 25, 100, 500, 2,500, or 5,000 rows across deterministic, native, synthetic, IGNORE, and strict AI lanes; the scheduled cap defaults to zero, Gemini is explicit opt-in, AI receives only remaining whole-cluster capacity, and every Google batch is independently reread and provider-revalidated. Workflow 2 refreshes afterward and deploys only fully validated staged output."
   ]

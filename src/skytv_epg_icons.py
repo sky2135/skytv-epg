@@ -33,6 +33,7 @@ from lxml import etree
 ICON_CONFIG_COLUMNS = (
     "enabled",
     "server_id",
+    "stream_id",
     "epg_id",
     "channel_name",
     "icon_url",
@@ -64,6 +65,11 @@ _ICON_LINE_RE = re.compile(r"^\s*<icon\s+[^>]*\bsrc=")
 
 def _key(value: object) -> str:
     return " ".join(str(value or "").strip().casefold().split())
+
+
+def _stream_key(value: object) -> str:
+    """Normalize surrounding whitespace without weakening stream identity."""
+    return str(value or "").strip()
 
 
 def _is_enabled(value: object) -> bool:
@@ -125,29 +131,86 @@ class IconChoice:
     matched_by: str
 
 
+@dataclass(frozen=True)
+class IconOverrideRule:
+    server_id: str
+    stream_id: str
+    epg_id: str
+    channel_name: str
+    choice: IconChoice
+
+
 @dataclass
 class IconOverrides:
-    by_epg_id: dict[tuple[str, str], IconChoice]
-    by_channel_name: dict[tuple[str, str], IconChoice]
+    rows: list[IconOverrideRule]
+    by_stream_id: dict[tuple[str, str], list[IconOverrideRule]]
+    by_epg_id: dict[tuple[str, str], list[IconOverrideRule]]
+    by_channel_name: dict[tuple[str, str], list[IconOverrideRule]]
     rows_loaded: int = 0
     rows_rejected: int = 0
 
-    def lookup(self, server_id: str, epg_id: str, channel_name: str) -> IconChoice | None:
+    def lookup(
+        self,
+        server_id: str,
+        epg_id: str,
+        channel_name: str,
+        stream_id: str = "",
+    ) -> IconChoice | None:
+        """Return the best override whose supplied identity fields all match.
+
+        ``stream_id`` is optional to preserve the original three-argument API.
+        Stream-specific rules never match when the caller does not supply it.
+        """
         server = _key(server_id)
-        scopes = (server, "*")
+        stream = _stream_key(stream_id)
         epg = _key(epg_id)
         channel = _key(channel_name)
-        for scope in scopes:
-            if epg and (scope, epg) in self.by_epg_id:
-                return self.by_epg_id[(scope, epg)]
-        for scope in scopes:
-            if channel and (scope, channel) in self.by_channel_name:
-                return self.by_channel_name[(scope, channel)]
-        return None
+        candidates: dict[int, IconOverrideRule] = {}
+        for scope in (server, "*"):
+            for value, index in (
+                (stream, self.by_stream_id),
+                (epg, self.by_epg_id),
+                (channel, self.by_channel_name),
+            ):
+                if not value:
+                    continue
+                for rule in index.get((scope, value), ()):
+                    candidates[id(rule)] = rule
+
+        eligible = [
+            rule
+            for rule in candidates.values()
+            if rule.server_id in {"*", server}
+            and (not rule.stream_id or rule.stream_id == stream)
+            and (not rule.epg_id or rule.epg_id == epg)
+            and (not rule.channel_name or rule.channel_name == channel)
+        ]
+        if not eligible:
+            return None
+        chosen = max(
+            eligible,
+            key=lambda rule: (
+                rule.choice.priority,
+                1 if rule.server_id == server else 0,
+                1 if rule.stream_id else 0,
+                sum(
+                    bool(value)
+                    for value in (rule.stream_id, rule.epg_id, rule.channel_name)
+                ),
+                1 if rule.epg_id else 0,
+                rule.choice.url,
+            ),
+        )
+        return chosen.choice
 
 
 def _empty_overrides() -> IconOverrides:
-    return IconOverrides(by_epg_id={}, by_channel_name={})
+    return IconOverrides(
+        rows=[],
+        by_stream_id={},
+        by_epg_id={},
+        by_channel_name={},
+    )
 
 
 def load_icon_overrides(
@@ -157,9 +220,10 @@ def load_icon_overrides(
 ) -> IconOverrides:
     """Load exact icon overrides from CSV.
 
-    The CSV may target an EPG ID, a visible channel name, or both.  ``server_id``
-    may be ``server_1``/``server_2``/``server_3`` or ``*`` for all servers.
-    Higher numeric priority wins when duplicate exact keys are present.
+    The CSV may target a stream ID, EPG ID, visible channel name, or a
+    combination.  When a row supplies multiple identity fields, every field
+    must match.  ``server_id`` may be ``server_1``/``server_2``/``server_3`` or
+    ``*`` for all servers.  Higher numeric priority wins among matching rows.
     """
     config_path = Path(path)
     if not config_path.is_file():
@@ -175,9 +239,10 @@ def load_icon_overrides(
             if server not in {"*", "server_1", "server_2", "server_3"}:
                 result.rows_rejected += 1
                 continue
+            stream = _stream_key(row.get("stream_id", ""))
             epg = _key(row.get("epg_id", ""))
             channel = _key(row.get("channel_name", ""))
-            if not epg and not channel:
+            if not stream and not epg and not channel:
                 result.rows_rejected += 1
                 continue
             url = safe_icon_url(row.get("icon_url", ""))
@@ -194,28 +259,36 @@ def load_icon_overrides(
                 priority = 100
             # Row number is a stable final tie-breaker; earlier rows win.
             effective_priority = priority * 1_000_000 - row_number
+            matched_by = "+".join(
+                name
+                for name, value in (
+                    ("stream_id", stream),
+                    ("epg_id", epg),
+                    ("channel_name", channel),
+                )
+                if value
+            )
             choice = IconChoice(
                 url=url,
                 source=source,
                 priority=effective_priority,
-                matched_by="epg_id" if epg else "channel_name",
+                matched_by=matched_by,
             )
-            if epg:
-                key = (server, epg)
-                previous = result.by_epg_id.get(key)
-                if previous is None or choice.priority > previous.priority:
-                    result.by_epg_id[key] = choice
-            if channel:
-                key = (server, channel)
-                previous = result.by_channel_name.get(key)
-                channel_choice = IconChoice(
-                    url=url,
-                    source=source,
-                    priority=effective_priority,
-                    matched_by="channel_name",
-                )
-                if previous is None or channel_choice.priority > previous.priority:
-                    result.by_channel_name[key] = channel_choice
+            rule = IconOverrideRule(
+                server_id=server,
+                stream_id=stream,
+                epg_id=epg,
+                channel_name=channel,
+                choice=choice,
+            )
+            result.rows.append(rule)
+            for value, index in (
+                (stream, result.by_stream_id),
+                (epg, result.by_epg_id),
+                (channel, result.by_channel_name),
+            ):
+                if value:
+                    index.setdefault((server, value), []).append(rule)
             result.rows_loaded += 1
     return result
 
@@ -318,7 +391,12 @@ def resolve_icon_assignments(
         if mapping_url:
             choice = IconChoice(mapping_url, "mapping_row", 3_000_000_000, "mapping_row")
         if choice is None:
-            override = overrides.lookup(server_id, epg_id, channel_name)
+            override = overrides.lookup(
+                server_id,
+                epg_id,
+                channel_name,
+                stream_id=str(row.get("stream_id", "")).strip(),
+            )
             if override is not None:
                 choice = IconChoice(
                     override.url,

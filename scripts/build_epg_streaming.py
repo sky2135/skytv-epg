@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from itertools import chain
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import requests
@@ -3204,10 +3204,28 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
 @dataclass(frozen=True)
 class IconOverride:
     server_id: str
+    stream_id: str
     epg_id: str
     channel_name: str
     icon_url: str
     priority: int
+
+
+@dataclass
+class IconOverrides:
+    rows: list[IconOverride]
+    by_stream: dict[tuple[str, str], list[IconOverride]]
+    by_epg_id: dict[tuple[str, str], list[IconOverride]]
+    by_channel_name: dict[tuple[str, str], list[IconOverride]]
+
+
+SUPPORTED_LOGO_EXTENSIONS = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg"}
+)
+
+
+def empty_icon_overrides() -> IconOverrides:
+    return IconOverrides(rows=[], by_stream={}, by_epg_id={}, by_channel_name={})
 
 
 def load_icon_overrides(
@@ -3216,10 +3234,12 @@ def load_icon_overrides(
     repository_root: Path,
     staging_public: Path,
     public_base_url: str,
-) -> list[IconOverride]:
+) -> IconOverrides:
     if path is None or not Path(path).is_file():
-        return []
-    result: list[IconOverride] = []
+        return empty_icon_overrides()
+    result = empty_icon_overrides()
+    logo_root = (repository_root / "assets" / "logos").resolve()
+    staged_local_files: set[Path] = set()
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         for row_number, row in enumerate(reader, start=2):
@@ -3236,22 +3256,36 @@ def load_icon_overrides(
             server_id = clean_text(row.get("server_id", "*"), 40).casefold() or "*"
             if server_id != "*":
                 server_id = normalize_server_id(server_id)
+            stream_id = clean_identifier(row.get("stream_id", ""), 120)
             icon_url = valid_http_url(row.get("icon_url", ""))
             local_file = clean_text(row.get("local_file", ""), 500)
-            if local_file:
-                relative = Path(local_file)
-                if relative.is_absolute() or ".." in relative.parts:
+            # A reviewed direct URL wins when both fields are present, matching
+            # the documented configuration contract. A local file is copied
+            # only when it is the selected source.
+            if local_file and not icon_url:
+                if "\\" in local_file:
                     raise BuildError(f"Icon row {row_number}: unsafe local_file path.")
-                source = (repository_root / "assets" / "logos" / relative).resolve()
-                logo_root = (repository_root / "assets" / "logos").resolve()
+                relative = Path(local_file)
+                if (
+                    relative.is_absolute()
+                    or ".." in relative.parts
+                    or relative.suffix.casefold() not in SUPPORTED_LOGO_EXTENSIONS
+                ):
+                    raise BuildError(f"Icon row {row_number}: unsafe local_file path.")
+                source = (logo_root / relative).resolve()
                 if logo_root not in source.parents or not source.is_file():
                     raise BuildError(f"Icon row {row_number}: local_file does not exist.")
                 destination = staging_public / "logos" / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
+                if source not in staged_local_files:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+                    staged_local_files.add(source)
                 if public_base_url:
+                    encoded = "/".join(
+                        quote(part, safe="") for part in relative.parts
+                    )
                     icon_url = valid_http_url(
-                        f"{public_base_url.rstrip('/')}/logos/{relative.as_posix()}"
+                        f"{public_base_url.rstrip('/')}/logos/{encoded}"
                     )
             if not icon_url:
                 continue
@@ -3261,43 +3295,87 @@ def load_icon_overrides(
                 raise BuildError(f"Icon row {row_number}: priority must be an integer.") from exc
             epg_id = clean_identifier(row.get("epg_id", ""), 300)
             channel_name = clean_identifier(row.get("channel_name", ""), 300)
-            if not epg_id and not channel_name:
+            if not stream_id and not epg_id and not channel_name:
                 raise BuildError(
-                    f"Icon row {row_number}: epg_id or channel_name is required."
+                    f"Icon row {row_number}: stream_id, epg_id, or channel_name "
+                    "is required."
                 )
-            result.append(
-                IconOverride(
-                    server_id=server_id,
-                    epg_id=epg_id,
-                    channel_name=channel_name,
-                    icon_url=icon_url,
-                    priority=priority,
-                )
+            item = IconOverride(
+                server_id=server_id,
+                stream_id=stream_id,
+                epg_id=epg_id,
+                channel_name=channel_name,
+                icon_url=icon_url,
+                priority=priority,
             )
+            result.rows.append(item)
+            for value, index in (
+                (stream_id, result.by_stream),
+                (epg_id.casefold(), result.by_epg_id),
+                (channel_name.casefold(), result.by_channel_name),
+            ):
+                if value:
+                    index.setdefault((server_id, value), []).append(item)
+    if staged_local_files:
+        attribution = logo_root / "ATTRIBUTION.md"
+        if attribution.is_file():
+            destination = staging_public / "logos" / "ATTRIBUTION.txt"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(attribution, destination)
     return result
 
 
 def configured_icon(
-    overrides: Sequence[IconOverride], row: MappingRow
+    overrides: IconOverrides | Sequence[IconOverride], row: MappingRow
 ) -> str:
-    candidates: list[IconOverride] = []
-    for item in overrides:
-        if item.server_id not in {"*", row.server_id}:
-            continue
-        id_match = item.epg_id and item.epg_id.casefold() == row.epg_id.casefold()
-        name_match = (
-            item.channel_name
-            and item.channel_name.casefold() == row.channel_name.casefold()
+    # Keep the earlier public helper contract: callers that do not configure
+    # icons may still pass an empty sequence. Production uses the indexed
+    # IconOverrides form so per-row lookup remains bounded.
+    if not isinstance(overrides, IconOverrides):
+        if not overrides:
+            return ""
+        indexed = empty_icon_overrides()
+        for item in overrides:
+            indexed.rows.append(item)
+            for value, index in (
+                (item.stream_id, indexed.by_stream),
+                (item.epg_id.casefold(), indexed.by_epg_id),
+                (item.channel_name.casefold(), indexed.by_channel_name),
+            ):
+                if value:
+                    index.setdefault((item.server_id, value), []).append(item)
+        overrides = indexed
+    candidates: dict[int, IconOverride] = {}
+    for scope in (row.server_id, "*"):
+        for value, index in (
+            (row.stream_id, overrides.by_stream),
+            (row.epg_id.casefold(), overrides.by_epg_id),
+            (row.channel_name.casefold(), overrides.by_channel_name),
+        ):
+            if not value:
+                continue
+            for item in index.get((scope, value), ()):
+                candidates[id(item)] = item
+    eligible = [
+        item
+        for item in candidates.values()
+        if item.server_id in {"*", row.server_id}
+        and (not item.stream_id or item.stream_id == row.stream_id)
+        and (not item.epg_id or item.epg_id.casefold() == row.epg_id.casefold())
+        and (
+            not item.channel_name
+            or item.channel_name.casefold() == row.channel_name.casefold()
         )
-        if id_match or name_match:
-            candidates.append(item)
-    if not candidates:
+    ]
+    if not eligible:
         return ""
     chosen = max(
-        candidates,
+        eligible,
         key=lambda item: (
             item.priority,
             1 if item.server_id == row.server_id else 0,
+            1 if item.stream_id else 0,
+            sum(bool(value) for value in (item.stream_id, item.epg_id, item.channel_name)),
             1 if item.epg_id else 0,
             item.icon_url,
         ),
@@ -3402,7 +3480,7 @@ def build_xml_entries(
     rows: Sequence[MappingRow],
     connection: sqlite3.Connection,
     schedule_stats: Mapping[tuple[str, str], ScheduleStats],
-    icon_overrides: Sequence[IconOverride],
+    icon_overrides: IconOverrides,
 ) -> tuple[dict[str, XmlEntry], set[str], list[dict[str, str]]]:
     entries: dict[str, XmlEntry] = {}
     streams_with_programmes: set[str] = set()
@@ -3710,7 +3788,7 @@ def xmltv_timestamp(epoch: int) -> str:
 def resolve_row_icon(
     row: MappingRow,
     connection: sqlite3.Connection,
-    overrides: Sequence[IconOverride],
+    overrides: IconOverrides,
 ) -> str:
     _source_name, source_icon = source_channel_info(
         connection, row.source_key, row.epg_id
@@ -3726,7 +3804,7 @@ def write_app_epg(
     generated_at: int,
     window_start: int,
     window_end: int,
-    icon_overrides: Sequence[IconOverride],
+    icon_overrides: IconOverrides,
 ) -> dict[str, Any]:
     runtime_rows = sorted(
         (row for row in rows if row.runtime_eligible),
@@ -3850,7 +3928,7 @@ def write_metadata_json(
     connection: sqlite3.Connection,
     generated_at: int,
     mapping_sha256: str,
-    icon_overrides: Sequence[IconOverride],
+    icon_overrides: IconOverrides,
 ) -> dict[str, Any]:
     # Public metadata follows the same approval boundary as schedule output.
     # `enabled` alone is not approval: REVIEW/ignored rows and Server 1 native
@@ -4175,7 +4253,7 @@ def build_server(
     xml_window_start: int,
     app_window_start: int,
     app_window_end: int,
-    icon_overrides: Sequence[IconOverride],
+    icon_overrides: IconOverrides,
     source_provenance: Mapping[str, Any],
     minimum_coverage: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:

@@ -646,7 +646,20 @@ of the directional difference, not a list of the IDs.
 
 ## Streaming build command
 
-The production workflow runs the equivalent of:
+The production workflow first creates private exact icon bindings:
+
+```bash
+python scripts/generate_missing_icon_overrides.py \
+  --mapping-csv .build/channel-sync/effective_mapping.csv \
+  --source-xmltv "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
+  --base-config config/channel_icons.csv \
+  --output-config .build/channel-sync/channel_icons.csv \
+  --asset-catalog assets/logos/icon_catalog.csv \
+  --named-fallback-catalog assets/logos/named_person_fallback_catalog.csv
+```
+
+The generated file stays under ignored `.build/` storage and is never uploaded.
+The workflow then runs the equivalent of:
 
 ```bash
 python -u scripts/build_epg_streaming.py \
@@ -662,7 +675,7 @@ python -u scripts/build_epg_streaming.py \
   --minimum-server-rows server_1=4000 \
   --minimum-server-rows server_2=10500 \
   --minimum-server-rows server_3=9400 \
-  --icon-config config/channel_icons.csv \
+  --icon-config .build/channel-sync/channel_icons.csv \
   --public-base-url "$EPG_PUBLIC_BASE_URL" \
   --minimum-coverage "${EPG_MINIMUM_COVERAGE:-80}"
 ```
