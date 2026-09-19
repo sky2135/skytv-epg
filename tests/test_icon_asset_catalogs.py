@@ -5,15 +5,14 @@ import hashlib
 import re
 import struct
 import unittest
+import xml.etree.ElementTree as ET
+import zlib
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOGO_ROOT = REPO_ROOT / "assets" / "logos"
-CATALOG_PATHS = (
-    LOGO_ROOT / "icon_catalog.csv",
-    LOGO_ROOT / "named_person_fallback_catalog.csv",
-)
+CATALOG_PATH = LOGO_ROOT / "icon_catalog.csv"
 PRIVATE_IDENTITY_COLUMNS = {
     "server_id",
     "stream_id",
@@ -36,84 +35,180 @@ def read_catalog(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     return list(reader.fieldnames or ()), rows
 
 
-def png_dimensions(payload: bytes) -> tuple[int, int]:
-    if len(payload) < 24 or payload[:8] != b"\x89PNG\r\n\x1a\n":
+def png_chunks(payload: bytes) -> list[tuple[bytes, bytes]]:
+    if payload[:8] != b"\x89PNG\r\n\x1a\n":
         raise AssertionError("not a PNG file")
-    if payload[12:16] != b"IHDR":
-        raise AssertionError("PNG does not begin with an IHDR chunk")
-    return struct.unpack(">II", payload[16:24])
+    chunks: list[tuple[bytes, bytes]] = []
+    offset = 8
+    while offset < len(payload):
+        if offset + 12 > len(payload):
+            raise AssertionError("truncated PNG chunk")
+        length = struct.unpack(">I", payload[offset : offset + 4])[0]
+        kind = payload[offset + 4 : offset + 8]
+        start = offset + 8
+        end = start + length
+        if end + 4 > len(payload):
+            raise AssertionError("truncated PNG payload")
+        chunks.append((kind, payload[start:end]))
+        offset = end + 4
+        if kind == b"IEND":
+            break
+    return chunks
+
+
+def png_alpha_extrema(payload: bytes) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Return ``((width, height), (min_alpha, max_alpha))`` for 8-bit RGBA."""
+    chunks = png_chunks(payload)
+    ihdr = next(data for kind, data in chunks if kind == b"IHDR")
+    width, height, depth, color_type, compression, filtering, interlace = (
+        struct.unpack(">IIBBBBB", ihdr)
+    )
+    if (depth, color_type, compression, filtering, interlace) != (8, 6, 0, 0, 0):
+        raise AssertionError("icon PNG must be non-interlaced 8-bit RGBA")
+    raw = zlib.decompress(b"".join(data for kind, data in chunks if kind == b"IDAT"))
+    stride = width * 4
+    expected = height * (stride + 1)
+    if len(raw) != expected:
+        raise AssertionError("unexpected PNG scanline size")
+
+    previous = bytearray(stride)
+    minimum = 255
+    maximum = 0
+    offset = 0
+    for _row_number in range(height):
+        filter_type = raw[offset]
+        source = raw[offset + 1 : offset + 1 + stride]
+        offset += stride + 1
+        current = bytearray(stride)
+        for index, value in enumerate(source):
+            left = current[index - 4] if index >= 4 else 0
+            up = previous[index]
+            upper_left = previous[index - 4] if index >= 4 else 0
+            if filter_type == 0:
+                predictor = 0
+            elif filter_type == 1:
+                predictor = left
+            elif filter_type == 2:
+                predictor = up
+            elif filter_type == 3:
+                predictor = (left + up) // 2
+            elif filter_type == 4:
+                estimate = left + up - upper_left
+                distances = (
+                    abs(estimate - left),
+                    abs(estimate - up),
+                    abs(estimate - upper_left),
+                )
+                predictor = (left, up, upper_left)[distances.index(min(distances))]
+            else:
+                raise AssertionError(f"unsupported PNG filter {filter_type}")
+            current[index] = (value + predictor) & 0xFF
+        alpha = current[3::4]
+        minimum = min(minimum, min(alpha))
+        maximum = max(maximum, max(alpha))
+        previous = current
+    return (width, height), (minimum, maximum)
+
+
+def assert_safe_background_free_svg(test: unittest.TestCase, path: Path) -> None:
+    payload = path.read_text(encoding="utf-8")
+    lowered = payload.casefold()
+    test.assertNotIn("<!doctype", lowered)
+    test.assertNotIn("<!entity", lowered)
+    root = ET.fromstring(payload)
+    test.assertEqual(root.tag.rsplit("}", 1)[-1], "svg")
+    test.assertEqual(root.attrib.get("viewBox"), "0 0 512 512")
+    forbidden_elements = {"script", "foreignobject", "image", "use", "style"}
+    for element in root.iter():
+        tag = element.tag.rsplit("}", 1)[-1].casefold()
+        test.assertNotIn(tag, forbidden_elements, path)
+        attributes = {
+            key.rsplit("}", 1)[-1].casefold(): value
+            for key, value in element.attrib.items()
+        }
+        for key, value in attributes.items():
+            test.assertFalse(key.startswith("on"), path)
+            test.assertNotIn("url(", value.casefold(), path)
+            test.assertNotIn("javascript:", value.casefold(), path)
+            test.assertNotIn(key, {"href", "xlink:href"}, path)
+        if tag == "rect":
+            full_canvas = (
+                attributes.get("x", "0") in {"0", "0.0"}
+                and attributes.get("y", "0") in {"0", "0.0"}
+                and attributes.get("width") in {"512", "512.0", "100%"}
+                and attributes.get("height") in {"512", "512.0", "100%"}
+            )
+            test.assertFalse(full_canvas, f"opaque background rectangle in {path}")
 
 
 class PublicIconCatalogTests(unittest.TestCase):
-    def test_catalogs_are_private_safe_and_assets_are_unique(self) -> None:
-        asset_ids: list[str] = []
-        local_files: list[str] = []
-
-        for catalog_path in CATALOG_PATHS:
-            with self.subTest(catalog=catalog_path.name):
-                fields, rows = read_catalog(catalog_path)
-                self.assertTrue(rows)
-                self.assertTrue(
-                    PRIVATE_IDENTITY_COLUMNS.isdisjoint(
-                        field.casefold() for field in fields
-                    )
-                )
-                asset_ids.extend(row["asset_id"] for row in rows)
-                local_files.extend(row["local_file"] for row in rows)
-
-        self.assertEqual(len(asset_ids), len(set(asset_ids)))
-        self.assertEqual(len(local_files), len(set(local_files)))
-
-    def test_every_catalog_asset_is_a_real_verified_512_png(self) -> None:
-        logo_root = LOGO_ROOT.resolve()
-        for catalog_path in CATALOG_PATHS:
-            _, rows = read_catalog(catalog_path)
-            for row in rows:
-                with self.subTest(catalog=catalog_path.name, asset=row["asset_id"]):
-                    relative = Path(row["local_file"])
-                    self.assertFalse(relative.is_absolute())
-                    path = (LOGO_ROOT / relative).resolve()
-                    self.assertTrue(path.is_relative_to(logo_root))
-                    self.assertEqual(path.suffix.casefold(), ".png")
-                    self.assertTrue(path.is_file(), path)
-                    payload = path.read_bytes()
-                    self.assertEqual(png_dimensions(payload), (512, 512))
-                    expected_hash = row["output_sha256"].casefold()
-                    self.assertIsNotNone(SHA256_PATTERN.fullmatch(expected_hash))
-                    self.assertEqual(hashlib.sha256(payload).hexdigest(), expected_hash)
-
-    def test_generated_art_is_cc0_and_has_a_license_notice(self) -> None:
-        _, main_rows = read_catalog(LOGO_ROOT / "icon_catalog.csv")
-        _, fallback_rows = read_catalog(
-            LOGO_ROOT / "named_person_fallback_catalog.csv"
+    def test_catalog_is_private_safe_and_assets_are_unique(self) -> None:
+        fields, rows = read_catalog(CATALOG_PATH)
+        self.assertEqual(len(rows), 31)
+        self.assertTrue(
+            PRIVATE_IDENTITY_COLUMNS.isdisjoint(field.casefold() for field in fields)
         )
-        generated_rows = [
-            row for row in main_rows if row["asset_kind"] == "generated_category"
-        ] + fallback_rows
+        self.assertEqual(len({row["asset_id"] for row in rows}), len(rows))
+        self.assertEqual(len({row["local_file"] for row in rows}), len(rows))
 
-        self.assertEqual(len(generated_rows), 201)
-        for row in generated_rows:
+    def test_every_catalog_png_is_verified_and_background_free(self) -> None:
+        logo_root = LOGO_ROOT.resolve()
+        _, rows = read_catalog(CATALOG_PATH)
+        for row in rows:
+            with self.subTest(asset=row["asset_id"]):
+                relative = Path(row["local_file"])
+                self.assertFalse(relative.is_absolute())
+                path = (LOGO_ROOT / relative).resolve()
+                self.assertTrue(path.is_relative_to(logo_root))
+                self.assertEqual(path.suffix.casefold(), ".png")
+                self.assertTrue(path.is_file(), path)
+                payload = path.read_bytes()
+                dimensions, alpha = png_alpha_extrema(payload)
+                self.assertEqual(dimensions, (512, 512))
+                self.assertEqual(alpha, (0, 255))
+                expected_hash = row["output_sha256"].casefold()
+                self.assertIsNotNone(SHA256_PATTERN.fullmatch(expected_hash))
+                self.assertEqual(hashlib.sha256(payload).hexdigest(), expected_hash)
+
+    def test_every_generated_png_has_a_safe_transparent_svg_master(self) -> None:
+        _, rows = read_catalog(CATALOG_PATH)
+        generated = [row for row in rows if row["asset_kind"] == "generated_category"]
+        self.assertEqual(len(generated), 24)
+        for row in generated:
+            with self.subTest(asset=row["asset_id"]):
+                png = LOGO_ROOT / row["local_file"]
+                svg = png.with_suffix(".svg")
+                self.assertTrue(svg.is_file(), svg)
+                assert_safe_background_free_svg(self, svg)
+
+    def test_generated_art_is_cc0_and_old_name_cards_are_retired(self) -> None:
+        _, rows = read_catalog(CATALOG_PATH)
+        generated = [row for row in rows if row["asset_kind"] == "generated_category"]
+        for row in generated:
             with self.subTest(asset=row["asset_id"]):
                 self.assertEqual(row["license_id"], "CC0-1.0")
                 self.assertEqual(row["license_url"], CC0_URL)
                 self.assertEqual(row["creator"], "SKY TV")
 
+        self.assertFalse((LOGO_ROOT / "named_person_fallback_catalog.csv").exists())
+        self.assertFalse(any((LOGO_ROOT / "generated" / "people").glob("*.png")))
         notice = (LOGO_ROOT / "GENERATED_ART_LICENSE.md").read_text(
             encoding="utf-8"
         )
         self.assertIn("CC0 1.0 Universal", notice)
         self.assertIn(CC0_URL, notice)
         self.assertIn("generated/category-*.png", notice)
-        self.assertIn("generated/people/person-fallback-*.png", notice)
+        self.assertNotIn("person-fallback", notice)
         self.assertIn("does not cover files under `people/`", notice)
 
-    def test_third_party_portraits_have_source_and_license_records(self) -> None:
-        _, rows = read_catalog(LOGO_ROOT / "icon_catalog.csv")
+    def test_third_party_portraits_are_transparent_and_fully_attributed(self) -> None:
+        _, rows = read_catalog(CATALOG_PATH)
         portraits = [row for row in rows if row["asset_kind"] == "person_photo"]
-        self.assertTrue(portraits)
+        self.assertEqual(len(portraits), 7)
 
         for row in portraits:
             with self.subTest(asset=row["asset_id"]):
+                self.assertTrue(row["local_file"].endswith("-cutout-v2.png"))
                 self.assertTrue(
                     row["source_page_url"].startswith(
                         "https://commons.wikimedia.org/wiki/File:"
@@ -127,7 +222,7 @@ class PublicIconCatalogTests(unittest.TestCase):
                     )
                 )
                 self.assertTrue(row["attribution_text"].strip())
-                self.assertTrue(row["modifications"].strip())
+                self.assertIn("background removed", row["modifications"])
                 self.assertIsNotNone(
                     SHA1_PATTERN.fullmatch(row["source_sha1"].casefold())
                 )

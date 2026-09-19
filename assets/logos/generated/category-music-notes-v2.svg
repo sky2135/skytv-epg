@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Music — Notes channel icon</title>
+  <desc id="desc">Original background-free SKY TV fallback artwork for music notes channels.</desc>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <path d="M205 129v231c0 49-42 83-92 83s-84-28-84-68 35-70 85-70c21 0 40 6 56 15V102l284-56v209c0 49-42 83-92 83s-84-28-84-68 35-70 85-70c21 0 40 6 56 15V79z" fill="#7b61d1" stroke="#f8fafc" stroke-width="18"/><path d="M205 190 419 148" stroke="#f4b942" stroke-width="24"/>
+  </g>
+</svg>

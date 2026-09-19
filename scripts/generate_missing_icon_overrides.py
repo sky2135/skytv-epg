@@ -11,8 +11,8 @@ EPGShare catalog.
 The exact rows contain private provider identities. They are written only to a
 required ephemeral output path for the current workflow run. The small public
 base config is read but never overwritten. Public subject-only catalogs select
-reviewed portraits first, then original named fallbacks, with no fuzzy person
-matching.
+reviewed portraits with no fuzzy person matching. A named person without a
+reviewed portrait receives a reusable transparent music or movie symbol.
 """
 from __future__ import annotations
 
@@ -31,6 +31,12 @@ from named_person_subjects import (
     canonical_name,
     classify_person_subject,
     normalized_key,
+)
+from icon_variant_rules import (
+    allocate_movie_variants,
+    icon_variant_scope,
+    select_icon_variant,
+    series_pattern_key,
 )
 
 
@@ -68,10 +74,12 @@ CATEGORY_NAMES = frozenset(
 GENERATED_NOTE_PREFIX = "AUTO-GENERATED category fallback:"
 NAMED_FALLBACK_NOTE_PREFIX = "NAMED_FALLBACK:"
 NAMED_PORTRAIT_NOTE_PREFIX = "NAMED_PORTRAIT:"
+NAMED_SYMBOL_NOTE_PREFIX = "NAMED_SYMBOL:"
 EPHEMERAL_NOTE_PREFIXES = (
     GENERATED_NOTE_PREFIX,
     NAMED_FALLBACK_NOTE_PREFIX,
     NAMED_PORTRAIT_NOTE_PREFIX,
+    NAMED_SYMBOL_NOTE_PREFIX,
 )
 TRUE_VALUES = frozenset({"1", "true", "yes", "y", "on", "enabled"})
 FALSE_VALUES = frozenset({"0", "false", "no", "n", "off", "disabled"})
@@ -160,17 +168,20 @@ def local_override_is_usable(row: Mapping[str, str], logo_root: Path) -> bool:
     return bool(usable_local_file(row.get("local_file", ""), logo_root))
 
 
-def person_asset_indexes(
+def portrait_asset_index(
     *,
     asset_catalog: Path,
-    named_fallback_catalog: Path,
     logo_root: Path,
-) -> tuple[dict[str, dict[str, str]], dict[tuple[str, str], dict[str, str]]]:
-    """Load exact public subject assets, with portraits kept separately."""
+) -> dict[str, dict[str, str]]:
+    """Load only approved, exact-subject portrait assets.
+
+    Name-and-text fallback cards were retired in favor of reusable transparent
+    movie and music symbols.  A named channel therefore receives a real,
+    reviewed portrait or a content symbol; it never receives an invented
+    likeness or an opaque name card.
+    """
     _real_headers, real_rows = read_csv(asset_catalog)
-    _fallback_headers, fallback_rows = read_csv(named_fallback_catalog)
     portraits: dict[str, dict[str, str]] = {}
-    fallbacks: dict[tuple[str, str], dict[str, str]] = {}
 
     for row in real_rows:
         if normalized(row.get("subject_type", "")) != "person":
@@ -194,34 +205,7 @@ def person_asset_indexes(
                 f"{subject_key!r}."
             )
 
-    accepted_fallback_kinds = {
-        "generated_named_fallback",
-        "original_named_fallback",
-    }
-    for row in fallback_rows:
-        if normalized(row.get("subject_type", "")) != "person":
-            continue
-        if normalized(row.get("asset_kind", "")) not in accepted_fallback_kinds:
-            continue
-        if normalized(row.get("review_status", "")) != "fallback_ready":
-            continue
-        if normalized(row.get("license_id", "")) not in {"original", "cc0-1.0"}:
-            continue
-        role = normalized(row.get("person_role", ""))
-        subject_key = normalized_key(str(row.get("subject_name", "") or ""))
-        local_file = usable_local_file(row.get("local_file", ""), logo_root)
-        if role not in {"actor", "singer"} or not subject_key or not local_file:
-            continue
-        key = (role, subject_key)
-        item = dict(row)
-        item["local_file"] = local_file
-        previous = fallbacks.setdefault(key, item)
-        if previous.get("asset_id") != item.get("asset_id"):
-            raise ValueError(
-                "More than one named fallback exists for exact subject key "
-                f"{key!r}."
-            )
-    return portraits, fallbacks
+    return portraits
 
 
 def override_matches(row: Mapping[str, str], override: Mapping[str, str]) -> bool:
@@ -333,6 +317,63 @@ def category_for(row: Mapping[str, str]) -> str:
     return genre if genre in CATEGORY_NAMES else "general"
 
 
+def generated_asset_for(
+    row: Mapping[str, str],
+    *,
+    person_role: str = "",
+    named_person: bool = False,
+    extension: str = "png",
+    movie_variant: str = "",
+) -> tuple[str, str]:
+    """Return ``(asset_name, local_file)`` for one generated fallback.
+
+    Movie and music artwork comes from small transparent icon families.  The
+    pattern selector strips display-quality labels and normalizes numbered
+    series, so ``Movie 1`` and ``Movie 2`` share an image while a different
+    channel-name pattern selects another stable variant.
+    """
+    category_name = row.get("category_name", "")
+    channel_name = row.get("channel_name", "")
+    role = normalized(person_role)
+    category = category_for(row)
+    if role == "singer":
+        asset_name = select_icon_variant(
+            "music",
+            category_name,
+            channel_name,
+            named_singer=named_person,
+        )
+    elif role == "actor":
+        asset_name = movie_variant or select_icon_variant(
+            "movies", category_name, channel_name
+        )
+    elif category == "movies":
+        asset_name = movie_variant or select_icon_variant(
+            "movies", category_name, channel_name
+        )
+    elif category == "music":
+        asset_name = select_icon_variant("music", category_name, channel_name)
+    else:
+        asset_name = category
+    return asset_name, f"generated/category-{asset_name}-v2.{extension}"
+
+
+def movie_scope(row: Mapping[str, str]) -> str:
+    """Return an internal-only scope for adjacent provider name patterns."""
+    return icon_variant_scope(
+        row.get("server_id", ""), row.get("category_name", "")
+    )
+
+
+def movie_variant_key(row: Mapping[str, str]) -> tuple[str, str]:
+    return (
+        movie_scope(row),
+        series_pattern_key(
+            row.get("category_name", ""), row.get("channel_name", "")
+        ),
+    )
+
+
 def stream_sort_key(value: str) -> tuple[int, int | str, str]:
     text = str(value or "").strip()
     if text.isdigit():
@@ -364,7 +405,6 @@ def generate(
     output_config: Path,
     logo_root: Path,
     asset_catalog: Path,
-    named_fallback_catalog: Path,
     source_base_url: str = "",
     category_extension: str = "png",
 ) -> dict[str, object]:
@@ -404,9 +444,8 @@ def generate(
         raise ValueError(
             "The checked-in base icon config contains private generated rows."
         )
-    portraits, named_fallbacks = person_asset_indexes(
+    portraits = portrait_asset_index(
         asset_catalog=asset_catalog,
-        named_fallback_catalog=named_fallback_catalog,
         logo_root=logo_root,
     )
 
@@ -437,6 +476,29 @@ def generate(
     covered_by = Counter()
     category_counts = Counter()
     named_counts = Counter()
+    ordered_movie_rows = []
+    for candidate in sorted(
+        enabled_rows,
+        key=lambda item: (
+            str(item.get("server_id", "") or "").strip(),
+            stream_sort_key(identifier(item.get("stream_id", ""))),
+        ),
+    ):
+        candidate_role, _candidate_subject = classify_person_subject(
+            candidate.get("category_name", ""), candidate.get("channel_name", "")
+        )
+        if candidate_role == "actor" or (
+            candidate_role != "singer" and category_for(candidate) == "movies"
+        ):
+            ordered_movie_rows.append(
+                (
+                    movie_scope(candidate),
+                    candidate.get("category_name", ""),
+                    candidate.get("channel_name", ""),
+                )
+            )
+    movie_variants = allocate_movie_variants(ordered_movie_rows)
+
     for row in enabled_rows:
         server_id = str(row.get("server_id", "") or "").strip()
         stream_id = identifier(row.get("stream_id", ""))
@@ -455,16 +517,7 @@ def generate(
             subject = canonical_name(raw_subject)
             subject_key = normalized_key(subject)
             asset = portraits.get(subject_key)
-            asset_type = "portrait"
-            if asset is None:
-                asset = named_fallbacks.get((role, subject_key))
-                asset_type = "fallback"
             if asset is not None:
-                prefix = (
-                    NAMED_PORTRAIT_NOTE_PREFIX
-                    if asset_type == "portrait"
-                    else NAMED_FALLBACK_NOTE_PREFIX
-                )
                 ephemeral_rows.append(
                     {
                         "enabled": "true",
@@ -474,16 +527,48 @@ def generate(
                         "channel_name": identifier(row.get("channel_name", "")),
                         "icon_url": "",
                         "local_file": str(asset["local_file"]),
-                        "priority": "400" if asset_type == "portrait" else "300",
+                        "priority": "400",
                         "notes": (
-                            f"{prefix} {subject}; exact public subject asset "
+                            f"{NAMED_PORTRAIT_NOTE_PREFIX} {subject}; "
+                            "exact public subject asset "
                             f"{asset.get('asset_id', '')}"
                         ),
                     }
                 )
-                covered_by[f"named_{asset_type}"] += 1
-                named_counts[f"{role}_{asset_type}"] += 1
+                covered_by["named_portrait"] += 1
+                named_counts[f"{role}_portrait"] += 1
                 continue
+
+            asset_name, local_file = generated_asset_for(
+                row,
+                person_role=role,
+                named_person=True,
+                extension=category_extension,
+                movie_variant=movie_variants.get(movie_variant_key(row), ""),
+            )
+            if not (logo_root / local_file).is_file():
+                raise FileNotFoundError(f"Missing generated icon: {logo_root / local_file}")
+            ephemeral_rows.append(
+                {
+                    "enabled": "true",
+                    "server_id": server_id,
+                    "stream_id": stream_id,
+                    "epg_id": "",
+                    "channel_name": identifier(row.get("channel_name", "")),
+                    "icon_url": "",
+                    "local_file": local_file,
+                    "priority": "200",
+                    "notes": (
+                        f"{NAMED_SYMBOL_NOTE_PREFIX} {role} {subject}; "
+                        f"transparent {asset_name} fallback; replace with a "
+                        "reviewed exact portrait when available"
+                    ),
+                }
+            )
+            covered_by["named_symbol"] += 1
+            named_counts[f"{role}_symbol"] += 1
+            category_counts[asset_name] += 1
+            continue
 
         source = requested_source(row)
         epg_id = identifier(row.get("epg_id", ""))
@@ -493,8 +578,12 @@ def generate(
             covered_by["source_xmltv"] += 1
             continue
 
-        category = category_for(row)
-        local_file = f"generated/category-{category}.{category_extension}"
+        asset_name, local_file = generated_asset_for(
+            row,
+            person_role=role,
+            extension=category_extension,
+            movie_variant=movie_variants.get(movie_variant_key(row), ""),
+        )
         if not (logo_root / local_file).is_file():
             raise FileNotFoundError(f"Missing generated icon: {logo_root / local_file}")
         ephemeral_rows.append(
@@ -508,12 +597,12 @@ def generate(
                 "local_file": local_file,
                 "priority": "10",
                 "notes": (
-                    f"{GENERATED_NOTE_PREFIX} {category}; replace with reviewed "
+                    f"{GENERATED_NOTE_PREFIX} {asset_name}; replace with reviewed "
                     "exact artwork when available"
                 ),
             }
         )
-        category_counts[category] += 1
+        category_counts[asset_name] += 1
         covered_by["generated_fallback"] += 1
 
     ephemeral_rows.sort(
@@ -536,7 +625,8 @@ def generate(
         "preserved_base_config_rows": len(base_rows),
         "generated_fallback_rows": covered_by["generated_fallback"],
         "named_portrait_rows": covered_by["named_portrait"],
-        "named_fallback_rows": covered_by["named_fallback"],
+        "named_symbol_rows": covered_by["named_symbol"],
+        "named_fallback_rows": 0,
         "final_private_config_rows": len(base_rows) + len(ephemeral_rows),
         "coverage": dict(sorted(covered_by.items())),
         "generated_categories": dict(sorted(category_counts.items())),
@@ -561,11 +651,6 @@ def main() -> int:
         default=Path("assets/logos/icon_catalog.csv"),
     )
     parser.add_argument(
-        "--named-fallback-catalog",
-        type=Path,
-        default=Path("assets/logos/named_person_fallback_catalog.csv"),
-    )
-    parser.add_argument(
         "--category-extension", choices=("png", "svg"), default="png"
     )
     args = parser.parse_args()
@@ -576,7 +661,6 @@ def main() -> int:
         output_config=args.output_config,
         logo_root=args.logo_root,
         asset_catalog=args.asset_catalog,
-        named_fallback_catalog=args.named_fallback_catalog,
         source_base_url=args.source_base_url,
         category_extension=args.category_extension,
     )

@@ -304,9 +304,9 @@ class BuildIconInventoryTests(unittest.TestCase):
         self.assertEqual(dummy["next_action"], "apply_original_fallback")
         radio = by_key[("server_3", "77")]
         self.assertEqual(radio["current_icon_origin"], "none")
-        self.assertEqual(radio["suggested_asset_id"], "category-radio")
+        self.assertEqual(radio["suggested_asset_id"], "category-radio-v2")
         self.assertEqual(
-            radio["suggested_local_file"], "generated/category-radio.png"
+            radio["suggested_local_file"], "generated/category-radio-v2.png"
         )
         self.assertEqual(radio["next_action"], "apply_original_fallback")
         statuses = {row["research_status"] for row in research}
@@ -399,14 +399,14 @@ class BuildIconInventoryTests(unittest.TestCase):
     def test_original_png_can_inherit_reviewed_svg_rights(self) -> None:
         vector = inventory.CatalogAsset(
             asset_id="category-news",
-            local_file="generated/category-news.svg",
+            local_file="generated/category-news-v2.svg",
             subject_type="category",
             asset_kind="original_vector",
             license_id="ORIGINAL",
             review_status="approved",
         )
         found = inventory.catalog_asset_for_local_file(
-            {vector.local_file: vector}, "generated/category-news.png"
+            {vector.local_file: vector}, "generated/category-news-v2.png"
         )
         self.assertEqual(found, vector)
 

@@ -6,10 +6,9 @@ the original artwork listed below to the public domain under the
 
 - `generated/category-*.png`
 - `generated/category-*.svg`
-- `generated/people/person-fallback-*.png`
 
-The named-person fallback images use only original visual motifs and a
-person's name. They do not contain a portrait or another third-party image.
+The SVG files are the editable, background-free vector masters. The matching
+PNG files are transparent compatibility renders for IPTV clients.
 
 This dedication does not cover files under `people/`. Those are third-party
 portraits with their own license and attribution recorded in

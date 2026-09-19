@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">General TV channel icon</title>
+  <desc id="desc">Original background-free SKY TV fallback artwork for general tv channels.</desc>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <rect x="62" y="104" width="388" height="291" rx="48" fill="#3787e5" stroke="#f8fafc" stroke-width="20"/><path d="m220 171 128 77-128 77z" fill="#f8fafc" stroke="#182033" stroke-width="14"/><path d="M171 447h170" stroke="#182033" stroke-width="28"/><path d="m203 394-32 53m138-53 32 53" stroke="#182033" stroke-width="22"/>
+  </g>
+</svg>

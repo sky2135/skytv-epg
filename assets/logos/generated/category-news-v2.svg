@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">News channel icon</title>
+  <desc id="desc">Original background-free SKY TV fallback artwork for news channels.</desc>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <rect x="64" y="92" width="384" height="329" rx="37" fill="#3787e5" stroke="#f8fafc" stroke-width="20"/><rect x="105" y="138" width="133" height="116" rx="14" fill="#f4b942" stroke="#182033" stroke-width="14"/><path d="M270 151h132m-132 54h132M105 303h297M105 358h297" stroke="#f8fafc" stroke-width="23"/>
+  </g>
+</svg>
