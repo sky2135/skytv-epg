@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Events channel icon</title>
+  <desc id="desc">Original SKY TV fallback artwork for events channels.</desc>
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#533019"/><stop offset="100%" stop-color="#dc7837"/></linearGradient></defs>
+  <rect width="512" height="512" rx="72" fill="url(#bg)"/>
+  <rect x="102" y="128" width="308" height="278" rx="34" fill="none" stroke="white" stroke-width="24"/><path d="M102 202h308M174 94v68M338 94v68" stroke="white" stroke-width="24" stroke-linecap="round"/><path d="m256 238 20 45 49 5-37 32 11 48-43-25-43 25 11-48-37-32 49-5z" fill="white"/>
+</svg>

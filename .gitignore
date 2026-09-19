@@ -16,3 +16,4 @@ public/EPG/
 public/logos/
 public/index.html
 public/.nojekyll
+/assets/logos/generated/people/*.tmp

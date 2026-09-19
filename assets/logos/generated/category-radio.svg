@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Radio channel icon</title>
+  <desc id="desc">Original SKY TV fallback artwork for radio channels.</desc>
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#173f46"/><stop offset="100%" stop-color="#2f9096"/></linearGradient></defs>
+  <rect width="512" height="512" rx="72" fill="url(#bg)"/>
+  <rect x="91" y="174" width="330" height="236" rx="38" fill="none" stroke="white" stroke-width="24"/><path d="m133 164 242-92" stroke="white" stroke-width="20" stroke-linecap="round"/><circle cx="306" cy="293" r="65" fill="none" stroke="white" stroke-width="22"/><path d="M136 235h85M136 280h85M136 325h58" stroke="white" stroke-width="20" stroke-linecap="round"/>
+</svg>

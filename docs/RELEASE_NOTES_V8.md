@@ -14,11 +14,14 @@ A separate exact icon layer now enriches each generated XMLTV file.
 Priority:
 
 1. exact URL in a mapping row;
-2. exact `config/channel_icons.csv` override;
-3. exact icon from the source XMLTV ID;
-4. no icon.
+2. exact reviewed override, including a real portrait or original named-person icon;
+3. exact safe icon from the source XMLTV ID;
+4. original category fallback.
 
-There is no fuzzy logo matching. Source XMLTV files are parsed at most once per workflow run for all three servers.
+There is no fuzzy logo matching. Workflow 2 creates exact per-stream overrides
+temporarily under `.build/`; the private channel inventory is not committed or
+uploaded. Source XMLTV files are parsed at most once per workflow run for all
+three servers.
 
 Local permitted assets in `assets/logos/` are copied to GitHub Pages. Each server manifest and `epg/index.json` report icon coverage.
 

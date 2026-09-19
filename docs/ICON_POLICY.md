@@ -4,15 +4,27 @@ Channel logos are metadata only. They never influence Smart Rules matching.
 
 ## Exactness
 
-The system accepts an icon only through an exact EPG ID, exact provider channel name, exact mapping-row URL, or the exact `<channel id>` in a source XMLTV file. It does not infer a logo from a similar filename or fuzzy channel name.
+The system accepts an icon only through an exact provider stream ID, exact EPG
+ID, exact provider channel name, exact mapping-row URL, or the exact
+`<channel id>` in a source XMLTV file. When an override supplies more than one
+identity field, every field must match. It does not infer a logo from a similar
+filename or fuzzy channel name. Person images and other 24/7 artwork must use
+an exact server and stream ID; a shared dummy EPG ID is never sufficient.
 
 ## Hosting
 
-Preferred order:
+Effective order:
 
-1. source XMLTV icon;
-2. exact external URL for personal testing;
-3. locally hosted reviewed asset for production, when redistribution is permitted.
+1. safe URL supplied in the private mapping row;
+2. exact reviewed override, including an approved person portrait;
+3. exact original named-person fallback;
+4. safe source XMLTV icon;
+5. original category fallback when no usable source icon exists.
+
+Exact per-stream rows are derived from the private mapping only during the
+workflow run. They stay under `.build/` and are never committed or uploaded.
+The checked-in catalogs contain public subjects and assets, not provider stream
+bindings.
 
 Do not mirror an entire third-party logo repository. Keep only the subset needed by the approved lineup and record attribution and permission.
 

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Education channel icon</title>
+  <desc id="desc">Original SKY TV fallback artwork for education channels.</desc>
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#18304f"/><stop offset="100%" stop-color="#456eb3"/></linearGradient></defs>
+  <rect width="512" height="512" rx="72" fill="url(#bg)"/>
+  <path d="m82 210 174-88 174 88-174 88z" fill="white"/><path d="M151 271v77c66 51 144 51 210 0v-77" fill="none" stroke="white" stroke-width="24"/><path d="M430 216v111" stroke="white" stroke-width="20" stroke-linecap="round"/>
+</svg>

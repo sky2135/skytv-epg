@@ -338,6 +338,144 @@ class MappingContractTests(unittest.TestCase):
             "",
         )
 
+    def test_icon_override_requires_every_supplied_channel_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "assets" / "logos" / "people" / "Lata Icon.png"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"fixture")
+            (root / "assets" / "logos" / "ATTRIBUTION.md").write_text(
+                "Lata photo credit fixture\n", encoding="utf-8"
+            )
+            config = root / "icons.csv"
+            with config.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=(
+                        "enabled",
+                        "server_id",
+                        "stream_id",
+                        "epg_id",
+                        "channel_name",
+                        "icon_url",
+                        "local_file",
+                        "priority",
+                        "notes",
+                    ),
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "enabled": "true",
+                        "server_id": "server_1",
+                        "stream_id": "5001",
+                        "epg_id": "Movie.Dummy.us",
+                        "channel_name": "HINDI-LATA MANGESHKAR SONGS HD",
+                        "local_file": "people/Lata Icon.png",
+                        "priority": "500",
+                    }
+                )
+            overrides = runner.load_icon_overrides(
+                config,
+                repository_root=root,
+                staging_public=root / "public",
+                public_base_url="https://example.test/epg",
+            )
+            self.assertEqual(
+                (root / "public" / "logos" / "ATTRIBUTION.txt").read_text(
+                    encoding="utf-8"
+                ),
+                "Lata photo credit fixture\n",
+            )
+
+        exact = mock.Mock(
+            server_id="server_1",
+            stream_id="5001",
+            epg_id="Movie.Dummy.us",
+            channel_name="HINDI-LATA MANGESHKAR SONGS HD",
+        )
+        wrong_stream = mock.Mock(
+            server_id="server_1",
+            stream_id="999999",
+            epg_id="Movie.Dummy.us",
+            channel_name="HINDI-LATA MANGESHKAR SONGS HD",
+        )
+        unrelated_dummy = mock.Mock(
+            server_id="server_1",
+            stream_id="5002",
+            epg_id="Movie.Dummy.us",
+            channel_name="HINDI-OTHER ACTOR MOVIES HD",
+        )
+        self.assertEqual(
+            runner.configured_icon(overrides, exact),
+            "https://example.test/epg/logos/people/Lata%20Icon.png",
+        )
+        self.assertEqual(runner.configured_icon(overrides, wrong_stream), "")
+        self.assertEqual(runner.configured_icon(overrides, unrelated_dummy), "")
+
+    def test_icon_url_wins_and_unsupported_local_extensions_fail(self) -> None:
+        fields = (
+            "enabled",
+            "server_id",
+            "stream_id",
+            "epg_id",
+            "channel_name",
+            "icon_url",
+            "local_file",
+            "priority",
+            "notes",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "icons.csv"
+            with config.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "server_id": "server_1",
+                        "stream_id": "1",
+                        "icon_url": "https://example.test/channel.png",
+                        "local_file": "missing.exe",
+                    }
+                )
+            loaded = runner.load_icon_overrides(
+                config,
+                repository_root=root,
+                staging_public=root / "public",
+                public_base_url="https://example.test/epg",
+            )
+            row = mock.Mock(
+                server_id="server_1",
+                stream_id="1",
+                epg_id="",
+                channel_name="Channel",
+            )
+            self.assertEqual(
+                runner.configured_icon(loaded, row),
+                "https://example.test/channel.png",
+            )
+
+            (root / "assets" / "logos").mkdir(parents=True)
+            (root / "assets" / "logos" / "unsafe.exe").write_bytes(b"fixture")
+            with config.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "server_id": "server_1",
+                        "stream_id": "1",
+                        "local_file": "unsafe.exe",
+                    }
+                )
+            with self.assertRaisesRegex(runner.BuildError, "unsafe local_file"):
+                runner.load_icon_overrides(
+                    config,
+                    repository_root=root,
+                    staging_public=root / "public",
+                    public_base_url="https://example.test/epg",
+                )
+
     def test_panel_http_requires_an_explicit_opt_in(self) -> None:
         credentials = {
             "SERVER_2_BASE_URL": "http://panel.example:8080/provider",
@@ -1291,7 +1429,7 @@ class MappingContractTests(unittest.TestCase):
                     rows=rows,
                     connection=connection,
                     schedule_stats=stats,
-                    icon_overrides=[],
+                    icon_overrides=runner.empty_icon_overrides(),
                 )
                 chosen = entries["Canonical.test"]
                 self.assertEqual(chosen.entry_type, "canonical_epg_id")
@@ -1348,13 +1486,13 @@ class MappingContractTests(unittest.TestCase):
                     rows=rows,
                     connection=connection,
                     schedule_stats=stats,
-                    icon_overrides=[],
+                    icon_overrides=runner.empty_icon_overrides(),
                 )
                 reverse, _, _ = runner.build_xml_entries(
                     rows=list(reversed(rows)),
                     connection=connection,
                     schedule_stats=stats,
-                    icon_overrides=[],
+                    icon_overrides=runner.empty_icon_overrides(),
                 )
                 self.assertEqual(
                     forward["Shared Alias"].channel_key,
@@ -1436,7 +1574,7 @@ class MappingContractTests(unittest.TestCase):
                     rows=rows,
                     connection=connection,
                     schedule_stats=stats,
-                    icon_overrides=[],
+                    icon_overrides=runner.empty_icon_overrides(),
                 )
                 self.assertEqual(entries["B.test"].channel_key, "B.test")
                 self.assertEqual(entries["B.test"].icon_url, "")
@@ -1496,7 +1634,7 @@ class MappingContractTests(unittest.TestCase):
                     rows=rows,
                     connection=connection,
                     schedule_stats=stats,
-                    icon_overrides=[],
+                    icon_overrides=runner.empty_icon_overrides(),
                 )
                 runner.write_tivimate_xmltv(
                     destination=destination,
@@ -1968,7 +2106,7 @@ class MappingContractTests(unittest.TestCase):
                     connection=connection,
                     generated_at=FIXED_NOW,
                     mapping_sha256="fixture",
-                    icon_overrides=[],
+                    icon_overrides=runner.empty_icon_overrides(),
                 )
             finally:
                 connection.close()
@@ -2247,7 +2385,7 @@ class SyntheticGuideTests(unittest.TestCase):
                     rows=rows,
                     connection=connection,
                     schedule_stats=schedule_stats,
-                    icon_overrides=[],
+                    icon_overrides=runner.empty_icon_overrides(),
                 )
                 self.assertEqual(streams, {"27", "28"})
                 self.assertFalse(conflicts)
@@ -2324,7 +2462,7 @@ class SyntheticGuideTests(unittest.TestCase):
                     rows=[dummy, real],
                     connection=connection,
                     schedule_stats=schedule_stats,
-                    icon_overrides=[],
+                    icon_overrides=runner.empty_icon_overrides(),
                 )
             finally:
                 connection.close()
@@ -2357,7 +2495,7 @@ class SyntheticGuideTests(unittest.TestCase):
                     rows=rows,
                     connection=connection,
                     schedule_stats=schedule_stats,
-                    icon_overrides=[],
+                    icon_overrides=runner.empty_icon_overrides(),
                 )
             finally:
                 connection.close()

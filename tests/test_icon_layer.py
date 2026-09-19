@@ -51,6 +51,78 @@ class IconLayerTests(unittest.TestCase):
         self.assertEqual(scoped.url, "https://example.test/custom.png")
         self.assertIsNone(loaded.lookup("server_1", "", "Custom Channel"))
 
+    def test_stream_override_requires_all_supplied_identity_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "icons.csv"
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=icons.ICON_CONFIG_COLUMNS)
+                writer.writeheader()
+                writer.writerow({
+                    "enabled": "true",
+                    "server_id": "server_1",
+                    "stream_id": "5001",
+                    "epg_id": "Movie.Dummy.us",
+                    "channel_name": "HINDI-LATA MANGESHKAR SONGS HD",
+                    "icon_url": "https://example.test/lata.png",
+                    "priority": "500",
+                })
+            loaded = icons.load_icon_overrides(path)
+
+        exact = loaded.lookup(
+            "server_1",
+            "Movie.Dummy.us",
+            "HINDI-LATA MANGESHKAR SONGS HD",
+            stream_id="5001",
+        )
+        self.assertIsNotNone(exact)
+        self.assertEqual(exact.url, "https://example.test/lata.png")
+        self.assertEqual(
+            exact.matched_by,
+            "stream_id+epg_id+channel_name",
+        )
+        self.assertIsNone(loaded.lookup(
+            "server_1",
+            "Movie.Dummy.us",
+            "HINDI-LATA MANGESHKAR SONGS HD",
+            stream_id="999999",
+        ))
+        self.assertIsNone(loaded.lookup(
+            "server_1",
+            "Movie.Dummy.us",
+            "UNRELATED MOVIE CHANNEL",
+            stream_id="5001",
+        ))
+        self.assertIsNone(loaded.lookup(
+            "server_2",
+            "Movie.Dummy.us",
+            "HINDI-LATA MANGESHKAR SONGS HD",
+            stream_id="5001",
+        ))
+        self.assertIsNone(loaded.lookup(
+            "server_1",
+            "Movie.Dummy.us",
+            "HINDI-LATA MANGESHKAR SONGS HD",
+        ))
+
+        prepared = pd.DataFrame([{
+            "server_id": "server_1",
+            "stream_id": "5001",
+            "channel_name": "HINDI-LATA MANGESHKAR SONGS HD",
+            "epg_id": "Movie.Dummy.us",
+            "feed_key": "DUMMY_CHANNELS",
+        }])
+        assignments, report = icons.resolve_icon_assignments(
+            prepared,
+            server_id="server_1",
+            source_icons_by_feed={},
+            overrides=loaded,
+        )
+        self.assertEqual(
+            assignments["HINDI-LATA MANGESHKAR SONGS HD"],
+            "https://example.test/lata.png",
+        )
+        self.assertEqual(report[0]["matched_by"], "stream_id+epg_id+channel_name")
+
     def test_source_icon_extraction_and_no_fuzzy_logo_matching(self) -> None:
         xml = '''<?xml version="1.0" encoding="UTF-8"?>
 <tv>
