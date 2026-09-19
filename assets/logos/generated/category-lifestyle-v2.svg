@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Lifestyle channel icon</title>
+  <desc id="desc">Original background-free SKY TV fallback artwork for lifestyle channels.</desc>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <path d="M69 282 256 116l187 166" fill="none" stroke="#38a66b" stroke-width="42"/><path d="M123 274v166h266V274" fill="#f8fafc" stroke="#182033" stroke-width="24"/><path d="M268 250c88-106 165-63 153-159-114 1-173 55-153 159z" fill="#38a66b" stroke="#f8fafc" stroke-width="16"/><path d="M270 249c35-49 72-82 112-111" stroke="#182033" stroke-width="15"/>
+  </g>
+</svg>

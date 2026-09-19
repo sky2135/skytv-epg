@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Movies — Filmstrip channel icon</title>
+  <desc id="desc">Original background-free SKY TV fallback artwork for movies filmstrip channels.</desc>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <rect x="48" y="105" width="416" height="302" rx="34" fill="#e84a5f" stroke="#f8fafc" stroke-width="20"/><path d="M111 105v302m290-302v302" stroke="#182033" stroke-width="20"/><path d="M70 153h20m-20 68h20m-20 68h20m-20 68h20m332-204h20m-20 68h20m-20 68h20m-20 68h20" stroke="#f4b942" stroke-width="24"/><path d="m207 178 113 78-113 78z" fill="#f8fafc" stroke="#182033" stroke-width="13"/>
+  </g>
+</svg>

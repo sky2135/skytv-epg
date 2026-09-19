@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Kids channel icon</title>
+  <desc id="desc">Original background-free SKY TV fallback artwork for kids channels.</desc>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="164" cy="188" r="78" fill="#f4b942" stroke="#f8fafc" stroke-width="18"/><rect x="271" y="112" width="154" height="154" rx="34" fill="#e45896" stroke="#f8fafc" stroke-width="18"/><path d="m256 268 93 158H163z" fill="#38a66b" stroke="#f8fafc" stroke-width="18"/><path d="M133 361c59 57 187 57 246 0" fill="none" stroke="#182033" stroke-width="24"/>
+  </g>
+</svg>

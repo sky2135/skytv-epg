@@ -644,9 +644,7 @@ jobs:
               "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
             --base-config config/channel_icons.csv \
             --output-config .build/channel-sync/channel_icons.csv \
-            --asset-catalog assets/logos/icon_catalog.csv \
-            --named-fallback-catalog \
-              assets/logos/named_person_fallback_catalog.csv
+            --asset-catalog assets/logos/icon_catalog.csv
 
       - name: Build XMLTV, app JSON, and personalization metadata
         shell: bash

@@ -14,7 +14,7 @@ A separate exact icon layer now enriches each generated XMLTV file.
 Priority:
 
 1. exact URL in a mapping row;
-2. exact reviewed override, including a real portrait or original named-person icon;
+2. exact reviewed override, including a real portrait or transparent content symbol;
 3. exact safe icon from the source XMLTV ID;
 4. original category fallback.
 

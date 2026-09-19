@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Movies — Film Reel channel icon</title>
+  <desc id="desc">Original background-free SKY TV fallback artwork for movies film reel channels.</desc>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="220" cy="235" r="164" fill="#e84a5f" stroke="#f8fafc" stroke-width="22"/><circle cx="220" cy="235" r="35" fill="#f4b942" stroke="#182033" stroke-width="15"/><circle cx="220" cy="129" r="39" fill="#f8fafc" stroke="#182033" stroke-width="12"/><circle cx="321" cy="202" r="39" fill="#f8fafc" stroke="#182033" stroke-width="12"/><circle cx="282" cy="319" r="39" fill="#f8fafc" stroke="#182033" stroke-width="12"/><circle cx="158" cy="319" r="39" fill="#f8fafc" stroke="#182033" stroke-width="12"/><circle cx="119" cy="202" r="39" fill="#f8fafc" stroke="#182033" stroke-width="12"/><path d="M364 314c49 25 68 67 43 124M372 331c32 21 44 51 25 96" fill="none" stroke="#f4b942" stroke-width="25"/>
+  </g>
+</svg>

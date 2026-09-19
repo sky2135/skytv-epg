@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">Adult channel icon</title>
-  <desc id="desc">Original SKY TV fallback artwork for adult channels.</desc>
-  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#56142f"/><stop offset="100%" stop-color="#d73a74"/></linearGradient></defs>
-  <rect width="512" height="512" rx="72" fill="url(#bg)"/>
-  <path d="M256 90 390 140v98c0 86-53 148-134 184-81-36-134-98-134-184v-98z" fill="none" stroke="white" stroke-width="24"/><text x="256" y="285" text-anchor="middle" fill="white" font-size="112" font-family="sans-serif" font-weight="700">18+</text>
-</svg>

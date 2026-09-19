@@ -22,13 +22,17 @@ from urllib.parse import urljoin, urlparse
 
 from lxml import etree
 
+from icon_variant_rules import (
+    allocate_movie_variants,
+    icon_variant_scope,
+    select_icon_variant,
+    series_pattern_key,
+)
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = REPOSITORY_ROOT / "config" / "channel_icons.csv"
 DEFAULT_CATALOG = REPOSITORY_ROOT / "assets" / "logos" / "icon_catalog.csv"
-DEFAULT_NAMED_FALLBACK_CATALOG = (
-    REPOSITORY_ROOT / "assets" / "logos" / "named_person_fallback_catalog.csv"
-)
 DEFAULT_LOGO_ROOT = REPOSITORY_ROOT / "assets" / "logos"
 DEFAULT_INVENTORY = (
     REPOSITORY_ROOT
@@ -505,7 +509,7 @@ def load_named_fallback_overrides(
     *,
     logo_root: Path | None = None,
 ) -> dict[tuple[str, str], tuple[ExactOverride, ...]]:
-    """Load a private exact-stream map made by the named fallback generator."""
+    """Load a legacy private exact-stream asset map for audit compatibility."""
 
     if path is None:
         return {}
@@ -541,7 +545,7 @@ def load_named_fallback_overrides(
                 )
             if PurePosixPath(local_file).suffix.casefold() not in SUPPORTED_LOGO_EXTENSIONS:
                 raise IconInventoryError(
-                    f"Unsupported named fallback extension on CSV line {line_number}."
+                    f"Unsupported legacy asset extension on CSV line {line_number}."
                 )
             if logo_root is not None:
                 resolved_root = logo_root.resolve()
@@ -554,7 +558,7 @@ def load_named_fallback_overrides(
                 priority = int(clean(row.get("priority")) or "300")
             except ValueError as exc:
                 raise IconInventoryError(
-                    f"Invalid named fallback priority on CSV line {line_number}."
+                    f"Invalid legacy asset priority on CSV line {line_number}."
                 ) from exc
             choice = ExactOverride(
                 server_id=server_id,
@@ -597,9 +601,28 @@ def fallback_name(row: Mapping[str, str]) -> str:
     return genre if genre in FALLBACK_GENRES else "general"
 
 
-def fallback_asset(row: Mapping[str, str]) -> tuple[str, str]:
+def fallback_asset(
+    row: Mapping[str, str],
+    *,
+    person_role: str = "",
+    person_subject: str = "",
+    movie_variant: str = "",
+) -> tuple[str, str]:
     name = fallback_name(row)
-    return f"category-{name}", f"generated/category-{name}.png"
+    category = row.get("category_name", "")
+    channel = row.get("channel_name", "")
+    role = canonical_label(person_role)
+    if role == "singer":
+        name = select_icon_variant(
+            "music", category, channel, named_singer=bool(clean(person_subject))
+        )
+    elif role == "actor":
+        name = movie_variant or select_icon_variant("movies", category, channel)
+    elif name == "movies":
+        name = movie_variant or select_icon_variant("movies", category, channel)
+    elif name == "music":
+        name = select_icon_variant("music", category, channel)
+    return f"category-{name}-v2", f"generated/category-{name}-v2.png"
 
 
 def can_use_xmltv_source_icon(row: Mapping[str, str]) -> bool:
@@ -712,6 +735,33 @@ def build_outputs(
         "named_person_needing_subject_review": 0,
     }
 
+    def row_order(row: Mapping[str, str]) -> tuple[str, int, int | str, str]:
+        server = canonical_label(row.get("server_id"))
+        stream = clean(row.get("stream_id"))
+        return (
+            server,
+            0 if stream.isdigit() else 1,
+            int(stream) if stream.isdigit() else stream.casefold(),
+            stream,
+        )
+
+    ordered_movie_rows = []
+    for candidate in sorted(rows, key=row_order):
+        candidate_role, _candidate_subject = classify_person_channel(candidate)
+        if candidate_role == "actor" or (
+            candidate_role != "singer" and fallback_name(candidate) == "movies"
+        ):
+            ordered_movie_rows.append(
+                (
+                    icon_variant_scope(
+                        candidate.get("server_id"), candidate.get("category_name")
+                    ),
+                    candidate.get("category_name", ""),
+                    candidate.get("channel_name", ""),
+                )
+            )
+    movie_variants = allocate_movie_variants(ordered_movie_rows)
+
     for row in rows:
         server_id = clean(row.get("server_id"))
         stream_id = clean(row.get("stream_id"))
@@ -760,7 +810,18 @@ def build_outputs(
             summary["current_missing"] += 1
 
         role, subject = classify_person_channel(row)
-        suggested_asset_id, suggested_local_file = fallback_asset(row)
+        movie_key = (
+            icon_variant_scope(row.get("server_id"), row.get("category_name")),
+            series_pattern_key(
+                row.get("category_name", ""), row.get("channel_name", "")
+            ),
+        )
+        suggested_asset_id, suggested_local_file = fallback_asset(
+            row,
+            person_role=role,
+            person_subject=subject,
+            movie_variant=movie_variants.get(movie_key, ""),
+        )
         if approved_person_asset(asset):
             current_status = "portrait_ready"
         elif (
@@ -822,7 +883,10 @@ def build_outputs(
             summary["named_person_needing_subject_review"] += 1
         else:
             research_status = "needs_license_research"
-            notes = "Find a reusable real portrait; use the original fallback if unavailable."
+            notes = (
+                "Find a reusable real portrait; use the transparent content "
+                "symbol if unavailable."
+            )
             summary["named_person_needing_license_research"] += 1
         research_fallback_asset_id = suggested_asset_id
         research_fallback_local_file = suggested_local_file
@@ -930,15 +994,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         action="append",
         help=(
-            "Repeatable public asset catalog. Defaults to icon_catalog.csv and "
-            "named_person_fallback_catalog.csv when omitted."
+            "Repeatable public asset catalog. Defaults to icon_catalog.csv "
+            "when omitted."
         ),
     )
     parser.add_argument("--logo-root", type=Path, default=DEFAULT_LOGO_ROOT)
     parser.add_argument(
         "--named-fallback-map",
         type=Path,
-        help="Optional private exact-stream map for original named fallbacks.",
+        help="Optional legacy private exact-stream asset map for audit only.",
     )
     parser.add_argument("--inventory-out", type=Path, default=DEFAULT_INVENTORY)
     parser.add_argument("--research-out", type=Path, default=DEFAULT_RESEARCH_QUEUE)
@@ -953,7 +1017,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             xmltv_path=args.xmltv,
             config_csv=args.config_csv,
             catalog_csvs=args.catalog_csv
-            or [DEFAULT_CATALOG, DEFAULT_NAMED_FALLBACK_CATALOG],
+            or [DEFAULT_CATALOG],
             logo_root=args.logo_root,
             named_fallback_map=args.named_fallback_map,
             inventory_out=args.inventory_out,

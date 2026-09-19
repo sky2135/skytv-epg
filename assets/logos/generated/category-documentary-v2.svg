@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Documentary channel icon</title>
+  <desc id="desc">Original background-free SKY TV fallback artwork for documentary channels.</desc>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="256" cy="256" r="172" fill="#35b7c8" stroke="#f8fafc" stroke-width="20"/><path d="M84 256h344M256 84c61 56 88 115 88 172s-27 116-88 172c-61-56-88-115-88-172s27-116 88-172z" fill="none" stroke="#182033" stroke-width="22"/>
+  </g>
+</svg>
