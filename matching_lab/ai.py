@@ -878,8 +878,16 @@ def attach_advisory(
             reasons.difference_update(
                 {
                     "LANE_CONSERVATIVE_STRICT_EXACT",
+                    "LANE_FROZEN_RESOLVER_EXACT",
+                    "LANE_REPOSITORY_CURATED_ALIAS",
                     "LANE_STANDARD_STRONG",
                     "LANE_TRUSTED_ALIAS",
+                    "CURATED_STORAGE_ALIAS_EXACT",
+                    "FROZEN_RESOLVER_EXACT_SCORE_OVERRIDE",
+                    "REPOSITORY_CURATED_ALIAS_ALLOWLISTED",
+                    "REPOSITORY_CURATED_ALIAS_MARGIN_OVERRIDE",
+                    "REPOSITORY_CURATED_ALIAS_SCORE_OVERRIDE",
+                    "STATIC_STORAGE_ROUTE_ALLOWLISTED",
                 }
             )
             reasons.add("LANE_HUMAN_REVIEW")

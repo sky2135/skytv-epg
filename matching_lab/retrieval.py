@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 from rapidfuzz import fuzz
 
+from .artifacts import read_stable_regular_file
 from .compat import (
+    REPOSITORY_ROOT,
     catalog_stream,
     parse_candidate_context_v8,
     parse_channel_context_v8,
@@ -157,7 +162,13 @@ def _fraction_ppm(value: float) -> int:
 
 
 def _candidate_tier(methods: set[str]) -> int:
-    if "HUMAN_ALIAS_EXACT" in methods or "CURATED_ALIAS_EXACT" in methods:
+    if methods.intersection(
+        {"HUMAN_ALIAS_EXACT", "CURATED_ALIAS_EXACT", "CURATED_STORAGE_ALIAS_EXACT"}
+    ):
+        # Preserve the frozen resolver's precedence: approved knowledge is
+        # considered before its contextual exact matcher.
+        return 6
+    if "FROZEN_RESOLVER_EXACT" in methods:
         return 5
     if "STRICT_EXACT" in methods:
         return 4
@@ -170,6 +181,107 @@ def _candidate_tier(methods: set[str]) -> int:
     return 2 if len(fuzzy) >= 2 else 1
 
 
+_FROZEN_CONTEXTUAL_EXACT_METHODS = frozenset(
+    {
+        "canonical_identity",
+        "strict",
+        "edition_aware",
+        "descriptor_relaxed",
+        "spacing_compact",
+        "token_multiset",
+        "category_language_default",
+    }
+)
+
+_REPOSITORY_ALIASES_PATH = REPOSITORY_ROOT / "knowledge" / "approved_channel_aliases.csv"
+_REPOSITORY_ALIAS_FIELDS = (
+    "alias",
+    "regions",
+    "target_regions",
+    "epg_ids",
+    "relationship",
+    "note",
+)
+_MAX_REPOSITORY_ALIAS_BYTES = 2 * 1024 * 1024
+_REPOSITORY_IDENTITY_RELATIONSHIPS = frozenset(
+    {
+        "verified_brand_abbreviation",
+        "verified_cross_server_identity",
+        "verified_rebrand",
+        "verified_station_callsign",
+    }
+)
+
+
+def repository_curated_alias_targets() -> tuple[dict[tuple[str, str], str], str]:
+    """Read unique same-market aliases from the fixed repository CSV.
+
+    This intentionally accepts no caller-supplied path or rows.  Learned and
+    in-memory aliases therefore cannot acquire repository-curated authority.
+    Cross-storage rows are excluded because they have their own narrower lane.
+    """
+
+    content, digest = read_stable_regular_file(
+        _REPOSITORY_ALIASES_PATH,
+        maximum_bytes=_MAX_REPOSITORY_ALIAS_BYTES,
+    )
+    try:
+        reader = csv.DictReader(io.StringIO(content.decode("utf-8-sig"), newline=""))
+    except UnicodeError as exc:
+        raise ContractError("The repository alias file is not valid UTF-8.") from exc
+    if tuple(reader.fieldnames or ()) != _REPOSITORY_ALIAS_FIELDS:
+        raise ContractError("The repository alias file has an unexpected schema.")
+
+    targets: dict[tuple[str, str], set[str]] = defaultdict(set)
+    try:
+        for raw in reader:
+            if None in raw:
+                raise ContractError("The repository alias file contains malformed rows.")
+            alias_key = NameViews.from_text(raw.get("alias", "")).strict
+            regions = tuple(
+                dict.fromkeys(
+                    value.strip().upper()
+                    for value in re.split(r"[|;,]", raw.get("regions", ""))
+                    if value.strip()
+                )
+            )
+            target_regions = tuple(
+                value.strip().upper()
+                for value in re.split(r"[|;,]", raw.get("target_regions", ""))
+                if value.strip()
+            )
+            epg_ids = tuple(
+                dict.fromkeys(
+                    value.strip()
+                    for value in re.split(r"[|;]", raw.get("epg_ids", ""))
+                    if value.strip()
+                )
+            )
+            relationship = str(raw.get("relationship", "")).strip().casefold()
+            if (
+                not alias_key
+                or target_regions
+                or len(epg_ids) != 1
+                or not regions
+                or "ALL" in regions
+                or relationship not in _REPOSITORY_IDENTITY_RELATIONSHIPS
+            ):
+                continue
+            for region in regions:
+                targets[(alias_key, region)].add(epg_ids[0])
+    except (AttributeError, TypeError) as exc:
+        raise ContractError("The repository alias file contains invalid values.") from exc
+
+    return (
+        {
+            key: next(iter(epg_ids))
+            for key, epg_ids in targets.items()
+            if len(epg_ids) == 1
+        },
+        digest,
+    )
+
+
 class CandidateIndex:
     """One deterministic, catalog-hash-bound multi-retriever index."""
 
@@ -180,10 +292,19 @@ class CandidateIndex:
         candidates: Sequence[Mapping[str, str]],
         xml_display_names: Mapping[str, str] | None = None,
         aliases: Sequence[AliasEdge] = (),
+        repository_aliases_sha256: str = "",
         policy: MatchingPolicy = DEFAULT_POLICY,
     ) -> None:
         self.engine = engine
         self.policy = policy
+        self._repository_alias_targets: dict[tuple[str, str], str] = {}
+        if repository_aliases_sha256:
+            repository_targets, repository_digest = repository_curated_alias_targets()
+            if repository_digest != str(repository_aliases_sha256).casefold():
+                raise ContractError(
+                    "The repository alias evidence changed after matcher setup."
+                )
+            self._repository_alias_targets = repository_targets
         xml_names = dict(xml_display_names or {})
         self.items: list[CatalogItem] = []
         self.by_epg_id: dict[str, int] = {}
@@ -285,6 +406,38 @@ class CandidateIndex:
         hits: dict[int, set[str]] = defaultdict(set)
 
         resolver = getattr(self, "resolver", None)
+        contextual_exact_match = getattr(resolver, "_contextual_exact_match", None)
+        if (
+            subject.route_explicit
+            and len(subject.route_plan) == 1
+            and callable(contextual_exact_match)
+        ):
+            try:
+                exact = contextual_exact_match(subject.context)
+            except ContractError:
+                raise
+            except Exception as exc:
+                raise ContractError(
+                    "The frozen contextual exact resolver failed during Matching Lab retrieval."
+                ) from exc
+            if isinstance(exact, Mapping):
+                action = str(exact.get("action", "")).strip().upper()
+                source = str(exact.get("source", "")).strip().casefold()
+                method = str(exact.get("match_method", "")).strip()
+                epg_id = str(exact.get("epg_id", ""))
+                # Call this private entry point directly and accept only its
+                # known exact result vocabulary.  Results from the full
+                # resolver (fuzzy, containment, special/dummy, orthographic,
+                # panel, or future unknown methods) never gain this evidence.
+                if (
+                    action == "AUTO_EPGSHARE"
+                    and source == "epgshare"
+                    and method in _FROZEN_CONTEXTUAL_EXACT_METHODS
+                ):
+                    index = self.by_epg_id.get(epg_id)
+                    if index is not None and index in allowed:
+                        hits[index].add("FROZEN_RESOLVER_EXACT")
+
         approved_alias_match = getattr(resolver, "_approved_alias_match", None)
         if callable(approved_alias_match):
             try:
@@ -298,8 +451,32 @@ class CandidateIndex:
             if approved:
                 epg_id = streaming.clean_identifier(approved.get("epg_id", ""), 300)
                 index = self.by_epg_id.get(epg_id)
+                method = str(approved.get("match_method", "")).strip()
                 if index is not None and index in allowed:
                     hits[index].add("CURATED_ALIAS_EXACT")
+                    static_target = self._repository_alias_targets.get(
+                        (subject.views.strict, subject.market)
+                    )
+                    if (
+                        method == "approved_knowledge"
+                        and static_target == epg_id
+                        and subject.route_explicit
+                        and len(subject.route_plan) == 1
+                        and subject.market == subject.route_plan[0]
+                        and self.items[index].region == subject.market
+                    ):
+                        hits[index].add("REPOSITORY_CURATED_ALIAS_EXACT")
+                elif (
+                    index is not None
+                    and method == "approved_storage_knowledge"
+                    and subject.route_explicit
+                    and len(subject.route_plan) == 1
+                ):
+                    # The frozen resolver has already checked the exact static
+                    # alias, exact target ID, and its allow-listed storage
+                    # region. Only that result may enter from outside the
+                    # subject route; all fuzzy discovery stays in-route.
+                    hits[index].add("CURATED_STORAGE_ALIAS_EXACT")
 
         alias_key = (subject.views.strict, subject.market)
         for index in self._aliases.get(alias_key, ()):
@@ -381,6 +558,13 @@ class CandidateIndex:
                 item.semantics,
                 route_explicit=subject.route_explicit,
             )
+            if "CURATED_STORAGE_ALIAS_EXACT" in methods:
+                # A static storage alias explicitly explains the catalog-region
+                # difference. Every other protected contradiction remains a
+                # hard conflict.
+                conflicts = tuple(
+                    conflict for conflict in conflicts if conflict != "MARKET_MISMATCH"
+                )
             token_score = max(
                 _fraction_ppm(jaccard(subject.views.tokens, item.views.tokens)),
                 _fraction_ppm(jaccard(subject.views.tokens, item.xml_views.tokens)),
@@ -529,5 +713,6 @@ __all__ = (
     "human_alias_edges",
     "mapping_row_guard",
     "provider_identity_guard",
+    "repository_curated_alias_targets",
     "subject_from_mapping_row",
 )

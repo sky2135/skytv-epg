@@ -26,6 +26,7 @@ import re
 import stat
 import sys
 import time
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +58,15 @@ DEFAULT_GATE_HORIZON_SECONDS = 72 * 60 * 60
 DEFAULT_GATE_MINIMUM_PROGRAMMES = 2
 DEFAULT_GATE_MINIMUM_FUTURE_SECONDS = 6 * 60 * 60
 DEFAULT_GATE_MAXIMUM_INITIAL_GAP_SECONDS = 6 * 60 * 60
+CROSSWIRED_PROGRAMME_REASON = (
+    "The exact EPG ID is quarantined for a cross-wired schedule."
+)
+UNINFORMATIVE_PROGRAMME_REASON = (
+    "The exact EPG ID is quarantined because its guide contains only holding blocks."
+)
+AMBIGUOUS_PROGRAMME_REASON = (
+    "The exact EPG ID is quarantined because unrelated IDs carry the same schedule."
+)
 
 PLACEHOLDER_TITLE_RE = re.compile(
     r"^(?:"
@@ -65,6 +75,7 @@ PLACEHOLDER_TITLE_RE = re.compile(
     r"(?:\s+(?:not\s+)?available|\s+unavailable)?(?:\s+\d+)?|"
     r"(?:program(?:me)?|events?|epg|schedule)"
     r"(?:\s+(?:information|info))?\s+(?:not\s+available|unavailable)|"
+    r"tv\s+guide\s+(?:is\s+)?(?:not\s+available|unavailable)|"
     r"to\s+be\s+(?:announced|advised)|tba|tbd|"
     r"off\s*air|sign(?:ed)?\s*off|nothing\s+scheduled|"
     r"no\s+event(?:s)?(?:\s+scheduled)?"
@@ -100,6 +111,8 @@ PLACEHOLDER_TITLE_KEYS = frozenset(
         "schedule unavailable",
         "programme unavailable",
         "program unavailable",
+        "tv guide is not available",
+        "tv guide unavailable",
         "no data",
         "no schedule",
         "epg not available",
@@ -110,7 +123,120 @@ PLACEHOLDER_TITLE_KEYS = frozenset(
         "signed off",
         "nothing scheduled",
         "no events scheduled",
+        "unknown show",
+        "pas de diffusion",
+        "no broadcasting",
     }
+)
+
+# These exact IDs had no real programme names in the frozen 2026-09-18
+# ALL_SOURCES1 snapshot.  Their schedules were made entirely from channel-name
+# repeats or generic holding cards, so they must stay in review even if those
+# repeated blocks satisfy the normal count and time-horizon checks.
+KNOWN_UNINFORMATIVE_PROGRAMME_IDS = frozenset(
+    {
+        "Prime.TV.al",
+        "Tring.Originals.al",
+        "First.Channel.al",
+        "TV.Syri.Vision.al",
+        "CANAL+LIVE.11.fr",
+        "CANAL+LIVE.12.fr",
+        "CANAL+LIVE.13.fr",
+        "CANAL+LIVE.14.fr",
+        "CANAL+LIVE.15.fr",
+        "CANAL+LIVE.16.fr",
+        "CANAL+LIVE.17.fr",
+        "CANAL+LIVE.18.fr",
+        "CANAL+LIVE.19.fr",
+        "M+.Liga.de.Campeones.8.es",
+        "M+.Liga.de.Campeones.13.es",
+        "Novasportsextra3HD.gr",
+        "Novasportsextra4HD.gr",
+    }
+)
+_KNOWN_UNINFORMATIVE_PROGRAMME_ID_KEYS = frozenset(
+    value.casefold() for value in KNOWN_UNINFORMATIVE_PROGRAMME_IDS
+)
+
+# Each of these IDs had a byte-for-byte identical 72-hour schedule on one or
+# more unrelated catalog IDs in the frozen 2026-09-18 snapshot.  The programme
+# gate therefore cannot independently prove which ID owns that schedule.  Keep
+# them review-only until a collision-aware/manual check identifies the anchor.
+KNOWN_AMBIGUOUS_PROGRAMME_IDS = frozenset(
+    {
+        "Al.Anwar.TV.2.ae",
+        "Al.Rasheed.TV.HD.ae",
+        "Al.Sharqiya.TV.HD.ae",
+        "Bahrain.International.ae",
+        "Dijlah.Zaman.ae",
+        "Oman.TV.HD.ae",
+    }
+)
+_KNOWN_AMBIGUOUS_PROGRAMME_ID_KEYS = frozenset(
+    value.casefold() for value in KNOWN_AMBIGUOUS_PROGRAMME_IDS
+)
+
+# These exact IDs were audited against the frozen 2026-09-18 ALL_SOURCES1
+# snapshot and carried a different channel's schedule (or only a disguised
+# placeholder). A non-placeholder count alone must never make them eligible.
+# Remove an ID only after its identity and corrected live schedule are both
+# independently verified.
+KNOWN_CROSSWIRED_PROGRAMME_IDS = frozenset(
+    {
+        "Ajman.TV.HD.ae",
+        "Al.Anbar.ae",
+        "Al.Aqila.TV.ae",
+        "Al.Forat.ae",
+        "Al.Hayat.ae",
+        "Al.Hiwar.TV.HD.ae",
+        "Al.Horreya.TV.ae",
+        "Al.Kawthar.TV.ae",
+        "Al.Maaref.TV.ae",
+        "Al.Mashhad.ae",
+        "Al.Naeem.TV.ae",
+        "Al.Qamar.TV.ae",
+        "Al.Qanat.9.ae",
+        "AlHadath.Alyoum.ae",
+        "Alghadeer.TV.ae",
+        "Alshaaer.TV.ae",
+        "Altaleaa.TV.ae",
+        "Al.Thanya.ae",
+        "Amman.TV.HD.ae",
+        "Azhari.TV.ae",
+        "Bangawaz.TV.ae",
+        "Dua.Channel.ae",
+        "Dubai.Racing.2.ae",
+        "Discovery.Channel.bg",
+        "EN:.SSC.News.sa",
+        "Falastini.TV.ae",
+        "HUM.Masala.uk",
+        "Huda.TV.ae",
+        "I.News.HD.ae",
+        "Imam.Hussein.TV.2.ae",
+        "Iraq.24.HD.ae",
+        "Iraq.Future.TV.ae",
+        "Iraqia.Syriac.ae",
+        "KSA.sports.1.ae",
+        "KSA.sports.2.HD.ae",
+        "Karameesh.ae",
+        "Karbala.TV.HD.ae",
+        "MBC.FM.ae",
+        "Mazzika.ae",
+        "Misr.AlBalad.ae",
+        "Nogoum.FM.TV.ae",
+        "Press.TV.HD.ae",
+        "Rotana.Clip.ae",
+        "Rotana.Music.ae",
+        "Saout.Alaqila.ae",
+        "Shehab.TV.HD.ae",
+        "Taha.ae",
+        "Thaqalayn.TV.ae",
+        "UTV.Iraq.ae",
+        "Zaytoona.ae",
+    }
+)
+_KNOWN_CROSSWIRED_PROGRAMME_ID_KEYS = frozenset(
+    value.casefold() for value in KNOWN_CROSSWIRED_PROGRAMME_IDS
 )
 
 DUMMY_ID_COMPONENT_RE = re.compile(r"(?:^|\.)dummy(?:\.|$)", re.IGNORECASE)
@@ -885,9 +1011,15 @@ def parse_all_sources_text(
 def informative_programme_title(value: object) -> bool:
     title = streaming.clean_text(value, 2_000)
     normalized = _simple_match_key(title)
+    unicode_key = " ".join(
+        unicodedata.normalize("NFKC", title).casefold().split()
+    )
     return bool(
         normalized
         and normalized not in PLACEHOLDER_TITLE_KEYS
+        and not normalized.endswith(" no broadcasting")
+        and "ξανά κοντά σας".casefold() not in unicode_key
+        and unicode_key != "vivez en direct les évènements de canal+"
         and not re.fullmatch(r"(?:n a|na)(?: (?:n a|na))+", normalized)
         and not PLACEHOLDER_TITLE_RE.fullmatch(title)
     )
@@ -955,7 +1087,16 @@ def _gate_results(
         count = len(accumulator.signatures)
         first = accumulator.first_start
         latest = accumulator.latest_stop
-        if first is None or first > latest_near_term_start:
+        if channel_key.casefold() in _KNOWN_CROSSWIRED_PROGRAMME_ID_KEYS:
+            passed = False
+            reason = CROSSWIRED_PROGRAMME_REASON
+        elif channel_key.casefold() in _KNOWN_UNINFORMATIVE_PROGRAMME_ID_KEYS:
+            passed = False
+            reason = UNINFORMATIVE_PROGRAMME_REASON
+        elif channel_key.casefold() in _KNOWN_AMBIGUOUS_PROGRAMME_ID_KEYS:
+            passed = False
+            reason = AMBIGUOUS_PROGRAMME_REASON
+        elif first is None or first > latest_near_term_start:
             passed = False
             reason = "No informative programme begins within the near-term safety window."
         elif count < minimum_programmes:
@@ -1332,8 +1473,11 @@ def stream_catalog_and_programmes_once(
 
 __all__ = (
     "CATALOG_STREAM_VERSION",
+    "AMBIGUOUS_PROGRAMME_REASON",
+    "CROSSWIRED_PROGRAMME_REASON",
     "DEFAULT_GATE_MAXIMUM_INITIAL_GAP_SECONDS",
     "DEFAULT_MINIMUM_UNIQUE_CATALOG_CHANNELS",
+    "KNOWN_AMBIGUOUS_PROGRAMME_IDS",
     "KNOWN_DUMMY_XMLTV_IDS",
     "MAX_GATE_PROGRAMME_DURATION_SECONDS",
     "MAX_XMLTV_ID_CHARACTERS",
@@ -1349,6 +1493,8 @@ __all__ = (
     "TextCatalogSnapshot",
     "infer_catalog_route",
     "informative_programme_title",
+    "KNOWN_UNINFORMATIVE_PROGRAMME_IDS",
+    "UNINFORMATIVE_PROGRAMME_REASON",
     "parse_all_sources_text",
     "stream_catalog_and_programmes_once",
 )

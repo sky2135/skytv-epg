@@ -139,6 +139,7 @@ CATEGORY_COUNTRY_MARKETS_V84: tuple[tuple[re.Pattern[str], str, str], ...] = (
     (re.compile(r"\b(?:pakistan|pakistani)\b", re.I), "PK", "Pakistan"),
     (re.compile(r"\bisrael(?:i)?\b", re.I), "IL", "Israel"),
     (re.compile(r"\b(?:malaysia|malaysian)\b", re.I), "MY", "Malaysia"),
+    (re.compile(r"\b(?:indonesia|indonesian)\b", re.I), "ID", "Indonesia"),
     (re.compile(r"\b(?:united arab emirates|uae|emirati)\b", re.I), "AE", "United Arab Emirates"),
     (re.compile(r"\b(?:australia|australian)\b", re.I), "AU", "Australia"),
     (re.compile(r"\b(?:new zealand|new zealander)\b", re.I), "NZ", "New Zealand"),
@@ -233,9 +234,10 @@ LEADING_PARENTHETICAL_COUNTRY_MARKETS_V84 = {
     "GE": "GE", "AM": "AM", "AZ": "AZ", "KZ": "KZ", "UZ": "UZ",
 }
 
-# IZ is a recurring provider annotation in the saved Latin lineup. It is not a
-# country and is stripped only after an already validated country wrapper.
-SECONDARY_PARENTHETICAL_PROVIDER_WRAPPERS_V84 = frozenset({"IZ"})
+# IZ and V+ are recurring provider annotations in the saved Latin and
+# Indonesian lineups. They are not countries and are stripped only after an
+# already validated country wrapper.
+SECONDARY_PARENTHETICAL_PROVIDER_WRAPPERS_V84 = frozenset({"IZ", "V+"})
 
 INDIA_CATEGORY_TOPIC_TOKENS_V84 = {
     "india", "indian", "english", "sports", "sport", "punjabi", "punjab",
@@ -270,6 +272,32 @@ ESPN_PLUS_NUMBERED_BANK_RE_V84 = re.compile(
 FLO_NUMBERED_BANK_RE_V84 = re.compile(
     r"^USA\s*-\s*FLO\s+([1-9]\d{0,2})\s*:(?:\s*.*)?$",
     re.IGNORECASE,
+)
+
+# Movistar Plus uses the literal ``M.`` prefix in one saved Spanish lineup,
+# while the corroborated catalog uses ``M+``.  Keep this as a closed set of
+# exact, programme-audited identities.  Similar looking event/LALIGA rows and
+# unrelated brands must not gain a fuzzy rewrite from the prefix alone.
+SPANISH_MOVISTAR_M_DOT_IDENTITIES_V84 = frozenset(
+    {
+        "accion",
+        "cine espanol",
+        "clasicos",
+        "comedia",
+        "copa del rey",
+        "deportes",
+        "deportes 4",
+        "deportes 5",
+        "deportes 7",
+        "documentales",
+        "drama",
+        "ellas v",
+        "golf",
+        "liga de campeones 7",
+        "liga de campeones 8",
+        "liga de campeones 13",
+        "originales",
+    }
 )
 
 # A short wrapper may be removed when it is an isolated prefix token. Brand-like
@@ -349,6 +377,8 @@ NUMBER_WORDS_V8 = {
 }
 
 PHRASE_REPAIRS_V8: tuple[tuple[str, str], ...] = (
+    (r"\binews\b", "i news"),
+    (r"\bnovasportsextra\b", "nova sports extra"),
     (r"\bchakde\b", "chak de"),
     (r"\bdisc\s+(science|history|turbo)\b", r"discovery \1"),
     (r"\bdisc\s+sci\b", "discovery science"),
@@ -384,6 +414,7 @@ PHRASE_REPAIRS_V8: tuple[tuple[str, str], ...] = (
     (r"\bsuvana\b", "suvarna"),
     (r"\bgujrat\b", "gujarat"),
     (r"\bcheannl\b|\bnetwrk\b", "network"),
+    (r"\bid discovery\b", "investigation discovery"),
     (r"\bid investigation discovery\b", "investigation discovery"),
 )
 
@@ -538,6 +569,11 @@ def _ascii_fold(value: object) -> str:
 
 def _basic_words_v8(value: object) -> list[str]:
     text = _ascii_fold(value)
+    # A trailing ``HD+``/``FHD+``/``UHD+``/``SD+`` token is provider quality
+    # metadata, not a Plus channel edition. Keep real identities such as
+    # Canal+, Sport+, +1 and +24 unchanged by requiring a terminal quality
+    # token immediately followed by the plus sign.
+    text = re.sub(r"(?i)\b(HD|FHD|UHD|SD)\+\s*$", r"\1", text)
     text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
     text = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", text)
     text = re.sub(r"(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])", " ", text)
@@ -718,7 +754,12 @@ def _languages_from_text_v8(value: object, *, category: str = "") -> set[str]:
     result: set[str] = set()
     category_key = _normalize_key_v8(category)
     for word in words:
-        if word == "my" and "malaysia" in category_key:
+        # ``MY`` is overloaded: it is a Malayalam provider wrapper, Malaysia's
+        # country code, and the MyNetworkTV/ordinary-English brand word.  Plain
+        # prose must not become Malayalam merely because it contains ``my``.
+        # Structural wrappers are handled separately below, while an explicit
+        # Malayalam category remains a reliable language signal.
+        if word == "my" and "malayalam" not in category_key.split():
             continue
         if word == "bd" and not re.search(r"\b(?:bangla|bengali|bangladesh)\b", category_key):
             continue
@@ -842,7 +883,14 @@ def _parse_category_context_v84(category_name: str) -> dict[str, Any]:
     reason = ""
     topic_country = _coarse_topic_country_v84(namespace, topic)
 
-    if topic_country is not None:
+    # This exact Greek provider bucket is labelled "Cypriot" even though it
+    # sits below the provider's GR namespace.  Give the specific bucket one
+    # extra point so a repeated ``GR -`` transport wrapper cannot turn its
+    # Cablenet/Cytavision rows back into Greek-market searches.
+    if namespace == "GR" and _nfkc(topic).strip().casefold() == "κυπριακά":
+        market, strength = "CY", 4
+        reason = "provider taxonomy topic identifies Cyprus"
+    elif topic_country is not None:
         market, strength = topic_country[0], 3
         reason = f"provider taxonomy topic identifies {topic_country[1]}"
     elif namespace == "NA":
@@ -861,7 +909,10 @@ def _parse_category_context_v84(category_name: str) -> dict[str, Any]:
             market, strength, reason = "ASIA", 3, "provider taxonomy indicates an unsupported Asian market"
     elif namespace == "AR":
         if re.search(r"\bbein\b", topic_key):
-            market, strength, reason = "BEIN", 3, "provider taxonomy indicates the configured beIN catalog"
+            # A leading ``AR -`` is a coarse Arabic transport wrapper.  The
+            # named beIN bucket is the more specific route and must win that
+            # otherwise-equal comparison without changing generic AR routing.
+            market, strength, reason = "BEIN", 4, "provider taxonomy indicates the configured beIN catalog"
         else:
             market, strength, reason = "MENA", 3, "provider taxonomy indicates Arabic/MENA programming"
     elif namespace == "EU":
@@ -921,7 +972,15 @@ def _parse_category_context_v84(category_name: str) -> dict[str, Any]:
 
 
 def _leading_structural_prefix_v84(channel_name: str) -> str:
-    raw = _nfkc(channel_name).strip()
+    # Superscript/subscript digits in provider names are decorative footnotes,
+    # not channel numbers.  Remove them before NFKC can turn ``²`` into ``2``
+    # and silently select a numbered schedule.
+    raw = re.sub(
+        r"[⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉]",
+        " ",
+        str(channel_name or ""),
+    )
+    raw = _nfkc(raw).strip()
     if not raw or re.match(r"^[#*=~_─━═]{3,}", raw):
         return ""
     patterns = (
@@ -1111,11 +1170,106 @@ def _extract_channel_core_v8(
             or compact in {re.sub(r"[^a-z0-9]+", "", value) for value in structural_prefixes}
         )
 
-    raw = _nfkc(channel_name).strip()
+    # Provider superscript/subscript digits are decorative footnotes.  Strip
+    # them before NFKC can turn a marker such as ``²`` into channel number 2.
+    raw = re.sub(
+        r"[⁰¹²³⁴⁵⁶⁷⁸⁹₀₁₂₃₄₅₆₇₈₉]",
+        " ",
+        str(channel_name or ""),
+    )
+    raw = _nfkc(raw).strip()
     raw = re.sub(r"[.\s]+$", "", raw)
     wrappers: list[str] = []
     market_evidence: list[tuple[str, int, str]] = []
     preserved_leading_country_wrapper = ""
+
+    # In the audited sports lineups, an uppercase leading MY separated by a
+    # pipe/colon (or the complete ``MY (Astro)`` wrapper) is Malaysia.  Keep
+    # this deliberately category- and boundary-scoped: Malayalam categories
+    # still use MY as their language wrapper, while brands such as MY TV and
+    # MyNetworkTV remain identity text.
+    category_languages = _languages_from_text_v8(
+        category_name, category=category_name
+    )
+    category_wrapper_tokens = set(_normalize_key_v8(category_name).split())
+    india_malayalam_prefix = None
+    if (
+        str(category_context.get("market", "")).upper() in {"", "IN"}
+        and category_wrapper_tokens.intersection({"in", "inr", "india", "indian"})
+    ):
+        # The saved provider uses this exact compound prefix for its Malayalam
+        # package. Require the anchored hyphen and pipe plus independent India
+        # category evidence; neither plain MY brands nor a non-India category
+        # may borrow this wrapper meaning.
+        india_malayalam_prefix = re.match(
+            r"^\s*(IN-MY)\s*\|\s*(.+)$", raw, flags=re.I
+        )
+    if india_malayalam_prefix:
+        wrappers.append(india_malayalam_prefix.group(1).strip())
+        market_evidence.append((
+            "IN", 4, "explicit India Malayalam provider wrapper",
+        ))
+        raw = india_malayalam_prefix.group(2).strip()
+
+    malaysia_prefix = None
+    malaysia_sports_context = bool(
+        "sports" in set(category_context.get("content", ()))
+        and not category_languages.intersection(SOUTH_ASIAN_LANGUAGES_V8)
+    )
+    if malaysia_sports_context:
+        # Keep the bare MY pipe/colon form limited to the audited sports
+        # taxonomy. Plain MY remains a real brand word everywhere else.
+        malaysia_prefix = re.match(
+            r"^\s*(MY)\s*(?:\||:)\s*(.+)$", raw
+        ) or re.match(
+            r"^\s*(MY)\s*((?:\(\s*Astro\s*\))\s+.+)$", raw
+        )
+    elif (
+        str(category_context.get("market", "")).upper() == "MY"
+        and not category_languages.intersection(SOUTH_ASIAN_LANGUAGES_V8)
+    ):
+        # ``MY (Astro)`` is a complete anchored provider shape. A named
+        # Malaysian category disambiguates it even outside a sports bucket.
+        malaysia_prefix = re.match(
+            r"^\s*(MY)\s*((?:\(\s*Astro\s*\))\s+.+)$", raw
+        )
+    if malaysia_prefix:
+        wrappers.append(malaysia_prefix.group(1).strip())
+        market_evidence.append((
+            "MY", 4, "explicit Malaysian MY provider wrapper",
+        ))
+        raw = malaysia_prefix.group(2).strip()
+
+    # CA-FR is one compound provider wrapper in this exact Canadian bucket:
+    # CA is the market and FR is the language.  Parsing it as two independent
+    # prefixes makes the later FR token incorrectly route the row to France.
+    if _exact_bank_category_key_v84(category_name) == "canada|tv":
+        canada_french_prefix = re.match(
+            r"^\s*(CA\s*[-_/]\s*FR)\s+(.+)$", raw, flags=re.I
+        )
+        if canada_french_prefix:
+            wrappers.append(canada_french_prefix.group(1).strip())
+            market_evidence.append((
+                "CA", 4, "explicit Canadian French compound wrapper",
+            ))
+            raw = canada_french_prefix.group(2).strip()
+
+    # A terminal country token is routing metadata only in this exact EX-YU
+    # taxonomy bucket.  Elsewhere the same letters remain ordinary identity
+    # text.  BIH is the provider spelling for the catalog's BA region.
+    if _exact_bank_category_key_v84(category_name) == "europe|ex-yu":
+        exyu_country_suffix = re.search(
+            r"\s*\|\s*(RS|HR|SI|BIH|AL)\s*$", raw, flags=re.I
+        )
+        if exyu_country_suffix:
+            country_token = exyu_country_suffix.group(1).upper()
+            country_market = "BA" if country_token == "BIH" else country_token
+            wrappers.append(country_token)
+            market_evidence.append((
+                country_market, 4,
+                f"explicit EX-YU terminal country {country_token}",
+            ))
+            raw = raw[: exyu_country_suffix.start()].strip()
 
     # Provider lineups can lead with a parenthesized ISO country, for example
     # ``(MX) Canal Once`` or ``(MX) (IZ) Canal Once``. Parse only an anchored,
@@ -1179,7 +1333,6 @@ def _extract_channel_core_v8(
     # or the provider separated it with punctuation.  This covers names such as
     # ``PTC Punjabi USA HD`` without treating the brand ``USA Network`` as a
     # market wrapper.
-    category_languages = _languages_from_text_v8(category_name, category=category_name)
     category_key = _normalize_key_v8(category_name)
     south_asian_category = bool(category_languages & SOUTH_ASIAN_LANGUAGES_V8) or bool(
         set(category_key.split()) & {"india", "indian", "inr"}
@@ -1208,6 +1361,10 @@ def _extract_channel_core_v8(
 
     # Remove trailing technical parentheticals, but never meaningful editions.
     raw = re.sub(r"(?:\s*\((?:HD|FHD|UHD|4K|8K|SD|HEVC|H265|H264|A|B|C|D|E|F|F2|FL|H|L|R|S|X|CX|PC)\))+\s*$", "", raw, flags=re.I)
+    # EON/satellite are delivery labels only in the audited ``RAW EON`` and
+    # ``RAW sat`` tail shapes. Do not make EON or SAT global technical tokens:
+    # either word can be part of a real channel brand elsewhere.
+    raw = re.sub(r"\s+RAW\s+(?:EON|SAT)\s*$", "", raw, flags=re.I)
 
     # Provider category labels are often repeated before a pipe, colon, or
     # spaced hyphen (ENG -, PJB -, SPORTS -, GJR -). The accepted labels are
@@ -1240,6 +1397,20 @@ def _extract_channel_core_v8(
             market = _market_from_segment_v8(seg)
             if market:
                 market_evidence.append((market, 4, f"trailing pipe segment {seg}"))
+        # Some Polish bouquets use ``PL | Canal+ | <real channel>`` where the
+        # middle Canal+ value names the provider package. Strip exactly that
+        # one middle segment only after an explicit PL wrapper was removed.
+        # If the real channel is itself Canal+, its following segment remains.
+        removed_polish_wrapper = any(
+            _market_from_segment_v8(wrapper) == "PL" for wrapper in wrappers
+        )
+        if (
+            removed_polish_wrapper
+            and str(category_context.get("market", "")).upper() == "PL"
+            and len(segments) > 1
+            and _normalize_key_v8(segments[0]) == "canal plus"
+        ):
+            wrappers.append(segments.pop(0))
         raw = " ".join(segments)
 
     # Colon prefix is metadata only when it is a known short wrapper/market.
@@ -1310,6 +1481,14 @@ def _extract_channel_core_v8(
             protected_brand = (
                 (key == "usa" and re.match(r"(?i)^network\b", m.group(2)))
                 or (key == "bein" and re.match(r"(?i)^sports\b", m.group(2)))
+                # ID is the established Investigation Discovery brand prefix;
+                # it must not be stripped as Indonesia when followed by the
+                # Discovery name.
+                or (key == "id" and re.match(r"(?i)^discovery\b", m.group(2)))
+                # MY without a structural separator is commonly the
+                # MyNetworkTV/English brand word. Malayalam MY wrappers are
+                # still removed when the category explicitly says Malayalam.
+                or (key == "my" and "malayalam" not in category_tokens)
                 # INDIA/IN can be the first word of a real network brand, not
                 # a routing prefix.  A separated wrapper such as ``IN -`` has
                 # already been removed above, so preserving ``India News ...``
@@ -1408,6 +1587,20 @@ def parse_channel_context_v8(
         channel_name, category_name, category_context=category_context,
         learned_prefixes=category_profile.get("learned_prefixes", ()),
     )
+    spanish_route_evidence = bool(
+        str(category_context.get("market", "")).upper() == "ES"
+        or any(
+            market == "ES" and strength >= 3
+            for market, strength, _reason in market_evidence
+        )
+    )
+    movistar_prefix = re.match(r"^\s*M\.(?=\s|[A-Z0-9])", core_name, flags=re.I)
+    if movistar_prefix and spanish_route_evidence:
+        movistar_tail = core_name[movistar_prefix.end() :].strip()
+        if _normalize_key_v8(movistar_tail) in SPANISH_MOVISTAR_M_DOT_IDENTITIES_V84:
+            # Replace only the anchored brand marker.  The complete tail is
+            # retained so channel numbers can never be inferred or changed.
+            core_name = f"M+ {movistar_tail}"
     strict_key = _normalize_key_v8(core_name)
     relaxed_key = _normalize_key_v8(core_name, remove_optional=True)
     compact_key = re.sub(r"[^a-z0-9]+", "", relaxed_key)
@@ -1428,10 +1621,27 @@ def parse_channel_context_v8(
     original_semantics = _semantic_fields_v8(channel_name, category=category_name)
     semantics["quality"] = original_semantics["quality"]
     languages = set(semantics["languages"])
+    malaysia_market_evidence = any(
+        market == "MY" for market, _strength, _reason in market_evidence
+    )
     for wrapper in wrappers:
         wrapper_key = _metadata_key_v8(wrapper)
-        if wrapper_key == "my" and "malaysia" in _normalize_key_v8(category_name):
+        if wrapper_key == "in my":
+            languages.add("malayalam")
             continue
+        if wrapper_key == "ca fr":
+            languages.add("french")
+            continue
+        if wrapper_key == "my":
+            category_tokens = set(_normalize_key_v8(category_name).split())
+            # MY is a Malayalam language wrapper only when the provider's
+            # category says Malayalam. Other South-Asian categories still
+            # strip the structural wrapper, but must not inherit a second,
+            # contradictory language (for example MARATHI / MY: ...).
+            if "malayalam" not in category_tokens:
+                continue
+            if malaysia_market_evidence or "malaysia" in category_tokens:
+                continue
         if wrapper_key == "bd" and not re.search(r"\b(?:bangla|bengali|bangladesh)\b", _normalize_key_v8(category_name)):
             continue
         language = LANGUAGE_MAP_V8.get(wrapper_key)
@@ -1467,16 +1677,37 @@ _parse_channel_context_impl_v8 = parse_channel_context_v8
 
 def parse_candidate_context_v8(engine: Any, candidate: Mapping[str, str]) -> CandidateContextV8:
     epg_id = str(candidate.get("epg_id", ""))
+    region = str(candidate.get("region", "")).upper()
     try:
         base = engine.SOURCE_SUFFIX_RE.sub("", epg_id)
     except Exception:
         base = re.sub(r"\.[a-z]{2,}(?:\d+|_locals\d*)?$", "", epg_id, flags=re.I)
+    # The legacy suffix table predates several enabled country catalogs. Extend
+    # it only with the candidate's already-validated region, so a name ending
+    # in a different country code can never be silently rewritten.
+    if base == epg_id and region and region != "ALL":
+        base = re.sub(
+            rf"\.{re.escape(region)}(?:\d+|_locals\d*)?$",
+            "",
+            epg_id,
+            flags=re.I,
+        )
+    # A small Norwegian catalog family appends source metadata as
+    # ``Norway.(NO,NO)`` before the country suffix. It is metadata only when the
+    # candidate region is independently NO; other parentheticals remain part of
+    # the channel identity.
+    if region == "NO":
+        base = re.sub(r"\.Norway\.\(NO\s*,\s*NO\)$", "", base, flags=re.I)
+    # A few catalog IDs carry an anchored language metadata prefix such as
+    # ``EN:.MBC1.Masr.sa``. A colon is required so real brands beginning with
+    # EN/AR/FR are never rewritten.
+    base = re.sub(r"^(?:EN|AR|FR):[._\s]*", "", base, flags=re.I)
     base = base.replace(".", " ").replace("_", " ").replace("/", " ")
     base = re.sub(
         r"\b(?:digital\s+)?(?:mono|stereo)(?:\s+(?:ar|en|fr))?\s*$",
         "", base, flags=re.I,
     ).strip()
-    if str(candidate.get("region", "")).upper() == "UK":
+    if region == "UK":
         base = re.sub(r"^\s*u\s+and\s+", "", base, flags=re.I)
     strict_key = _normalize_key_v8(base)
     relaxed_key = _normalize_key_v8(base, remove_optional=True)
@@ -1560,8 +1791,11 @@ def read_approved_alias_rows_v8(source: object) -> list[dict[str, Any]]:
     """Read approved alias rows from a DataFrame, CSV path, or iterable.
 
     Expected columns are ``alias``, ``regions``/``region``,
-    ``epg_ids``/``epg_id``, ``relationship``, and ``note``.  Additional columns
-    are ignored.  The function performs no matching and never reads credentials.
+    ``epg_ids``/``epg_id``, optional ``target_regions``, ``relationship``, and
+    ``note``.  ``target_regions`` is activated only by :meth:`load_approved_aliases`
+    when it reads a CSV path; direct/in-memory registrations cannot grant
+    cross-storage routing.  The function performs no matching and never reads
+    credentials.
     """
     if source is None:
         return []
@@ -1751,7 +1985,12 @@ class ContextualMatcherV8:
         self.schedule_group_by_id: dict[str, str] = {}
         self.register_approved_aliases(DEFAULT_APPROVED_ALIASES_V8)
 
-    def register_approved_aliases(self, rows: Iterable[Mapping[str, Any]]) -> int:
+    def register_approved_aliases(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        _allow_cross_storage: bool = False,
+    ) -> int:
         """Register or merge generic approved channel knowledge.
 
         The key is canonical alias + market set.  Re-registering the same key
@@ -1776,6 +2015,13 @@ class ContextualMatcherV8:
             if not epg_ids and not timeshift_targets:
                 continue
             normalized_regions = tuple(dict.fromkeys(regions))
+            target_regions = tuple(
+                dict.fromkeys(
+                    part.upper()
+                    for part in _split_multi_value_v8(raw.get("target_regions", ""))
+                )
+            ) if _allow_cross_storage else ()
+            cross_storage_epg_ids = tuple(dict.fromkeys(epg_ids)) if target_regions else ()
             existing = next(
                 (
                     item for item in self.approved_aliases
@@ -1788,6 +2034,12 @@ class ContextualMatcherV8:
                 self.approved_aliases.append({
                     "alias": alias,
                     "regions": normalized_regions,
+                    "target_regions": target_regions,
+                    # Keep the exact authorized target IDs separate from the
+                    # public region field. Later learned/in-memory aliases may
+                    # merge ordinary targets into this row, but can never gain
+                    # its cross-storage privilege.
+                    "cross_storage_epg_ids": cross_storage_epg_ids,
                     "epg_ids": tuple(dict.fromkeys(epg_ids)),
                     "timeshift_epg_ids": timeshift_targets,
                     "required_languages": tuple(
@@ -1800,10 +2052,30 @@ class ContextualMatcherV8:
                 })
                 changed += 1
                 continue
+            if existing.get("target_regions") and not _allow_cross_storage:
+                # Never let later learned/in-memory registrations add target
+                # IDs to a privileged static storage row. Otherwise exporting
+                # and reloading the merged table could accidentally promote
+                # those learned IDs to cross-storage authority.
+                existing_ids = set(existing.get("epg_ids", ()))
+                epg_ids = tuple(value for value in epg_ids if value in existing_ids)
             merged = tuple(dict.fromkeys((*existing.get("epg_ids", ()), *epg_ids)))
             if merged != tuple(existing.get("epg_ids", ())):
                 existing["epg_ids"] = merged
                 changed += 1
+            if target_regions:
+                old_regions = tuple(existing.get("target_regions", ()))
+                merged_regions = tuple(dict.fromkeys((*old_regions, *target_regions)))
+                if merged_regions != old_regions:
+                    existing["target_regions"] = merged_regions
+                    changed += 1
+                old_cross_ids = tuple(existing.get("cross_storage_epg_ids", ()))
+                merged_cross_ids = tuple(
+                    dict.fromkeys((*old_cross_ids, *cross_storage_epg_ids))
+                )
+                if merged_cross_ids != old_cross_ids:
+                    existing["cross_storage_epg_ids"] = merged_cross_ids
+                    changed += 1
             if timeshift_targets:
                 old_targets = dict(existing.get("timeshift_epg_ids", {}))
                 merged_targets = dict(old_targets)
@@ -1819,13 +2091,22 @@ class ContextualMatcherV8:
         return changed
 
     def load_approved_aliases(self, source: object) -> int:
-        return self.register_approved_aliases(read_approved_alias_rows_v8(source))
+        # Only an actual CSV path can activate a cross-storage alias. Exported
+        # DataFrames and learned aliases remain ordinary same-market knowledge.
+        allow_cross_storage = isinstance(source, (str, Path))
+        return self.register_approved_aliases(
+            read_approved_alias_rows_v8(source),
+            _allow_cross_storage=allow_cross_storage,
+        )
 
     def approved_alias_table(self) -> pd.DataFrame:
         rows = [
             {
                 "alias": str(item.get("alias", "")),
                 "regions": "|".join(str(value) for value in item.get("regions", ("ALL",))),
+                "target_regions": "|".join(
+                    str(value) for value in item.get("target_regions", ())
+                ),
                 "epg_ids": "|".join(str(value) for value in item.get("epg_ids", ())),
                 "timeshift_epg_ids": json.dumps(item.get("timeshift_epg_ids", {}), sort_keys=True),
                 "required_languages": "|".join(str(value) for value in item.get("required_languages", ())),
@@ -1836,7 +2117,7 @@ class ContextualMatcherV8:
         ]
         return pd.DataFrame(
             rows,
-            columns=["alias", "regions", "epg_ids", "timeshift_epg_ids", "required_languages", "relationship", "note"],
+            columns=["alias", "regions", "target_regions", "epg_ids", "timeshift_epg_ids", "required_languages", "relationship", "note"],
         ).drop_duplicates(["alias", "regions"], keep="last")
 
     def register_schedule_equivalences(self, groups: Iterable[Iterable[str]]) -> int:
@@ -1960,7 +2241,17 @@ class ContextualMatcherV8:
 
 
     @staticmethod
-    def _compatible(query: ChannelContextV8, target: CandidateContextV8, *, allow_default_east: bool = True) -> bool:
+    def _compatible(
+        query: ChannelContextV8,
+        target: CandidateContextV8,
+        *,
+        allow_default_east: bool = True,
+    ) -> bool:
+        # A dedicated 4K/UHD guide may be a separate event feed.  Never infer
+        # it from an HD/SD/plain provider name; an explicit UHD identity or an
+        # approved schedule relationship is required.
+        if target.quality == "uhd" and query.quality != "uhd":
+            return False
         if query.timeshift != target.timeshift:
             return False
         if query.has_extra != target.has_extra:
@@ -2008,7 +2299,30 @@ class ContextualMatcherV8:
         self, query: ChannelContextV8, group: list[CandidateContextV8],
         *, method: str, score: float = 100.0, reason: str = "",
     ) -> dict[str, Any] | None:
-        compatible = [ctx for ctx in group if self._compatible(query, ctx)]
+        def punctuation_descriptor_conflict(target: CandidateContextV8) -> bool:
+            """Keep punctuation brands out of descriptor-relaxed exact lanes."""
+            query_has_bang = "!" in _nfkc(query.core_name)
+            target_has_bang = "!" in _nfkc(
+                target.candidate.get("epg_id", "")
+            )
+            query_descriptors = (
+                set(query.strict_key.split()) & OPTIONAL_DESCRIPTOR_TOKENS_V8
+            )
+            target_descriptors = (
+                set(target.strict_key.split()) & OPTIONAL_DESCRIPTOR_TOKENS_V8
+            )
+            return bool(
+                query_has_bang != target_has_bang
+                and query.strict_key != target.strict_key
+                and query_descriptors != target_descriptors
+            )
+
+        compatible = [
+            ctx
+            for ctx in group
+            if self._compatible(query, ctx)
+            and not punctuation_descriptor_conflict(ctx)
+        ]
         if not compatible:
             return None
         families: dict[tuple[Any, ...], list[CandidateContextV8]] = defaultdict(list)
@@ -2085,9 +2399,20 @@ class ContextualMatcherV8:
         }
 
     def _approved_alias_match(self, query: ChannelContextV8) -> dict[str, Any] | None:
-        keys = {query.strict_key, query.relaxed_key, query.edition_key, *query.identity_keys}
+        # Match the real identity exactly. The edition-stripped key is reserved
+        # for a row's explicit timeshift mapping; otherwise it could turn a
+        # plain TCM alias into an unsafe TCM West approval.
+        keys = {query.strict_key, query.relaxed_key, *query.identity_keys}
         for row in self.approved_aliases:
-            if _normalize_key_v8(row.get("alias", "")) not in keys:
+            alias_key = _normalize_key_v8(row.get("alias", ""))
+            timeshift_targets = row.get("timeshift_epg_ids", {})
+            exact_alias = alias_key in keys
+            exact_timeshift_alias = bool(
+                query.timeshift
+                and timeshift_targets.get(query.timeshift, ())
+                and alias_key == query.edition_key
+            )
+            if not exact_alias and not exact_timeshift_alias:
                 continue
             regions = {str(x).upper() for x in row.get("regions", ("ALL",))}
             if "ALL" not in regions and not regions.intersection(query.route_plan):
@@ -2096,7 +2421,7 @@ class ContextualMatcherV8:
             if required_languages and not required_languages.issubset(set(query.languages)):
                 continue
             if query.timeshift:
-                targets = tuple(row.get("timeshift_epg_ids", {}).get(query.timeshift, ()))
+                targets = tuple(timeshift_targets.get(query.timeshift, ()))
                 if not targets:
                     continue
             else:
@@ -2105,7 +2430,38 @@ class ContextualMatcherV8:
                 item = self.engine.ID_LOOKUP.get(str(epg_id).casefold())
                 if not item:
                     continue
-                if query.route_explicit and str(item.get("region", "")).upper() not in query.route_plan:
+                target_region = str(item.get("region", "")).upper()
+                cross_storage = bool(
+                    query.route_explicit
+                    and len(query.route_plan) == 1
+                    and target_region not in query.route_plan
+                )
+                if cross_storage:
+                    # Cross-storage authority is narrower than an ordinary
+                    # same-market alias: optional-word removal and identity
+                    # variants must not widen it.
+                    if alias_key != query.strict_key:
+                        continue
+                    authorized_ids = {
+                        str(value).casefold()
+                        for value in row.get("cross_storage_epg_ids", ())
+                    }
+                    authorized_regions = {
+                        str(value).upper()
+                        for value in row.get("target_regions", ())
+                    }
+                    if (
+                        str(epg_id).casefold() not in authorized_ids
+                        or target_region not in authorized_regions
+                        or query.timeshift
+                    ):
+                        continue
+                    target_context = parse_candidate_context_v8(self.engine, item)
+                    if not self._compatible(
+                        query, target_context, allow_default_east=False
+                    ):
+                        continue
+                elif query.route_explicit and target_region not in query.route_plan:
                     continue
                 return {
                     "action": "AUTO_EPGSHARE", "source": "epgshare",
@@ -2114,7 +2470,11 @@ class ContextualMatcherV8:
                     "second_score": "", "score_margin": 100.0,
                     "reason": f"Approved channel knowledge: {row.get('relationship', 'approved alias')}"
                               + (f" — {row.get('note')}" if row.get("note") else ""),
-                    "match_method": "approved_knowledge",
+                    "match_method": (
+                        "approved_storage_knowledge"
+                        if cross_storage
+                        else "approved_knowledge"
+                    ),
                 }
         return None
 
@@ -2769,6 +3129,17 @@ class ContextualMatcherV8:
         if synthetic:
             return query, synthetic
 
+        # A static cross-storage alias exists specifically for a real market
+        # whose guide is stored under a different catalog region.  Let only
+        # that narrowly authorized exact path run before the ordinary
+        # unsupported-market stop; same-market aliases retain their historical
+        # ordering below the coverage check.
+        approved = self._approved_alias_match(query)
+        if approved and str(approved.get("match_method", "")).casefold() == (
+            "approved_storage_knowledge"
+        ):
+            return query, approved
+
         coverage_block = self._coverage_block(query)
         if coverage_block:
             if panel_is_usable:
@@ -2782,7 +3153,6 @@ class ContextualMatcherV8:
                 }
             return query, coverage_block
 
-        approved = self._approved_alias_match(query)
         if approved:
             return query, approved
         pre = self._legacy_verified_match(row, query, pre_panel=True)

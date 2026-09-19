@@ -19,6 +19,8 @@ if str(SCRIPTS_DIR) not in sys.path:
 import build_epg_streaming as streaming  # noqa: E402
 from epg_catalog_stream import (  # noqa: E402
     CatalogStreamError,
+    KNOWN_AMBIGUOUS_PROGRAMME_IDS,
+    KNOWN_UNINFORMATIVE_PROGRAMME_IDS,
     infer_catalog_route,
     informative_programme_title,
     parse_all_sources_text,
@@ -483,7 +485,7 @@ class OnePassCatalogTests(unittest.TestCase):
         programmes = "\n".join(
             (
                 f'<programme channel="Placeholder.us2" start="{stamp(0)}" stop="{stamp(8 * 3600)}"><title>No EPG Available</title></programme>',
-                f'<programme channel="Placeholder.us2" start="{stamp(8 * 3600)}" stop="{stamp(16 * 3600)}"><title>Schedule Not Available</title></programme>',
+                f'<programme channel="Placeholder.us2" start="{stamp(8 * 3600)}" stop="{stamp(16 * 3600)}"><title>TV guide is not available</title></programme>',
             )
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -508,15 +510,120 @@ class OnePassCatalogTests(unittest.TestCase):
             "Schedule Not Available",
             "Programme unavailable",
             "Program Information Unavailable",
+            "TV guide is not available",
+            "TV guide unavailable",
             "EPG not available",
             "No EPG Available",
             "No Event Available",
             "No Information 1",
             "N/A - N/A",
+            "Unknown show",
+            "Pas De Diffusion",
+            "Liiga: No Broadcasting",
+            "NOVASPORTSEXTRA2HD: Ξανά κοντά σας",
+            "Vivez en direct les évènements de CANAL+",
         ):
             with self.subTest(title=title):
                 self.assertFalse(informative_programme_title(title))
         self.assertTrue(informative_programme_title("Canada vs USA"))
+        for title in (
+            "Unknown Showdown",
+            "Liiga: Broadcasting Live",
+            "Vivez en direct: Paris",
+        ):
+            with self.subTest(real_title=title):
+                self.assertTrue(informative_programme_title(title))
+
+    def test_known_holding_block_id_fails_even_with_informative_titles(self) -> None:
+        expected_ids = {
+            "Prime.TV.al",
+            "Tring.Originals.al",
+            "First.Channel.al",
+            "TV.Syri.Vision.al",
+            *(f"CANAL+LIVE.{number}.fr" for number in range(11, 20)),
+            "M+.Liga.de.Campeones.8.es",
+            "M+.Liga.de.Campeones.13.es",
+            "Novasportsextra3HD.gr",
+            "Novasportsextra4HD.gr",
+        }
+        self.assertEqual(KNOWN_UNINFORMATIVE_PROGRAMME_IDS, expected_ids)
+        epg_id = "Prime.TV.al"
+        channels = (
+            f'<channel id="{epg_id}"><display-name>Prime TV</display-name></channel>'
+        )
+        programmes = "\n".join(
+            (
+                f'<programme channel="{epg_id}" start="{stamp(0)}" stop="{stamp(8 * 3600)}"><title>Morning News</title></programme>',
+                f'<programme channel="{epg_id}" start="{stamp(8 * 3600)}" stop="{stamp(16 * 3600)}"><title>Evening Film</title></programme>',
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_source(
+                Path(temporary), xml_document(channels, programmes)
+            )
+            result = stream_catalog_and_programmes_once(
+                path=path,
+                fixed_wanted_ids=(),
+                select_provisional_ids=lambda _catalog: [epg_id],
+                window_start=NOW,
+                now_epoch=NOW,
+            )
+        gate = result.programme_gates[epg_id]
+        self.assertFalse(gate.passed)
+        self.assertIn("holding blocks", gate.reason)
+
+    def test_crosswired_epg_id_fails_even_with_informative_titles(self) -> None:
+        epg_id = "KSA.sports.1.ae"
+        channels = (
+            f'<channel id="{epg_id}"><display-name>KSA Sports 1</display-name></channel>'
+        )
+        programmes = "\n".join(
+            (
+                f'<programme channel="{epg_id}" start="{stamp(0)}" stop="{stamp(8 * 3600)}"><title>Live Match</title></programme>',
+                f'<programme channel="{epg_id}" start="{stamp(8 * 3600)}" stop="{stamp(16 * 3600)}"><title>Sports Roundup</title></programme>',
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_source(
+                Path(temporary), xml_document(channels, programmes)
+            )
+            result = stream_catalog_and_programmes_once(
+                path=path,
+                fixed_wanted_ids=(),
+                select_provisional_ids=lambda _catalog: [epg_id],
+                window_start=NOW,
+                now_epoch=NOW,
+            )
+        gate = result.programme_gates[epg_id]
+        self.assertFalse(gate.passed)
+        self.assertIn("cross-wired", gate.reason)
+
+    def test_duplicate_schedule_id_fails_even_with_informative_titles(self) -> None:
+        self.assertEqual(len(KNOWN_AMBIGUOUS_PROGRAMME_IDS), 6)
+        epg_id = "Al.Anwar.TV.2.ae"
+        channels = (
+            f'<channel id="{epg_id}"><display-name>Al Anwar 2</display-name></channel>'
+        )
+        programmes = "\n".join(
+            (
+                f'<programme channel="{epg_id}" start="{stamp(0)}" stop="{stamp(8 * 3600)}"><title>Morning News</title></programme>',
+                f'<programme channel="{epg_id}" start="{stamp(8 * 3600)}" stop="{stamp(16 * 3600)}"><title>Evening Film</title></programme>',
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_source(
+                Path(temporary), xml_document(channels, programmes)
+            )
+            result = stream_catalog_and_programmes_once(
+                path=path,
+                fixed_wanted_ids=(),
+                select_provisional_ids=lambda _catalog: [epg_id],
+                window_start=NOW,
+                now_epoch=NOW,
+            )
+        gate = result.programme_gates[epg_id]
+        self.assertFalse(gate.passed)
+        self.assertIn("same schedule", gate.reason)
 
     def test_gate_requires_guide_to_extend_six_hours(self) -> None:
         channels = '<channel id="Short.us2"><display-name>Short</display-name></channel>'

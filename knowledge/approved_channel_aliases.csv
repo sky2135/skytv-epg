@@ -1,37 +1,214 @@
-alias,regions,epg_ids,relationship,note
-ptc chak de,IN,PTC.CHAK.DE.in|PTC.Chak.De.in|PTC.NEWS.in|PTC.News.in,verified_identity_with_news_fallback,Prefer the dedicated PTC Chak De schedule; use PTC News only if the dedicated ID disappears.
-rtsh 1,AL,RTSH.1.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-rtsh 3,AL,RTSH.3.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-rtsh 24,AL,RTSH.24.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-rtk 3,AL,RTK.3.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-rtk 4,AL,RTK.4.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-realitatea plus,RO,Realitatea.Plus.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
-tvr 2,RO,TVR.2.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
-diema sport 3,BG,Diema.Sport.3.bg,verified_cross_server_identity,Two servers independently selected the same current programme-backed Bulgarian target.
-sky sport 24,IT,Sky.Sport.24.it,verified_cross_server_identity,Two servers independently selected the same current programme-backed Italian target.
-a2 cnn,AL,A2.CNN.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-au sky racing 1,AU,SkyRacing1.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
-au sky racing 2,AU,SkyRacing2.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
-t7,AL,T7.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-history channel,RO,History.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
-tv paprika,CZ,Paprika.cz,verified_cross_server_identity,Two servers independently selected the same current programme-backed Czech target.
-au channel 9 melbourne,AU,9Melbourne.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
-horse and country,SE,[HORSECT].Horse.&.Country.TV.se,verified_cross_server_identity,Two servers independently selected the same current programme-backed Swedish target.
-au channel 7 sydney,AU,7Sydney.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
-au channel 9 perth,AU,9Perth.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
-art doku 1,AL,Doku.1.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-art doku 2,AL,Doku.2.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-tv4 motor,SE,[TV4MOSV].TV4.Motor.se,verified_cross_server_identity,Two servers independently selected the same current programme-backed Swedish target.
-tring 3 plus,AL,3.Plus.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-tlc,BG,TLC.Balkans.bg,verified_cross_server_identity,Two servers independently selected the same current programme-backed Bulgarian target.
-nat geo wild,RO,National.Geographic.Wild.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
-star,GR,STAR.gr,verified_cross_server_identity,Two servers independently selected the same current programme-backed Greek national target.
-etno,RO,Etno.TV.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
-bbc 2 scotland,UK,BBC.Two.HD.uk,verified_schedule_relationship,BBC Two Scotland closed and its viewers now receive the network BBC Two schedule.
-movies cafe,RO,FILM.CAFE.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
-explorer histori,AL,EXP.Histori.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
-canal plus sports,FR,Canal+.Sport.fr,verified_cross_server_identity,Two servers independently selected the same current programme-backed French target.
-sky racing 1,AU,SkyRacing1.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
-sky racing 2,AU,SkyRacing2.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
-channel 7 sydney,AU,7Sydney.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
-channel 9 perth,AU,9Perth.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
+alias,regions,target_regions,epg_ids,relationship,note
+ptc chak de,IN,,PTC.CHAK.DE.in|PTC.Chak.De.in|PTC.NEWS.in|PTC.News.in,verified_identity_with_news_fallback,Prefer the dedicated PTC Chak De schedule; use PTC News only if the dedicated ID disappears.
+rtsh 1,AL,,RTSH.1.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+rtsh 3,AL,,RTSH.3.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+rtsh 24,AL,,RTSH.24.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+rtk 3,AL,,RTK.3.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+rtk 4,AL,,RTK.4.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+realitatea plus,RO,,Realitatea.Plus.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+tvr 2,RO,,TVR.2.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+diema sport 3,BG,,Diema.Sport.3.bg,verified_cross_server_identity,Two servers independently selected the same current programme-backed Bulgarian target.
+sky sport 24,IT,,Sky.Sport.24.it,verified_cross_server_identity,Two servers independently selected the same current programme-backed Italian target.
+a2 cnn,AL,,A2.CNN.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+au sky racing 1,AU,,SkyRacing1.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
+au sky racing 2,AU,,SkyRacing2.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
+t7,AL,,T7.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+history channel,RO,,History.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+tv paprika,CZ,,Paprika.cz,verified_cross_server_identity,Two servers independently selected the same current programme-backed Czech target.
+au channel 9 melbourne,AU,,9Melbourne.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
+horse and country,SE,,[HORSECT].Horse.&.Country.TV.se,verified_cross_server_identity,Two servers independently selected the same current programme-backed Swedish target.
+au channel 7 sydney,AU,,7Sydney.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
+au channel 9 perth,AU,,9Perth.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
+art doku 1,AL,,Doku.1.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+art doku 2,AL,,Doku.2.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+tv4 motor,SE,,[TV4MOSV].TV4.Motor.se,verified_cross_server_identity,Two servers independently selected the same current programme-backed Swedish target.
+tring 3 plus,AL,,3.Plus.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+tlc,BG,,TLC.Balkans.bg,verified_cross_server_identity,Two servers independently selected the same current programme-backed Bulgarian target.
+nat geo wild,RO,,National.Geographic.Wild.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+star,GR,,STAR.gr,verified_cross_server_identity,Two servers independently selected the same current programme-backed Greek national target.
+etno,RO,,Etno.TV.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+bbc 2 scotland,UK,,BBC.Two.HD.uk,verified_schedule_relationship,BBC Two Scotland closed and its viewers now receive the network BBC Two schedule.
+movies cafe,RO,,FILM.CAFE.ro,verified_cross_server_identity,Two servers independently selected the same current programme-backed Romanian target.
+explorer histori,AL,,EXP.Histori.al,verified_cross_server_identity,Two servers independently selected the same current programme-backed Albanian target.
+canal plus sports,FR,,Canal+.Sport.fr,verified_cross_server_identity,Two servers independently selected the same current programme-backed French target.
+sky racing 1,AU,,SkyRacing1.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
+sky racing 2,AU,,SkyRacing2.au,verified_cross_server_identity,Three servers independently selected the same current programme-backed Australian target.
+channel 7 sydney,AU,,7Sydney.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
+channel 9 perth,AU,,9Perth.au,verified_cross_server_identity,Two servers independently selected the same current programme-backed Australian target.
+mbc iraq,MENA,AE,MBC.Iraq.HD.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+mbc drama,MENA,AE,MBC.Drama.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+mbc 2,MENA,AE,MBC.2.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+mbc 4,MENA,AE,MBC.4.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+mbc masr 1,MENA,SA,EN:.MBC1.Masr.sa,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the Saudi catalog.
+rotana classic,MENA,AE,Rotana.Classic.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+al jazeera,MENA,AE,Al.Jazeera.HD.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+dubai sports 2,MENA,AE,Dubai.Sports.2.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+mbc max,MENA,SA,EN:.MBC.MAX.sa,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the Saudi catalog.
+rt arabic,MENA,AE,RT.Arabic.HD.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+al sumaria tv,IQ,AE,Al.Sumaria.TV.ae,verified_storage_identity,Repeated Iraqi rows selected one current programme-backed schedule stored in the UAE catalog.
+france 24 arabic,MENA,AE,France.24.Arabic.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+france 24 english,MENA,AE,France.24.English.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+rotana drama,MENA,AE,Rotana.Drama.ae,verified_storage_identity,Repeated servers selected one current programme-backed schedule stored in the UAE catalog.
+zad tv,MENA,AE,Zad.TV.ae,verified_storage_identity,Repeated servers selected the official current programme-backed Zad TV schedule stored in the UAE catalog.
+nova news,BG,,NOVANEWS.bg,verified_cross_server_identity,Two servers selected one current programme-backed Bulgarian target.
+tcm,US,,Turner.Classic.Movies.HD.us2,verified_cross_server_identity,Non-West US rows selected one current programme-backed target.
+esp news,US,,ESPNEWS.HD.us2,verified_cross_server_identity,The exact US alias selected one current programme-backed target.
+showtime family zone,US,,Showtime.Familyzone.HD.us2,verified_cross_server_identity,The non-West exact US alias selected one current programme-backed target.
+rtv 21,AL,,RTV.21.al,verified_cross_server_identity,3 current NEEDS rows; exact Albanian channel identity across server_1 and server_3.
+super sports 2,AL,,SuperSport.2.al,verified_cross_server_identity,2 current NEEDS rows; Albanian SuperSport number 2 is preserved exactly.
+super sports 3,AL,,SuperSport.3.al,verified_cross_server_identity,3 current NEEDS rows; Albanian SuperSport number 3 is preserved exactly.
+super sports 4,AL,,SuperSport.4.al,verified_cross_server_identity,3 current NEEDS rows; Albanian SuperSport number 4 is preserved exactly.
+super sports 5,AL,,SuperSport.5.al,verified_cross_server_identity,3 current NEEDS rows; Albanian SuperSport number 5 is preserved exactly.
+super sports 6,AL,,SuperSport.6.al,verified_cross_server_identity,3 current NEEDS rows; Albanian SuperSport number 6 is preserved exactly.
+kanal 10,AL,,Kanal.10.al,verified_cross_server_identity,2 current NEEDS rows; exact channel number and Albanian market.
+rtv 21 plus,AL,,21.Plus.al,verified_cross_server_identity,2 current NEEDS rows; Plus edition is explicit and preserved.
+klan plus,AL,,Klan.Plus.al,verified_cross_server_identity,2 current NEEDS rows; Plus edition is explicit and preserved.
+teve 1,AL,,TeVe.1.al,verified_cross_server_identity,2 current NEEDS rows; exact Albanian channel identity and number.
+living,AL,,Living.HD.al,verified_cross_server_identity,2 current NEEDS rows; unique current Albanian Living schedule.
+pro 1,AL,,PRO1.al,verified_cross_server_identity,2 current NEEDS rows; exact Albanian PRO 1 identity and number.
+vizion plus,AL,,Vizion.+.HD.al,verified_cross_server_identity,2 current NEEDS rows; Plus identity is explicit and preserved.
+art kino 1,AL,,Kino.1.al,verified_cross_server_identity,2 current NEEDS rows; ART Kino number 1 is preserved exactly.
+art kino 2,AL,,Kino.2.al,verified_cross_server_identity,2 current NEEDS rows; ART Kino number 2 is preserved exactly.
+art kino 3,AL,,Kino.3.al,verified_cross_server_identity,2 current NEEDS rows; ART Kino number 3 is preserved exactly.
+rtv 21 popullore,AL,,21.Popullore.al,verified_cross_server_identity,2 current NEEDS rows; Popullore edition is explicit and preserved.
+asian aastha,CA,,ATN.Aastha.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN-package identity.
+asian ary news,CA,,ATN.ARY.News.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN-package identity.
+asian ary qtv,CA,,ARY.QTV.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ARY QTV identity.
+asian atn bangla,CA,,ATN.Bangla.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN-package identity.
+asian atn food,CA,,ATN.Food.Food.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN Food identity.
+asian atn life,CA,,ATN.Life.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN-package identity.
+asian atn sony,CA,,ATN.Sony.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN-package identity.
+asian atn sports,CA,,ATN.Sports.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN-package identity.
+asian dd india,CA,,ATN.DD.India.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN-package identity.
+asian dd news,CA,,ATN.DD.News.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN-package identity.
+asian mtv india,CA,,MTV.India.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian MTV India identity.
+asian news18,CA,,ATN.News.18.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN News18 identity.
+asian punjabi 5,CA,,ATN.Punjabi.5.ca,verified_cross_server_identity,2 current NEEDS rows; Punjabi channel number 5 is preserved exactly.
+asian punjabi plus,CA,,ATN.Punjabi.Plus.ca,verified_cross_server_identity,2 current NEEDS rows; Plus edition is explicit and preserved.
+asian sab tv,CA,,ATN.SAB.TV.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN SAB identity.
+asian sony aath,CA,,ATN.Sony.Aath.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN Sony Aath identity.
+asian tamil plus,CA,,ATN.Tamil.Plus.ca,verified_cross_server_identity,2 current NEEDS rows; Plus edition is explicit and preserved.
+asian times now,CA,,ATN.Times.Now.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN-package identity.
+asian zoom,CA,,ATN.Zoom.ca,verified_cross_server_identity,2 current NEEDS rows; exact Canadian ATN Zoom identity.
+tv 4 sports live 1,SE,,[TV4SPL1].TV4.Sport.Live.1.se,verified_cross_server_identity,3 current NEEDS rows; Swedish TV4 Live number 1 is preserved exactly.
+tv 4 sports live 2,SE,,[TV4SPL2].TV4.Sport.Live.2.se,verified_cross_server_identity,4 current NEEDS rows; Swedish TV4 Live number 2 is preserved exactly.
+tv 4 sports live 3,SE,,[TV4SPL3].TV4.Sport.Live.3.se,verified_cross_server_identity,3 current NEEDS rows; Swedish TV4 Live number 3 is preserved exactly.
+tv 4 sports live 4,SE,,[TV4SPL4].TV4.Sport.Live.4.se,verified_cross_server_identity,3 current NEEDS rows; Swedish TV4 Live number 4 is preserved exactly.
+tv 4 fotboll,SE,,[TV4FOSV].TV4.Fotboll.se,verified_cross_server_identity,4 current NEEDS rows; exact Swedish TV4 Fotboll identity.
+tv 4 hockey,SE,,[TV4HOSV].TV4.Hockey.se,verified_cross_server_identity,4 current NEEDS rows; exact Swedish TV4 Hockey identity.
+tv 4 tennis,SE,,[TV4TESV].TV4.Tennis.se,verified_cross_server_identity,3 current NEEDS rows; exact Swedish TV4 Tennis identity.
+v sports vinter,SE,,[VSPOVIS].V.Sport.Vinter.se,verified_cross_server_identity,3 current NEEDS rows; Vinter edition is explicit and preserved.
+atg live,SE,,[ATGLIVE].ATG.Live.se,verified_cross_server_identity,2 current NEEDS rows; exact Swedish ATG Live identity.
+cnn international,SE,,[CNNEU].CNN.International.se,verified_cross_server_identity,2 current NEEDS rows; route is explicitly Sweden and target is the Swedish CNN International schedule.
+espn 2,NL,,ESPN.2.nl,verified_cross_server_identity,3 current NEEDS rows; Netherlands ESPN number 2 is preserved exactly.
+espn 3,NL,,ESPN.3.nl,verified_cross_server_identity,3 current NEEDS rows; Netherlands ESPN number 3 is preserved exactly.
+espn 4,NL,,ESPN.4.nl,verified_cross_server_identity,3 current NEEDS rows; Netherlands ESPN number 4 is preserved exactly.
+ziggo sports 2,NL,,Ziggo.Sport.2.nl,verified_cross_server_identity,3 current NEEDS rows; Netherlands Ziggo number 2 is preserved exactly.
+ziggo sports 3,NL,,Ziggo.Sport.3.nl,verified_cross_server_identity,2 current NEEDS rows; Netherlands Ziggo number 3 is preserved exactly.
+ziggo sports 4,NL,,Ziggo.Sport.4.nl,verified_cross_server_identity,2 current NEEDS rows; Netherlands Ziggo number 4 is preserved exactly.
+ziggo sports 6,NL,,Ziggo.Sport.6.nl,verified_cross_server_identity,2 current NEEDS rows; Netherlands Ziggo number 6 is preserved exactly.
+npo 2 extra,NL,,NPO.2.Extra.nl,verified_cross_server_identity,2 current NEEDS rows; both number 2 and Extra edition are preserved.
+ct 1,CZ,,ČT1.cz,verified_cross_server_identity,2 current NEEDS rows; Czech spacing/transliteration variant with exact number 1.
+ct 2,CZ,,ČT2.cz,verified_cross_server_identity,2 current NEEDS rows; Czech spacing/transliteration variant with exact number 2.
+ct 24,CZ,,ČT24.cz,verified_cross_server_identity,3 current NEEDS rows; Czech spacing/transliteration variant with exact number 24.
+hbo 2,CZ,,HBO2.cz,verified_cross_server_identity,2 current NEEDS rows; Czech HBO number 2 is preserved exactly.
+hbo 3,CZ,,HBO3.cz,verified_cross_server_identity,2 current NEEDS rows; Czech HBO number 3 is preserved exactly.
+nova sports 1,CZ,,Nova.Sport.1.cz,verified_cross_server_identity,2 current NEEDS rows; Czech Nova Sport number 1 is preserved exactly.
+max sports 1,BG,,MAX.Sport.1.bg,verified_cross_server_identity,3 current NEEDS rows; Bulgarian plural spelling and number 1 are normalized safely.
+max sports 2,BG,,MAX.Sport.2.bg,verified_cross_server_identity,3 current NEEDS rows; Bulgarian plural spelling and number 2 are normalized safely.
+rai 1,IT,,Rai1.it,verified_cross_server_identity,3 current NEEDS rows; Italian spacing variant with exact channel number 1.
+automoto,FR,,Automoto.la.chaine.fr,verified_cross_server_identity,5 current NEEDS rows; unique French Automoto channel identity.
+hollywood,PT,,Canal.Hollywood.HD.pt,verified_cross_server_identity,2 current NEEDS rows; explicit Portugal route and unique Canal Hollywood identity.
+historia,PT,,Canal.História.HD.pt,verified_cross_server_identity,2 current NEEDS rows; explicit Portugal route and unique Canal História identity.
+digi 24,RO,,Digi.24.ro,verified_cross_server_identity,2 current NEEDS rows; Romanian Digi number 24 is preserved exactly.
+noovo v tele,CA,,Noovo.ca2,verified_rebrand,4 current NEEDS rows; Bell Media states that V was rebranded as Noovo.
+at and t sportsnet pittsburgh,US,,SportsNet.Pittsburgh.HD.us2,verified_rebrand,2 current NEEDS rows; the Pittsburgh Penguins state that the existing AT&T SportsNet Pittsburgh service was acquired and rebranded as SportsNet Pittsburgh.
+tva sherbrooke,CA,,CHLT.Sherbrooke.ca2,verified_station_callsign,2 current NEEDS rows; CRTC records identify CHLT-TV as the TVA Group television undertaking in Sherbrooke.
+bein sports,CA,,beIN.Sports.HD.(Canada).ca2,verified_cross_server_identity,3 current NEEDS rows; explicit Canada route selects the Canadian beIN Sports schedule.
+assemblee nationale du quebec,CA,,ASSEMBLÉE.NATIONALE.(CF.Cable.TV).ca2,verified_cross_server_identity,2 current NEEDS rows; exact Quebec legislature channel identity.
+fight sports,ID,,Fight.Sports.id,verified_cross_server_identity,Four provider rows use the plural identity; the plural catalog target has a current programme guide while the singular sibling does not.
+celestial movies,ID,,Celestial.Movies.id,verified_cross_server_identity,Four provider rows use the plural identity; the plural catalog target has a current programme guide while the singular sibling does not.
+asian food channel,MY,,Asian.Food.Network.HD.my,verified_rebrand,Discovery Asia Pacific rebranded the linear Asian Food Channel as Asian Food Network in 2019.
+al anwar 2,IQ,AE,Al.Anwar.TV.2.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+al araby,MENA,AE,Al.Araby.HD.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+al araby tv,MENA,AE,Al.Araby.HD.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+al jazeera english,MENA,AE,Al.Jazeera.English.HD.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+al rasheed tv,IQ,AE,Al.Rasheed.TV.HD.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+al sharqiya,IQ,AE,Al.Sharqiya.TV.HD.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+al sharqiya tv,IQ,AE,Al.Sharqiya.TV.HD.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+alsharqiya tv,MENA,AE,Al.Sharqiya.TV.HD.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+bbc world news,MENA,AE,BBC.World.News.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+dijlah zaman,IQ,AE,Dijlah.Zaman.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+dijlah zaman tv,IQ|MENA,AE,Dijlah.Zaman.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+dubai racing 1,MENA,AE,Dubai.Racing.1.HD.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+dubai racing 1 tv,MENA,AE,Dubai.Racing.1.HD.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+fxm,US,,FX.Movie.Channel.HD.us2,verified_brand_abbreviation,US FXM is the FX Movie Channel brand; frozen XML target has a current/future programme guide.
+rotana cinema ksa,MENA,AE,Rotana.Cinema.KSA.ae,verified_exact_storage_identity,Exact normalized target family appears across at least two servers; frozen XML target has a current/future programme guide.
+1 kzn,AFRICA,ZA,1.KZN.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+ad sports 1,MENA,AE,AD.Sports.1.HD.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+ad sports 2,MENA,AE,AD.Sports.2.HD.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+al nahar drama,EG|MENA,AE,Al.Nahar.Drama.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+al oula,EG,AE,Al.Oula.ae,verified_exact_storage_identity,Audited Egyptian identity only; generic MENA Al Oula names remain ambiguous and review-only.
+arryadia,MENA,FR,Arryadia.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+art aflam 1,MENA,FR,ART.AFLAM.1.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+art aflam 2,MENA,FR,ART.AFLAM.2.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+art cinema,MENA,FR,ART.CINEMA.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+ary qtv,PK|US,CA,ARY.QTV.ca,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+b4u music,US,UK,B4U.Music.uk,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+bahrain international,MENA,AE,Bahrain.International.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+berbere tv,DZ,FR,Berbère.TV.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+cape town tv,AFRICA,ZA,Cape.Town.TV.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+carthage plus,MENA,FR,Carthage+.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+cbc drama,EG|MENA,AE,CBC.Drama.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+channel o,AFRICA,ZA,Channel.O.HD.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+cn arabic,MENA,AE,CN.Arabic.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+dubai racing,MENA,AE,Dubai.Racing.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+el bilad tv,DZ,FR,El.Bilad.TV.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+express news,PK,IN,Express.News.in,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+game plus,CA,US,Game+.Game.Plus.HD.us2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+golf plus,FR,CH,GOLF+.ch,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+hannibal tv,MENA,FR,HANNIBAL.TV.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+ignition,AFRICA,ZA,IGNITION.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+iqraa international,MENA,FR,Iqraa.International.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+iqraa tv,MENA,FR,Iqraa.TV.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+lana tv,MENA,FR,Lana.TV.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+lesotho tv,AFRICA,ZA,Lesotho.TV.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+mbc bollywood,MENA,AE,MBC.Bollywood.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+mbc masr,MENA,AE,MBC.Masr.HD.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+nile cinema,EG|MENA,AE,Nile.Cinema.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+oman tv,MENA,AE,Oman.TV.HD.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+parliamentary service,AFRICA,ZA,Parliamentary.Service.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+rotana aflam plus,MENA,FR,Rotana.Aflam+.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+rotana cinema,MENA,FR,Rotana.Cinema.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+rotana comedy,MENA,FR,Rotana.Comedy.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+rotana kids,MENA,FR,Rotana.Kids.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+rotana m plus,MENA,FR,Rotana.M+.fr,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+rsi la 1,IT,CH,RSI.La.1.ch,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+sabc 1,AFRICA,ZA,SABC.1.HD.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+sabc 2,AFRICA,ZA,SABC.2.HD.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+sabc 3,AFRICA,ZA,SABC.3.HD.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+sharjah sports,MENA,AE,Sharjah.Sports.HD.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+ss variety 2,AFRICA,ZA,SS.Variety.2.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+ss variety 3,AFRICA,ZA,SS.Variety.3.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+ss variety 4,AFRICA,ZA,SS.Variety.4.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+stingray alternative,US,CA,Stingray.Alternative.ca2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+stingray classic rock,US,CA,Stingray.Classic.Rock.ca2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+stingray easy listening,UK,CA,Stingray.Easy.Listening.ca2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+stingray hip hop r and b,US,CA,Stingray.Hip-Hop/R&B.ca2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+stingray hit list,UK|US,CA,Stingray.Hit.List.ca2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+stingray hot country,UK|US,CA,Stingray.Hot.Country.ca2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+stingray jukebox oldies,UK,CA,Stingray.Jukebox.Oldies.ca2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+stingray pop adult,UK|US,CA,Stingray.Pop.Adult.ca2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+stingray smooth jazz,UK,CA,Stingray.Smooth.Jazz.ca2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+stingray the spa,UK,CA,Stingray.The.Spa.ca2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+trace uk,UK,US,Trace.UK.us,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+tshwane tv,AFRICA,ZA,Tshwane.TV.za,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+vevo 2k,UK,US,Vevo.2K.us2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+vevo 70 s,UK,US,Vevo.70s.us2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+vevo 80 s,UK,US,Vevo.80s.us2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+vevo 90 s,UK,US,Vevo.90s.us2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+vevo country,UK,US,Vevo.Country.us2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+vevo hip hop,UK,US,Vevo.Hip-Hop.us2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+vevo latino,UK,US,Vevo.Latino.us2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+vevo r and b,UK,US,Vevo.R.andB.us2,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.
+zee aflam,MENA,AE,Zee.Aflam.ae,verified_exact_storage_identity,Audited v9 exact storage identity with one current programme-backed target.

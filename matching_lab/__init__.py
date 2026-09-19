@@ -15,8 +15,8 @@ from .models import (
     RunManifest,
 )
 
-LAB_VERSION = "2.0.0-shadow"
-PROPOSAL_SCHEMA = "skytv.smart-match-proposal.v1"
+LAB_VERSION = "2.1.0-shadow"
+PROPOSAL_SCHEMA = "skytv.smart-match-proposal.v2"
 RUN_MANIFEST_SCHEMA = "skytv.smart-match-manifest.v1"
 
 __all__ = (

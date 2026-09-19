@@ -141,6 +141,7 @@ class ProtectedSemantics:
     market: str = ""
     direction: str = ""
     timeshift: str = ""
+    quality: str = ""
     has_plus: bool = False
     has_extra: bool = False
     has_alternate: bool = False
@@ -149,7 +150,7 @@ class ProtectedSemantics:
     content: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("market", "direction", "timeshift"):
+        for name in ("market", "direction", "timeshift", "quality"):
             value = safe_text(getattr(self, name), maximum=80).upper()
             object.__setattr__(self, name, value)
         for name in ("has_plus", "has_extra", "has_alternate"):
@@ -172,6 +173,7 @@ class ProtectedSemantics:
             "market": self.market,
             "direction": self.direction,
             "timeshift": self.timeshift,
+            "quality": self.quality,
             "has_plus": self.has_plus,
             "has_extra": self.has_extra,
             "has_alternate": self.has_alternate,
@@ -267,6 +269,39 @@ class CandidateEvidence:
                 "reason": self.programme_reason,
             },
         }
+
+
+EXACT_TIER_METHODS = frozenset(
+    {
+        "BAG_EXACT",
+        "COMPACT_EXACT",
+        "CURATED_ALIAS_EXACT",
+        "CURATED_STORAGE_ALIAS_EXACT",
+        "FROZEN_RESOLVER_EXACT",
+        "HUMAN_ALIAS_EXACT",
+        "REPOSITORY_CURATED_ALIAS_EXACT",
+        "RELAXED_EXACT",
+        "STRICT_EXACT",
+    }
+)
+
+
+def retained_exact_tier_families(
+    candidates: Sequence[CandidateEvidence],
+) -> tuple[CandidateEvidence, ...]:
+    """Return compatible retained targets carrying exact-tier evidence.
+
+    Each retained target is deliberately treated as a separate family.  This
+    keeps parallel SD/HD IDs or duplicate exact catalog IDs review-only even
+    when the frozen resolver selected one of them.
+    """
+
+    return tuple(
+        candidate
+        for candidate in candidates
+        if not candidate.conflicts
+        and EXACT_TIER_METHODS.intersection(candidate.methods)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -507,8 +542,10 @@ __all__ = (
     "ProposalRecord",
     "ProtectedSemantics",
     "RunManifest",
+    "EXACT_TIER_METHODS",
     "canonical_json_bytes",
     "ensure_finite_scores",
+    "retained_exact_tier_families",
     "require_code",
     "require_score",
     "require_sha256",

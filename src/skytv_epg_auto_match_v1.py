@@ -8,6 +8,8 @@ This module deliberately adds a narrower production boundary around it:
 * Server 1's native EPG ID is never supplied to the matcher;
 * only an explicit set of deterministic structural matcher methods may become
   automatic; fuzzy, containment, near-exact, and legacy methods remain REVIEW;
+* an audited cross-storage alias is accepted only when the pinned resolver
+  independently replays the same exact static-knowledge target;
 * a candidate is not enabled until the same combined XMLTV source snapshot
   declares the exact case-sensitive ID and its programme gate proves at least
   two informative entries spanning a six-hour future horizon;
@@ -36,7 +38,7 @@ from typing import Any, Iterable, Mapping, Sequence
 STRICT_MATCHER_VERSION = "8.4"
 STRICT_MATCHER_BUILD_ID = "SKYTV-CONTEXTUAL-RULES-8.4-2026-07-19"
 STRICT_MATCHER_SOURCE_SHA256 = (
-    "3ac5bb0800cb2b9ae071af9ba0e9d64766d1c50359aa3275a5974a10a227fda0"
+    "c051b3359e9bff43a8b05768922819ebcd76f56e7ab81f9432549630d7a09600"
 )
 STRICT_ENGINE_SOURCE_SHA256 = (
     "8040562b85758a6b0c7b59a7d0e7918f313f3ccf7829498401a8815d097bddf4"
@@ -51,6 +53,7 @@ MIN_FUTURE_HORIZON_SECONDS = 6 * 60 * 60
 SAFE_REAL_METHODS = frozenset(
     {
         "approved_knowledge",
+        "approved_storage_knowledge",
         "canonical_identity",
         "category_language_default",
         "descriptor_relaxed",
@@ -952,6 +955,39 @@ def _canonical_target(match: Mapping[str, Any]) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def _verified_storage_alias_replay(
+    resolver: Any,
+    query: Any,
+    match: Mapping[str, Any],
+) -> bool:
+    """Require the pinned resolver to replay one exact cross-storage alias."""
+
+    if _text(match.get("match_method")).casefold() != "approved_storage_knowledge":
+        return False
+    checker = getattr(resolver, "_approved_alias_match", None)
+    if not callable(checker):
+        return False
+    try:
+        replay = checker(query)
+    except Exception:
+        return False
+    if not isinstance(replay, Mapping):
+        return False
+    original_source, _original_feed, original_id = _canonical_target(match)
+    replay_source, _replay_feed, replay_id = _canonical_target(replay)
+    return bool(
+        original_id
+        and original_source == "epgshare01"
+        and replay_source == "epgshare01"
+        and replay_id == original_id
+        and _text(replay.get("action")).upper() == "AUTO_EPGSHARE"
+        and _text(replay.get("match_method")).casefold()
+        == "approved_storage_knowledge"
+        and not _text(match.get("second_epg_id"))
+        and not _text(replay.get("second_epg_id"))
+    )
+
+
 def _resolve_without_review_only_scans(
     resolver: Any,
     row: Mapping[str, Any],
@@ -1061,6 +1097,7 @@ def _proposal_from_match(
     query: Any,
     identity: MatcherIdentity,
     catalog: CatalogSnapshot,
+    storage_alias_verified: bool = False,
 ) -> MatchProposal:
     action = _text(match.get("action")).upper()
     method = _text(match.get("match_method")).casefold()
@@ -1130,7 +1167,19 @@ def _proposal_from_match(
         if _DUMMY_ID_RE.search(target_epg_id) or target_kinds != frozenset({"real"}):
             eligible = False
             rejection = "Target is a dummy or lacks unambiguous real-catalog type evidence"
-        elif len(target_regions) != 1 or _market_code(explicit_market) not in target_regions:
+        elif len(target_regions) != 1:
+            eligible = False
+            rejection = "Target catalog region is missing or ambiguous"
+        elif method == "approved_storage_knowledge":
+            if not storage_alias_verified:
+                eligible = False
+                rejection = (
+                    "Cross-storage target was not replayed from fixed approved knowledge"
+                )
+            elif _market_code(explicit_market) in target_regions:
+                eligible = False
+                rejection = "Cross-storage method returned a same-market target"
+        elif _market_code(explicit_market) not in target_regions:
             eligible = False
             rejection = "Target catalog region does not match the explicit channel market"
     elif action == "AUTO_DUMMY":
@@ -1343,6 +1392,11 @@ def propose_new_channel_matches(
             )
             if not isinstance(raw_match, Mapping):
                 raise TypeError("matcher result is not a mapping")
+            storage_alias_verified = _verified_storage_alias_replay(
+                resolver,
+                query,
+                raw_match,
+            )
             proposal = _proposal_from_match(
                 server_id=normalized_server,
                 stream_id=stream_id,
@@ -1352,6 +1406,7 @@ def propose_new_channel_matches(
                 query=query,
                 identity=matcher_identity,
                 catalog=catalog,
+                storage_alias_verified=storage_alias_verified,
             )
         except Exception as exc:  # Keep inventory sync useful while disabling automation.
             proposal = _review_only_proposal(
