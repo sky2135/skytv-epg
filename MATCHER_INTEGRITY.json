@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "createdUtc": "2026-07-21T22:16:51.259933Z",
-  "updatedUtc": "2026-09-19T04:10:51Z",
+  "updatedUtc": "2026-09-19T17:11:34Z",
   "matcherVersion": "8.4",
   "matcherBuildId": "SKYTV-CONTEXTUAL-RULES-8.4-2026-07-19",
   "builderVersion": "7.1",
@@ -28,7 +28,7 @@
   "epgCatalogStreamSha256": "fb04f5f9097bffe96ba4f3a421b4d53f1ce6110dc80e390ee45a91f2d99a9821",
   "epgSelectionSpoolSha256": "c0ad4e485972b206515f2205e37cf056593cb1105035a6031ef95b5371cd1336",
   "sheetSeedExporterSha256": "c5530d0a2dd63c62b8ffafed102651859e0155fe9ba5b731d5ced1ab6e17d80b",
-  "workflowSha256": "d9210cb8ed28d722d804a31a0a54ff37a7ee87d537bf4a1639713e2c7cfd06f4",
+  "workflowSha256": "a31fa0425adb7e06011dc1c9d18ad8044b148a8496e1421717261ee5ce0e886b",
   "channelInventoryRunnerSha256": "e91476606f3770063fca7c060d1cbd716040edfa1b5ceccbf034bfbdc48d6253",
   "channelInventoryWorkflowSha256": "239ca26c1fbd5c62668dd4609db786ee12da09d2dc9eebf34f5766ff3c74f72f",
   "channelInventoryRequirementsSha256": "cb80ac4377fa3656ea135c65273fdc1b6ba7f5ce198f1f14ccb13de0e3ed593f",
@@ -77,7 +77,7 @@
     "Servers 2 and 3 use native panel XMLTV only for explicit runtime-eligible panel rows.",
     "Native Server 2/3 panels may declare only an inert tv DOCTYPE with no internal subset and at most the exact xmltv.dtd SYSTEM identifier; external DTDs and entities are never loaded, while EPGShare and generated outputs remain DTD-free.",
     "The app guide retains schema v1 required fields and three-item programme tuples; personalization is emitted in a companion metadata file.",
-    "The icon layer is separate from channel matching; Workflow 2 privately binds exact stream identities to a private mapping URL, an exact approved portrait or original named-person icon, a safe EPGShare source icon, or original category artwork, in that order.",
+    "The icon layer is separate from channel matching; Workflow 2 privately binds exact stream identities to a private mapping URL, an exact approved portrait or a transparent movie or music symbol, a safe EPGShare source icon, or original category artwork, in that order.",
     "Logo filenames are never fuzzy matched automatically.",
     "Workflow 1 analyzes the eligible REVIEW scope but persists at most one explicit total cap of 0, 25, 100, 500, 2,500, or 5,000 rows across deterministic, native, synthetic, IGNORE, and strict AI lanes; the scheduled cap defaults to zero, Gemini is explicit opt-in, AI receives only remaining whole-cluster capacity, and every Google batch is independently reread and provider-revalidated. Workflow 2 refreshes afterward and deploys only fully validated staged output."
   ]

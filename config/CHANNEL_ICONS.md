@@ -66,13 +66,19 @@ file automatically and gives it directly to the EPG builder.
 Every generated row uses the exact server ID, stream ID, and channel name, so a
 shared dummy EPG ID cannot send one channel's artwork to another channel.
 Named 24/7 channels are matched only by an exact category and anchored name
-pattern. An approved real portrait from the public subject catalog wins over an
-original name-and-motif fallback. There is no fuzzy person matching.
+pattern. An approved real portrait from the public subject catalog wins. When
+no reviewed portrait exists, a singer receives a transparent music symbol and
+an actor receives a transparent movie symbol. There is no fuzzy person
+matching and no invented likeness.
 
 Fallbacks are required for synthetic/dummy guides and native panel guides
 because those sources do not publish an icon through the production builder.
 They are also required when an EPGShare icon URL is not safe to publish. For
 example, production rejects icon URLs with query strings or fragments because
-they can contain private tokens. The fallback files are PNG for broad IPTV
-player support. Generic category art uses priority `10`, named fallback art uses
-priority `300`, and an approved portrait uses priority `400`.
+they can contain private tokens. Background-free SVG masters are kept in the
+repository, while transparent PNG renders are published for broad IPTV-player
+support. Numbered movie families share one stable symbol; a different name
+pattern can select another movie symbol. Music symbols are selected by content,
+such as dhol for Punjabi/Bhangra or guitar for rock. Generic category art uses
+priority `10`, a named-person content symbol uses priority `200`, and an
+approved portrait uses priority `400`.

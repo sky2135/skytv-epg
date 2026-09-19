@@ -16,10 +16,17 @@ an exact server and stream ID; a shared dummy EPG ID is never sufficient.
 Effective order:
 
 1. safe URL supplied in the private mapping row;
-2. exact reviewed override, including an approved person portrait;
-3. exact original named-person fallback;
+2. exact reviewed manual override;
+3. approved exact-subject portrait, or a transparent movie/music symbol when
+   that named person has no approved portrait;
 4. safe source XMLTV icon;
-5. original category fallback when no usable source icon exists.
+5. transparent category fallback when no usable source icon exists.
+
+Movie fallbacks use five vector motifs. Numbered members of the same normalized
+name pattern share one motif. Music fallbacks use notes, microphone,
+headphones, guitar, dhol, or sitar according to the channel/category wording.
+The committed SVGs are the editable vector masters; transparent PNG renders are
+published for broader IPTV-player support.
 
 Exact per-stream rows are derived from the private mapping only during the
 workflow run. They stay under `.build/` and are never committed or uploaded.

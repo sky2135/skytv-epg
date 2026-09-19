@@ -166,15 +166,17 @@ class MissingIconOverrideTests(unittest.TestCase):
             source = root / "source.xml.gz"
             logos = root / "logos"
             asset_catalog = root / "icon_catalog.csv"
-            named_catalog = root / "named_catalog.csv"
             for relative in (
-                "generated/category-general.png",
-                "generated/category-music.png",
-                "generated/category-radio.png",
-                "generated/category-sports.png",
-                "generated/people/person-fallback-arijit-singh.png",
-                "generated/people/person-fallback-lata-mangeshkar.png",
-                "people/lata.png",
+                "generated/category-general-v2.png",
+                "generated/category-radio-v2.png",
+                "generated/category-sports-v2.png",
+                "generated/category-music-notes-v2.png",
+                "generated/category-music-microphone-v2.png",
+                "generated/category-music-headphones-v2.png",
+                "generated/category-music-guitar-v2.png",
+                "generated/category-music-dhol-v2.png",
+                "generated/category-music-sitar-v2.png",
+                "people/lata-cutout-v2.png",
             ):
                 target = logos / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -203,56 +205,13 @@ class MissingIconOverrideTests(unittest.TestCase):
                 writer.writeheader()
                 writer.writerow(
                     {
-                        "asset_id": "lata-mangeshkar",
+                        "asset_id": "lata-mangeshkar-cutout-v2",
                         "subject_type": "person",
                         "subject_name": "Lata Mangeshkar",
-                        "local_file": "people/lata.png",
+                        "local_file": "people/lata-cutout-v2.png",
                         "asset_kind": "person_photo",
                         "license_id": "CC-BY-3.0",
                         "review_status": "approved",
-                    }
-                )
-            with named_catalog.open("w", encoding="utf-8", newline="") as handle:
-                writer = csv.DictWriter(
-                    handle,
-                    fieldnames=(
-                        "asset_id",
-                        "subject_type",
-                        "subject_name",
-                        "person_role",
-                        "local_file",
-                        "asset_kind",
-                        "license_id",
-                        "review_status",
-                    ),
-                )
-                writer.writeheader()
-                writer.writerow(
-                    {
-                        "asset_id": "person-fallback-arijit-singh",
-                        "subject_type": "person",
-                        "subject_name": "Arijit Singh",
-                        "person_role": "singer",
-                        "local_file": (
-                            "generated/people/person-fallback-arijit-singh.png"
-                        ),
-                        "asset_kind": "original_named_fallback",
-                        "license_id": "CC0-1.0",
-                        "review_status": "fallback_ready",
-                    }
-                )
-                writer.writerow(
-                    {
-                        "asset_id": "person-fallback-lata-mangeshkar",
-                        "subject_type": "person",
-                        "subject_name": "Lata Mangeshkar",
-                        "person_role": "singer",
-                        "local_file": (
-                            "generated/people/person-fallback-lata-mangeshkar.png"
-                        ),
-                        "asset_kind": "original_named_fallback",
-                        "license_id": "CC0-1.0",
-                        "review_status": "fallback_ready",
                     }
                 )
             with gzip.open(source, "wb") as handle:
@@ -265,7 +224,6 @@ class MissingIconOverrideTests(unittest.TestCase):
                 output_config=output_config,
                 logo_root=logos,
                 asset_catalog=asset_catalog,
-                named_fallback_catalog=named_catalog,
             )
             first_output = output_config.read_bytes()
             repeated = generator.generate(
@@ -275,7 +233,6 @@ class MissingIconOverrideTests(unittest.TestCase):
                 output_config=output_config,
                 logo_root=logos,
                 asset_catalog=asset_catalog,
-                named_fallback_catalog=named_catalog,
             )
             self.assertEqual(output_config.read_bytes(), first_output)
             self.assertEqual(
@@ -293,7 +250,6 @@ class MissingIconOverrideTests(unittest.TestCase):
                     output_config=base_config,
                     logo_root=logos,
                     asset_catalog=asset_catalog,
-                    named_fallback_catalog=named_catalog,
                 )
 
         self.assertEqual(summary, repeated)
@@ -304,24 +260,37 @@ class MissingIconOverrideTests(unittest.TestCase):
             {
                 "generated_fallback": 4,
                 "mapping_logo": 1,
-                "named_fallback": 1,
                 "named_portrait": 1,
+                "named_symbol": 1,
                 "source_xmltv": 1,
             },
         )
         self.assertEqual(len(configured), 6)
         by_stream = {row["stream_id"]: row for row in configured}
-        self.assertEqual(by_stream["1"]["local_file"], "generated/category-music.png")
-        self.assertEqual(by_stream["2"]["local_file"], "generated/category-radio.png")
-        self.assertEqual(by_stream["4"]["local_file"], "generated/category-general.png")
-        self.assertEqual(by_stream["6"]["local_file"], "generated/category-sports.png")
-        self.assertEqual(by_stream["5"]["local_file"], "people/lata.png")
+        self.assertRegex(
+            by_stream["1"]["local_file"],
+            r"^generated/category-music-.+-v2\.png$",
+        )
+        self.assertEqual(
+            by_stream["2"]["local_file"], "generated/category-radio-v2.png"
+        )
+        self.assertEqual(
+            by_stream["4"]["local_file"], "generated/category-general-v2.png"
+        )
+        self.assertEqual(
+            by_stream["6"]["local_file"], "generated/category-sports-v2.png"
+        )
+        self.assertEqual(
+            by_stream["5"]["local_file"], "people/lata-cutout-v2.png"
+        )
         self.assertEqual(
             by_stream["8"]["local_file"],
-            "generated/people/person-fallback-arijit-singh.png",
+            "generated/category-music-microphone-v2.png",
         )
         self.assertEqual(by_stream["5"]["priority"], "400")
-        self.assertEqual(by_stream["8"]["priority"], "300")
+        self.assertEqual(by_stream["8"]["priority"], "200")
+        self.assertEqual(summary["named_symbol_rows"], 1)
+        self.assertEqual(summary["named_fallback_rows"], 0)
         self.assertNotIn("3", by_stream)
         self.assertNotIn("7", by_stream)
 

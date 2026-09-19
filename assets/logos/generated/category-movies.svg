@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">Movies channel icon</title>
-  <desc id="desc">Original SKY TV fallback artwork for movies channels.</desc>
-  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3c1a27"/><stop offset="100%" stop-color="#a83b57"/></linearGradient></defs>
-  <rect width="512" height="512" rx="72" fill="url(#bg)"/>
-  <rect x="90" y="190" width="332" height="226" rx="28" fill="none" stroke="white" stroke-width="24"/><path d="M93 190 130 96h318l-37 94zM139 101l46 84M225 101l46 84M311 101l46 84M397 101l35 66" fill="none" stroke="white" stroke-width="22"/><path d="m229 251 102 58-102 58z" fill="white"/>
-</svg>

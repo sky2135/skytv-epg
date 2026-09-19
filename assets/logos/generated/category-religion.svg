@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">Religion channel icon</title>
-  <desc id="desc">Original SKY TV fallback artwork for religion channels.</desc>
-  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4b3517"/><stop offset="100%" stop-color="#b07d32"/></linearGradient></defs>
-  <rect width="512" height="512" rx="72" fill="url(#bg)"/>
-  <path d="M82 170c67-19 126-6 174 35 48-41 107-54 174-35v214c-67-19-126-6-174 35-48-41-107-54-174-35z" fill="none" stroke="white" stroke-width="22" stroke-linejoin="round"/><path d="M256 205v214M256 99v58M174 122l35 47M338 122l-35 47" stroke="white" stroke-width="20" stroke-linecap="round"/>
-</svg>

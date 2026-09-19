@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Movies — Projector channel icon</title>
+  <desc id="desc">Original background-free SKY TV fallback artwork for movies projector channels.</desc>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="162" cy="148" r="82" fill="#f4b942" stroke="#f8fafc" stroke-width="20"/><circle cx="322" cy="148" r="82" fill="#e84a5f" stroke="#f8fafc" stroke-width="20"/><circle cx="162" cy="148" r="27" fill="#182033"/><circle cx="322" cy="148" r="27" fill="#182033"/><rect x="89" y="227" width="294" height="174" rx="33" fill="#e84a5f" stroke="#f8fafc" stroke-width="20"/><path d="m383 267 88-48v190l-88-48z" fill="#f4b942" stroke="#f8fafc" stroke-width="18"/><path d="m193 401-51 64m147-64 51 64" stroke="#182033" stroke-width="25"/>
+  </g>
+</svg>
