@@ -27,6 +27,8 @@ name pattern share one motif. Music fallbacks use notes, microphone,
 headphones, guitar, dhol, or sitar according to the channel/category wording.
 The committed SVGs are the editable vector masters; transparent PNG renders are
 published for broader IPTV-player support.
+Generated v3 fallbacks use solid off-white interiors and dark rounded outlines.
+They do not use gradients, shadows, visual text, or coloured background cards.
 
 Exact per-stream rows are derived from the private mapping only during the
 workflow run. They stay under `.build/` and are never committed or uploaded.

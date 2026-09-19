@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Music — Guitar channel icon</title>
+  <desc id="desc">Original minimalist filled SKY TV artwork for music guitar channels, with a transparent outer background.</desc>
+  <g fill="#F7F8FA" stroke="#1B2230" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M169 261c-71 12-111 70-87 129 25 61 94 76 145 36 29-23 38-58 29-92l46-46c34 9 69 0 92-29 40-51 25-120-36-145-59-24-117 16-129 87z"/><path d="m260 250 144-144 45 45-144 144z"/><circle cx="181" cy="346" r="34" fill="#1B2230" stroke="none"/><path d="m393 118 42-42m-18 67 42-42" fill="none" stroke="#1B2230" stroke-width="18"/><path d="m393 118 42-42m-18 67 42-42" fill="none" stroke="#F7F8FA" stroke-width="7"/>
+  </g>
+</svg>

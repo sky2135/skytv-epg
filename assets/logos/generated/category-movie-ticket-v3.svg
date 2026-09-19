@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Movies — Ticket channel icon</title>
+  <desc id="desc">Original minimalist filled SKY TV artwork for movies ticket channels, with a transparent outer background.</desc>
+  <g fill="#F7F8FA" stroke="#1B2230" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M73 142h366v66c-36 0-59 20-59 48s23 48 59 48v66H73v-66c36 0 59-20 59-48s-23-48-59-48z"/><path d="M181 142v228" fill="none" stroke="#1B2230" stroke-width="24" stroke-dasharray="18 20"/><path d="M181 142v228" fill="none" stroke="#F7F8FA" stroke-width="10" stroke-dasharray="18 20"/><path d="m301 181 23 49 55 7-40 37 10 54-48-26-48 26 10-54-40-37 55-7z" fill="#1B2230" stroke="none"/>
+  </g>
+</svg>

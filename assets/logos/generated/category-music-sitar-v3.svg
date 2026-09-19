@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Music — Sitar channel icon</title>
+  <desc id="desc">Original minimalist filled SKY TV artwork for music sitar channels, with a transparent outer background.</desc>
+  <g fill="#F7F8FA" stroke="#1B2230" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M183 352c-43 39-43 93-4 121 39 27 93 8 108-45 17-58-21-100-21-100z"/><path d="m231 366 91-284 47 15-87 288z"/><path d="m320 85 67-43m-80 84 83-16m-97 56 85 13M246 377 346 85" fill="none" stroke="#1B2230" stroke-width="17"/><path d="m320 85 67-43m-80 84 83-16m-97 56 85 13M246 377 346 85" fill="none" stroke="#F7F8FA" stroke-width="7"/><circle cx="232" cy="410" r="32" fill="#1B2230" stroke="none"/>
+  </g>
+</svg>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Entertainment channel icon</title>
+  <desc id="desc">Original minimalist filled SKY TV artwork for entertainment channels, with a transparent outer background.</desc>
+  <g fill="#F7F8FA" stroke="#1B2230" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <path d="m256 61 54 122 133 12-101 88 30 130-116-68-116 68 30-130-101-88 133-12z"/><path d="m256 155 25 56 61 6-46 40 14 60-54-32-54 32 14-60-46-40 61-6z" fill="#1B2230" stroke="none"/>
+  </g>
+</svg>

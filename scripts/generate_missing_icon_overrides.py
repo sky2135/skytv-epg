@@ -355,7 +355,7 @@ def generated_asset_for(
         asset_name = select_icon_variant("music", category_name, channel_name)
     else:
         asset_name = category
-    return asset_name, f"generated/category-{asset_name}-v2.{extension}"
+    return asset_name, f"generated/category-{asset_name}-v3.{extension}"
 
 
 def movie_scope(row: Mapping[str, str]) -> str:

@@ -622,7 +622,7 @@ def fallback_asset(
         name = movie_variant or select_icon_variant("movies", category, channel)
     elif name == "music":
         name = select_icon_variant("music", category, channel)
-    return f"category-{name}-v2", f"generated/category-{name}-v2.png"
+    return f"category-{name}-v3", f"generated/category-{name}-v3.png"
 
 
 def can_use_xmltv_source_icon(row: Mapping[str, str]) -> bool:

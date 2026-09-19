@@ -118,7 +118,18 @@ def assert_safe_background_free_svg(test: unittest.TestCase, path: Path) -> None
     root = ET.fromstring(payload)
     test.assertEqual(root.tag.rsplit("}", 1)[-1], "svg")
     test.assertEqual(root.attrib.get("viewBox"), "0 0 512 512")
-    forbidden_elements = {"script", "foreignobject", "image", "use", "style"}
+    forbidden_elements = {
+        "script",
+        "foreignobject",
+        "image",
+        "use",
+        "style",
+        "text",
+        "lineargradient",
+        "radialgradient",
+        "filter",
+        "pattern",
+    }
     for element in root.iter():
         tag = element.tag.rsplit("}", 1)[-1].casefold()
         test.assertNotIn(tag, forbidden_elements, path)
@@ -180,6 +191,54 @@ class PublicIconCatalogTests(unittest.TestCase):
                 svg = png.with_suffix(".svg")
                 self.assertTrue(svg.is_file(), svg)
                 assert_safe_background_free_svg(self, svg)
+
+    def test_generated_icons_use_the_approved_filled_neutral_v3_style(self) -> None:
+        _, rows = read_catalog(CATALOG_PATH)
+        generated = [row for row in rows if row["asset_kind"] == "generated_category"]
+        allowed_paints = {"none", "#f7f8fa", "#1b2230"}
+        for row in generated:
+            with self.subTest(asset=row["asset_id"]):
+                self.assertTrue(row["asset_id"].endswith("-v3"))
+                self.assertTrue(row["local_file"].endswith("-v3.png"))
+                svg = (LOGO_ROOT / row["local_file"]).with_suffix(".svg")
+                root = ET.fromstring(svg.read_text(encoding="utf-8"))
+                groups = [
+                    element
+                    for element in root.iter()
+                    if element.tag.rsplit("}", 1)[-1].casefold() == "g"
+                ]
+                self.assertEqual(len(groups), 1)
+                group = groups[0]
+                self.assertEqual(group.attrib.get("fill"), "#F7F8FA")
+                self.assertEqual(group.attrib.get("stroke"), "#1B2230")
+                self.assertEqual(group.attrib.get("stroke-linecap"), "round")
+                self.assertEqual(group.attrib.get("stroke-linejoin"), "round")
+
+                open_strokes: dict[str, list[str]] = {}
+                for element in root.iter():
+                    attributes = {
+                        key.rsplit("}", 1)[-1].casefold(): value
+                        for key, value in element.attrib.items()
+                    }
+                    for paint_name in ("fill", "stroke"):
+                        paint = attributes.get(paint_name)
+                        if paint is not None:
+                            self.assertIn(paint.casefold(), allowed_paints)
+                    if (
+                        element.tag.rsplit("}", 1)[-1].casefold() == "path"
+                        and attributes.get("fill") == "none"
+                    ):
+                        open_strokes.setdefault(attributes["d"], []).append(
+                            attributes.get("stroke", "")
+                        )
+                for path_data, strokes in open_strokes.items():
+                    self.assertEqual(
+                        sorted(strokes),
+                        ["#1B2230", "#F7F8FA"],
+                        f"open stroke must have a filled inner line: {path_data}",
+                    )
+
+        self.assertFalse(any((LOGO_ROOT / "generated").glob("category-*-v2.*")))
 
     def test_generated_art_is_cc0_and_old_name_cards_are_retired(self) -> None:
         _, rows = read_catalog(CATALOG_PATH)
