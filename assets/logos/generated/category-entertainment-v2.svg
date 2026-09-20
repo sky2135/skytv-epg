@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">Entertainment channel icon</title>
-  <desc id="desc">Original background-free SKY TV fallback artwork for entertainment channels.</desc>
-  <g stroke-linecap="round" stroke-linejoin="round">
-    <path d="m256 63 51 118 128 11-97 85 29 124-111-65-111 65 29-124-97-85 128-11z" fill="#7b61d1" stroke="#f8fafc" stroke-width="21"/><path d="m256 149 27 62 68 6-52 45 16 66-59-35-59 35 16-66-52-45 68-6z" fill="#f4b942"/>
-  </g>
-</svg>

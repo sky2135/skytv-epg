@@ -62,7 +62,63 @@ CANONICAL_NAME_CORRECTIONS = {
     "NASEERUDIN SHAH": "Naseeruddin Shah",
     "RAJENDR KUMAR": "Rajendra Kumar",
     "VINOOD KHANNA": "Vinod Khanna",
+    "FAKHIR MEHMOOD": "Faakhir Mehmood",
+    "GOHAR MUMTAZ": "Goher Mumtaz",
+    "HUMAIRA CHANNA": "Humera Channa",
+    "RAJKUMAAR RAO": "Rajkummar Rao",
 }
+
+# Broad 24/7 and regional movie categories contain a mixture of people,
+# franchises, programmes, and descriptive channels. These entries are exact
+# reviewed pairs, not category-wide parsing rules.
+REVIEWED_EXACT_PERSON_CHANNELS = {
+    ("pakistan movies 24/7", "pakistani | munawar zarif cinema 1 hd"): ("actor", "Munawar Zarif"),
+    ("kannada movies 24/7", "kannada-vishnudhan movies hd"): ("actor", "Vishnuvardhan"),
+    ("kannada movies 24/7", "kannada-shankar nag movies hd"): ("actor", "Shankar Nag"),
+    ("kannada movies 24/7", "kannada-rajkumar movies hd"): ("actor", "Dr. Rajkumar"),
+    ("kannada movies 24/7", "kannada-lokesh movies hd"): ("actor", "Lokesh"),
+    ("kannada movies 24/7", "kannada-ambareesh movies hd"): ("actor", "Ambareesh"),
+    ("kannada movies 24/7", "kannada-sudeep movies hd"): ("actor", "Sudeep"),
+    ("kannada movies 24/7", "kannada-shiva rajkummar movies hd"): ("actor", "Shiva Rajkumar"),
+    ("kannada movies 24/7", "kannada-ramesh aravind movies hd"): ("actor", "Ramesh Aravind"),
+    ("kannada movies 24/7", "kannada-prwal devaraj movies hd"): ("actor", "Prajwal Devaraj"),
+    ("kannada movies 24/7", "kannada-jaggesh movies hd"): ("actor", "Jaggesh"),
+    ("us : 24x7", "24/7: billy connolly stand up"): ("actor", "Billy Connolly"),
+    ("us : 24x7", "24/7: chris rock stand up"): ("actor", "Chris Rock"),
+    ("us : 24x7", "24/7: conor mcgregor"): ("actor", "Conor McGregor"),
+    ("us : 24x7", "24/7: david attenborough"): ("actor", "David Attenborough"),
+    ("us : 24x7", "24/7: jimmy carr stand up"): ("actor", "Jimmy Carr"),
+    ("us : 24x7", "24/7: louis theroux"): ("actor", "Louis Theroux"),
+    ("us : 24x7", "24/7: michael mcintyre stand up"): ("actor", "Michael McIntyre"),
+    ("us : 24x7", "24/7: michael moore"): ("actor", "Michael Moore"),
+    ("us : 24x7", "24/7: micky flanagan stand up"): ("actor", "Micky Flanagan"),
+    ("us : 24x7", "24/7: peter kay stand up"): ("actor", "Peter Kay"),
+    ("us : 24x7", "24/7: bruce lee"): ("actor", "Bruce Lee"),
+    ("us : 24x7", "24/7: hitchcock"): ("actor", "Alfred Hitchcock"),
+    ("us : 24x7", "24/7: schwarzenegger"): ("actor", "Arnold Schwarzenegger"),
+    ("us : 24x7", "24/7: van damme"): ("actor", "Jean-Claude Van Damme"),
+    ("|eu| le meilleur des films", "fr - 24/7 bruce lee"): ("actor", "Bruce Lee"),
+    ("|eu| le meilleur des films", "fr - 24/7 jcvd"): ("actor", "Jean-Claude Van Damme"),
+    ("|uk| 24/7 flex", "uk - al pacino"): ("actor", "Al Pacino"),
+    ("|uk| 24/7 flex", "uk - arnold schwarzenegger"): ("actor", "Arnold Schwarzenegger"),
+    ("|uk| 24/7 flex", "uk - steven seagal"): ("actor", "Steven Seagal"),
+    ("|uk| 24/7 flex", "uk - will ferrell movies"): ("actor", "Will Ferrell"),
+    ("|na| 24/7 english", "eng - 24/7 quentin tarantino movies"): ("actor", "Quentin Tarantino"),
+    ("|na| 24/7 english", "eng - 24/7 jcvd movies"): ("actor", "Jean-Claude Van Damme"),
+    ("|na| 24/7 english", "eng - 24/7 al pacino"): ("actor", "Al Pacino"),
+    ("|na| 24/7 english", "eng - 24/7 arnold schwarzenegger"): ("actor", "Arnold Schwarzenegger"),
+    ("|na| 24/7 english", "eng - 24/7 steven seagal"): ("actor", "Steven Seagal"),
+    ("|na| 24/7 english", "eng - 24/7 will ferrell movies"): ("actor", "Will Ferrell"),
+    ("|na| 24/7 english", "eng - 24/7 bruce lee movies"): ("actor", "Bruce Lee"),
+    ("|na| 24/7 english", "eng - 24/7 jim carrey"): ("actor", "Jim Carrey"),
+    ("|na| 24/7 english", "eng - 24/7 eddy murphy"): ("actor", "Eddie Murphy"),
+    ("|en| 24/7 english 4k", "en - clint eastwood"): ("actor", "Clint Eastwood"),
+    ("|en| 24/7 english 4k", "en - tom hardy collection"): ("actor", "Tom Hardy"),
+}
+
+REVIEWED_CANONICAL_NAMES = frozenset(
+    subject for _role, subject in REVIEWED_EXACT_PERSON_CHANNELS.values()
+)
 
 
 def clean(value: object) -> str:
@@ -85,6 +141,8 @@ def canonical_name(raw_name: str) -> str:
     raw_name = clean(raw_name)
     if raw_name in CANONICAL_NAME_CORRECTIONS:
         return CANONICAL_NAME_CORRECTIONS[raw_name]
+    if raw_name in REVIEWED_CANONICAL_NAMES:
+        return raw_name
     words: list[str] = []
     for word in raw_name.split():
         if len(word) == 1:
@@ -101,6 +159,10 @@ def classify_person_subject(
 ) -> tuple[str, str]:
     """Return an exact category role and anchored provider-name subject."""
     category = clean(category_name).casefold()
+    channel = clean(channel_name).casefold()
+    reviewed = REVIEWED_EXACT_PERSON_CHANNELS.get((category, channel))
+    if reviewed is not None:
+        return reviewed
     role = PERSON_CATEGORIES.get(category, "")
     if not role:
         return "", ""

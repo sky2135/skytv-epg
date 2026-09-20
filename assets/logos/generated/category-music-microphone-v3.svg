@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Music — Microphone channel icon</title>
+  <desc id="desc">Original minimalist filled SKY TV artwork for music microphone channels, with a transparent outer background.</desc>
+  <g fill="#F7F8FA" stroke="#1B2230" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="178" y="53" width="156" height="280" rx="78"/><path d="M137 239v17c0 66 53 119 119 119s119-53 119-119v-17M256 375v79m-80 0h160" fill="none" stroke="#1B2230" stroke-width="24"/><path d="M137 239v17c0 66 53 119 119 119s119-53 119-119v-17M256 375v79m-80 0h160" fill="none" stroke="#F7F8FA" stroke-width="10"/><path d="M202 135h108m-108 62h108m-108 62h108" fill="none" stroke="#1B2230" stroke-width="18"/><path d="M202 135h108m-108 62h108m-108 62h108" fill="none" stroke="#F7F8FA" stroke-width="7"/>
+  </g>
+</svg>

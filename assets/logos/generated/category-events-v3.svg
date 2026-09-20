@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Events channel icon</title>
+  <desc id="desc">Original minimalist filled SKY TV artwork for events channels, with a transparent outer background.</desc>
+  <g fill="#F7F8FA" stroke="#1B2230" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="72" y="118" width="368" height="322" rx="44"/><path d="M72 205h368M164 69v99M348 69v99" fill="none" stroke="#1B2230" stroke-width="24"/><path d="M72 205h368M164 69v99M348 69v99" fill="none" stroke="#F7F8FA" stroke-width="10"/><path d="m256 249 24 52 57 6-43 38 12 56-50-29-50 29 12-56-43-38 57-6z" fill="#1B2230" stroke="none"/>
+  </g>
+</svg>

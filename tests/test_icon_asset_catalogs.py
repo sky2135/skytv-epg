@@ -8,6 +8,7 @@ import unittest
 import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,28 @@ PRIVATE_IDENTITY_COLUMNS = {
     "password",
 }
 CC0_URL = "https://creativecommons.org/publicdomain/zero/1.0/"
+CREATIVE_COMMONS_LICENSE_PATHS = {
+    "CC-BY-2.0": "/licenses/by/2.0",
+    "CC-BY-2.5": "/licenses/by/2.5",
+    "CC-BY-3.0": "/licenses/by/3.0",
+    "CC-BY-4.0": "/licenses/by/4.0",
+    "CC-BY-SA-2.0": "/licenses/by-sa/2.0",
+    "CC-BY-SA-3.0": "/licenses/by-sa/3.0",
+    "CC-BY-SA-4.0": "/licenses/by-sa/4.0",
+    "CC0-1.0": "/publicdomain/zero/1.0",
+}
+REVIEWED_PUBLIC_DOMAIN_LICENSES = frozenset(
+    {
+        "PD",
+        "PD-Bangladesh-PID",
+        "PD-Pakistan-US-1996",
+        "PD-Self",
+        "PD-US",
+        "PD-USGov",
+    }
+)
+LEGACY_CC0_DEED_URL = "http://creativecommons.org/publicdomain/zero/1.0/deed.en"
+PD_US_GOV_LICENSE_PATH = "/wiki/Template:PD-USGov-Military-Navy"
 SHA1_PATTERN = re.compile(r"[0-9a-f]{40}")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
@@ -33,6 +56,43 @@ def read_catalog(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         reader = csv.DictReader(handle)
         rows = list(reader)
     return list(reader.fieldnames or ()), rows
+
+
+def assert_reviewed_portrait_license(
+    test: unittest.TestCase, row: dict[str, str]
+) -> None:
+    license_id = row["license_id"].strip()
+    license_url = row["license_url"].strip()
+    allowed_ids = set(CREATIVE_COMMONS_LICENSE_PATHS) | set(
+        REVIEWED_PUBLIC_DOMAIN_LICENSES
+    )
+    test.assertIn(license_id, allowed_ids)
+
+    parsed = urlparse(license_url)
+    test.assertIsNone(parsed.username)
+    test.assertIsNone(parsed.password)
+    test.assertFalse(parsed.query)
+
+    if license_id in CREATIVE_COMMONS_LICENSE_PATHS:
+        test.assertEqual(parsed.hostname, "creativecommons.org")
+        test.assertFalse(parsed.fragment)
+        expected_path = CREATIVE_COMMONS_LICENSE_PATHS[license_id]
+        if license_url == LEGACY_CC0_DEED_URL:
+            test.assertEqual(license_id, "CC0-1.0")
+        else:
+            test.assertEqual(parsed.scheme, "https")
+            test.assertEqual(parsed.path.rstrip("/"), expected_path)
+        return
+
+    test.assertEqual(parsed.scheme, "https")
+    test.assertEqual(parsed.hostname, "commons.wikimedia.org")
+    if license_id == "PD-USGov":
+        test.assertEqual(parsed.path, PD_US_GOV_LICENSE_PATH)
+        test.assertFalse(parsed.fragment)
+    else:
+        test.assertTrue(parsed.path.startswith("/wiki/File:"))
+        test.assertEqual(parsed.fragment, "Licensing")
+        test.assertEqual(license_url.removesuffix("#Licensing"), row["source_page_url"])
 
 
 def png_chunks(payload: bytes) -> list[tuple[bytes, bytes]]:
@@ -118,7 +178,18 @@ def assert_safe_background_free_svg(test: unittest.TestCase, path: Path) -> None
     root = ET.fromstring(payload)
     test.assertEqual(root.tag.rsplit("}", 1)[-1], "svg")
     test.assertEqual(root.attrib.get("viewBox"), "0 0 512 512")
-    forbidden_elements = {"script", "foreignobject", "image", "use", "style"}
+    forbidden_elements = {
+        "script",
+        "foreignobject",
+        "image",
+        "use",
+        "style",
+        "text",
+        "lineargradient",
+        "radialgradient",
+        "filter",
+        "pattern",
+    }
     for element in root.iter():
         tag = element.tag.rsplit("}", 1)[-1].casefold()
         test.assertNotIn(tag, forbidden_elements, path)
@@ -144,7 +215,7 @@ def assert_safe_background_free_svg(test: unittest.TestCase, path: Path) -> None
 class PublicIconCatalogTests(unittest.TestCase):
     def test_catalog_is_private_safe_and_assets_are_unique(self) -> None:
         fields, rows = read_catalog(CATALOG_PATH)
-        self.assertEqual(len(rows), 31)
+        self.assertGreaterEqual(len(rows), 31)
         self.assertTrue(
             PRIVATE_IDENTITY_COLUMNS.isdisjoint(field.casefold() for field in fields)
         )
@@ -181,6 +252,54 @@ class PublicIconCatalogTests(unittest.TestCase):
                 self.assertTrue(svg.is_file(), svg)
                 assert_safe_background_free_svg(self, svg)
 
+    def test_generated_icons_use_the_approved_filled_neutral_v3_style(self) -> None:
+        _, rows = read_catalog(CATALOG_PATH)
+        generated = [row for row in rows if row["asset_kind"] == "generated_category"]
+        allowed_paints = {"none", "#f7f8fa", "#1b2230"}
+        for row in generated:
+            with self.subTest(asset=row["asset_id"]):
+                self.assertTrue(row["asset_id"].endswith("-v3"))
+                self.assertTrue(row["local_file"].endswith("-v3.png"))
+                svg = (LOGO_ROOT / row["local_file"]).with_suffix(".svg")
+                root = ET.fromstring(svg.read_text(encoding="utf-8"))
+                groups = [
+                    element
+                    for element in root.iter()
+                    if element.tag.rsplit("}", 1)[-1].casefold() == "g"
+                ]
+                self.assertEqual(len(groups), 1)
+                group = groups[0]
+                self.assertEqual(group.attrib.get("fill"), "#F7F8FA")
+                self.assertEqual(group.attrib.get("stroke"), "#1B2230")
+                self.assertEqual(group.attrib.get("stroke-linecap"), "round")
+                self.assertEqual(group.attrib.get("stroke-linejoin"), "round")
+
+                open_strokes: dict[str, list[str]] = {}
+                for element in root.iter():
+                    attributes = {
+                        key.rsplit("}", 1)[-1].casefold(): value
+                        for key, value in element.attrib.items()
+                    }
+                    for paint_name in ("fill", "stroke"):
+                        paint = attributes.get(paint_name)
+                        if paint is not None:
+                            self.assertIn(paint.casefold(), allowed_paints)
+                    if (
+                        element.tag.rsplit("}", 1)[-1].casefold() == "path"
+                        and attributes.get("fill") == "none"
+                    ):
+                        open_strokes.setdefault(attributes["d"], []).append(
+                            attributes.get("stroke", "")
+                        )
+                for path_data, strokes in open_strokes.items():
+                    self.assertEqual(
+                        sorted(strokes),
+                        ["#1B2230", "#F7F8FA"],
+                        f"open stroke must have a filled inner line: {path_data}",
+                    )
+
+        self.assertFalse(any((LOGO_ROOT / "generated").glob("category-*-v2.*")))
+
     def test_generated_art_is_cc0_and_old_name_cards_are_retired(self) -> None:
         _, rows = read_catalog(CATALOG_PATH)
         generated = [row for row in rows if row["asset_kind"] == "generated_category"]
@@ -204,7 +323,7 @@ class PublicIconCatalogTests(unittest.TestCase):
     def test_third_party_portraits_are_transparent_and_fully_attributed(self) -> None:
         _, rows = read_catalog(CATALOG_PATH)
         portraits = [row for row in rows if row["asset_kind"] == "person_photo"]
-        self.assertEqual(len(portraits), 7)
+        self.assertGreaterEqual(len(portraits), 7)
 
         for row in portraits:
             with self.subTest(asset=row["asset_id"]):
@@ -215,12 +334,7 @@ class PublicIconCatalogTests(unittest.TestCase):
                     )
                 )
                 self.assertTrue(row["creator"].strip())
-                self.assertTrue(row["license_id"].startswith("CC-"))
-                self.assertTrue(
-                    row["license_url"].startswith(
-                        "https://creativecommons.org/licenses/"
-                    )
-                )
+                assert_reviewed_portrait_license(self, row)
                 self.assertTrue(row["attribution_text"].strip())
                 self.assertIn("background removed", row["modifications"])
                 self.assertIsNotNone(

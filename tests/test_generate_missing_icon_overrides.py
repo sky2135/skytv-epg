@@ -167,15 +167,15 @@ class MissingIconOverrideTests(unittest.TestCase):
             logos = root / "logos"
             asset_catalog = root / "icon_catalog.csv"
             for relative in (
-                "generated/category-general-v2.png",
-                "generated/category-radio-v2.png",
-                "generated/category-sports-v2.png",
-                "generated/category-music-notes-v2.png",
-                "generated/category-music-microphone-v2.png",
-                "generated/category-music-headphones-v2.png",
-                "generated/category-music-guitar-v2.png",
-                "generated/category-music-dhol-v2.png",
-                "generated/category-music-sitar-v2.png",
+                "generated/category-general-v3.png",
+                "generated/category-radio-v3.png",
+                "generated/category-sports-v3.png",
+                "generated/category-music-notes-v3.png",
+                "generated/category-music-microphone-v3.png",
+                "generated/category-music-headphones-v3.png",
+                "generated/category-music-guitar-v3.png",
+                "generated/category-music-dhol-v3.png",
+                "generated/category-music-sitar-v3.png",
                 "people/lata-cutout-v2.png",
             ):
                 target = logos / relative
@@ -269,23 +269,23 @@ class MissingIconOverrideTests(unittest.TestCase):
         by_stream = {row["stream_id"]: row for row in configured}
         self.assertRegex(
             by_stream["1"]["local_file"],
-            r"^generated/category-music-.+-v2\.png$",
+            r"^generated/category-music-.+-v3\.png$",
         )
         self.assertEqual(
-            by_stream["2"]["local_file"], "generated/category-radio-v2.png"
+            by_stream["2"]["local_file"], "generated/category-radio-v3.png"
         )
         self.assertEqual(
-            by_stream["4"]["local_file"], "generated/category-general-v2.png"
+            by_stream["4"]["local_file"], "generated/category-general-v3.png"
         )
         self.assertEqual(
-            by_stream["6"]["local_file"], "generated/category-sports-v2.png"
+            by_stream["6"]["local_file"], "generated/category-sports-v3.png"
         )
         self.assertEqual(
             by_stream["5"]["local_file"], "people/lata-cutout-v2.png"
         )
         self.assertEqual(
             by_stream["8"]["local_file"],
-            "generated/category-music-microphone-v2.png",
+            "generated/category-music-microphone-v3.png",
         )
         self.assertEqual(by_stream["5"]["priority"], "400")
         self.assertEqual(by_stream["8"]["priority"], "200")

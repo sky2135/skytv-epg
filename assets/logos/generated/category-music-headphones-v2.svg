@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
-  <title id="title">Music — Headphones channel icon</title>
-  <desc id="desc">Original background-free SKY TV fallback artwork for music headphones channels.</desc>
-  <g stroke-linecap="round" stroke-linejoin="round">
-    <path d="M88 280v-38c0-109 75-190 168-190s168 81 168 190v38" fill="none" stroke="#7b61d1" stroke-width="46"/><rect x="62" y="253" width="103" height="180" rx="39" fill="#e45896" stroke="#f8fafc" stroke-width="20"/><rect x="347" y="253" width="103" height="180" rx="39" fill="#e45896" stroke="#f8fafc" stroke-width="20"/><path d="M165 397c43 48 139 48 182 0" fill="none" stroke="#182033" stroke-width="22"/>
-  </g>
-</svg>

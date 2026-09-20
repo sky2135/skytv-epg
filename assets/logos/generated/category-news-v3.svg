@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">News channel icon</title>
+  <desc id="desc">Original minimalist filled SKY TV artwork for news channels, with a transparent outer background.</desc>
+  <g fill="#F7F8FA" stroke="#1B2230" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="62" y="89" width="388" height="334" rx="39"/><rect x="105" y="137" width="132" height="116" rx="14" fill="#1B2230" stroke="none"/><path d="M270 150h132m-132 56h132M105 303h297M105 360h297" fill="none" stroke="#1B2230" stroke-width="21"/><path d="M270 150h132m-132 56h132M105 303h297M105 360h297" fill="none" stroke="#F7F8FA" stroke-width="9"/>
+  </g>
+</svg>

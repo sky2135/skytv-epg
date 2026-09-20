@@ -38,6 +38,34 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> 
 
 
 class BuildIconInventoryTests(unittest.TestCase):
+    def test_person_classifier_uses_the_shared_reviewed_rules(self) -> None:
+        cases = (
+            (
+                {
+                    "category_name": "US : 24X7",
+                    "channel_name": "24/7: Hitchcock",
+                },
+                ("actor", "Alfred Hitchcock"),
+            ),
+            (
+                {
+                    "category_name": "KANNADA MOVIES 24/7",
+                    "channel_name": "KANNADA-SHIVA RAJKUMMAR MOVIES HD",
+                },
+                ("actor", "Shiva Rajkumar"),
+            ),
+            (
+                {
+                    "category_name": "US : 24X7",
+                    "channel_name": "24/7: A Series, Not a Person",
+                },
+                ("", ""),
+            ),
+        )
+        for row, expected in cases:
+            with self.subTest(row=row):
+                self.assertEqual(inventory.classify_person_channel(row), expected)
+
     def test_exact_identity_source_fallback_and_person_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -304,9 +332,9 @@ class BuildIconInventoryTests(unittest.TestCase):
         self.assertEqual(dummy["next_action"], "apply_original_fallback")
         radio = by_key[("server_3", "77")]
         self.assertEqual(radio["current_icon_origin"], "none")
-        self.assertEqual(radio["suggested_asset_id"], "category-radio-v2")
+        self.assertEqual(radio["suggested_asset_id"], "category-radio-v3")
         self.assertEqual(
-            radio["suggested_local_file"], "generated/category-radio-v2.png"
+            radio["suggested_local_file"], "generated/category-radio-v3.png"
         )
         self.assertEqual(radio["next_action"], "apply_original_fallback")
         statuses = {row["research_status"] for row in research}
@@ -399,14 +427,14 @@ class BuildIconInventoryTests(unittest.TestCase):
     def test_original_png_can_inherit_reviewed_svg_rights(self) -> None:
         vector = inventory.CatalogAsset(
             asset_id="category-news",
-            local_file="generated/category-news-v2.svg",
+            local_file="generated/category-news-v3.svg",
             subject_type="category",
             asset_kind="original_vector",
             license_id="ORIGINAL",
             review_status="approved",
         )
         found = inventory.catalog_asset_for_local_file(
-            {vector.local_file: vector}, "generated/category-news-v2.png"
+            {vector.local_file: vector}, "generated/category-news-v3.png"
         )
         self.assertEqual(found, vector)
 
