@@ -17,6 +17,7 @@ import named_person_subjects as subjects  # noqa: E402
 
 
 AUDIT_PATH = REPO_ROOT / "assets/logos/named_person_portrait_source_audit.csv"
+CATALOG_PATH = REPO_ROOT / "assets/logos/icon_catalog.csv"
 PRIVATE_IDENTITY_COLUMNS = {
     "server_id",
     "stream_id",
@@ -143,8 +144,8 @@ class NamedPersonSourceAuditTests(unittest.TestCase):
             Counter(row["research_status"] for row in self.rows),
             Counter(
                 {
-                    "approved": 141,
-                    "conditional": 49,
+                    "approved": 168,
+                    "conditional": 22,
                     "no_verified_free_portrait": 31,
                 }
             ),
@@ -154,7 +155,7 @@ class NamedPersonSourceAuditTests(unittest.TestCase):
         approved = [
             row for row in self.rows if row["research_status"] == "approved"
         ]
-        self.assertEqual(len(approved), 141)
+        self.assertEqual(len(approved), 168)
         for row in approved:
             with self.subTest(subject=row["subject_name"]):
                 self.assertTrue(
@@ -193,6 +194,31 @@ class NamedPersonSourceAuditTests(unittest.TestCase):
                     else "category-movie-clapperboard-v3"
                 )
                 self.assertEqual(row["fallback_asset_id"], expected)
+
+    def test_production_portraits_have_approved_audit_sources(self) -> None:
+        with CATALOG_PATH.open(encoding="utf-8-sig", newline="") as handle:
+            catalog_rows = list(csv.DictReader(handle))
+
+        audit_by_key = {row["subject_key"]: row for row in self.rows}
+        portrait_rows = [
+            row for row in catalog_rows if row["asset_kind"] == "person_photo"
+        ]
+        portrait_keys: set[str] = set()
+        for row in portrait_rows:
+            subject_key = subjects.slugify(row["subject_name"])
+            portrait_keys.add(subject_key)
+            with self.subTest(subject=row["subject_name"]):
+                self.assertIn(subject_key, audit_by_key)
+                self.assertEqual(
+                    audit_by_key[subject_key]["research_status"], "approved"
+                )
+
+        nonapproved_keys = {
+            row["subject_key"]
+            for row in self.rows
+            if row["research_status"] != "approved"
+        }
+        self.assertTrue(portrait_keys.isdisjoint(nonapproved_keys))
 
     def test_every_reviewed_exact_parser_subject_has_an_audit_record(self) -> None:
         by_name = {row["subject_name"]: row for row in self.rows}

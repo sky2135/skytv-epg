@@ -22,6 +22,19 @@ image to production; only a finished, reviewed cutout belongs in
 The 2026-09-19 production pass accepted 100 new portrait cutouts; 33 processed
 candidates remain on the neutral role fallback after output QA.
 
+The 2026-09-20 follow-up re-reviewed the 49 conditional source rows. Twenty-seven
+sources are now approved and 22 remain conditional. Source approval means only
+that the exact identity, provenance, reuse terms, and a viable crop were cleared;
+it does not put a portrait in the TV guide. Every new cutout must separately pass
+source-fidelity and visual QA and then be added to `icon_catalog.csv` and
+`ATTRIBUTION.md`. Until that happens, the neutral role fallback remains active.
+
+Six follow-up portraits passed that separate output review: Akhil, Baljit Malwa,
+Boman Irani, Farhan Saeed, Guri, and Naseeruddin Shah. The other 43 members of
+the original conditional set still use the neutral role fallback: 21 have a
+cleared source but no faithful output, and 22 still have an unresolved source.
+Production now contains 113 exact-name person portraits in total.
+
 The generated v3 family is intentionally minimalist: every symbol has a solid
 off-white (`#F7F8FA`) interior, a dark (`#1B2230`) rounded outline, and a
 transparent outer canvas. It contains no gradients, shadows, text, or coloured
