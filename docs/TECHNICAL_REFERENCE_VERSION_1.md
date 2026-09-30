@@ -281,9 +281,12 @@ A native candidate is not enabled merely because its ID exists. The complete
 current panel XMLTV must contain that exact case-unique ID, an unambiguous
 compatible `<display-name>`, and at least two informative programme intervals
 starting within six hours and extending at least six hours beyond the check
-time. Display-name uniqueness is checked against the complete native catalog,
-not only the requested IDs. Immediately before a Sheet write, the provider API
-and M3U are fetched again; a changed, conflicting, or unavailable identity is
+time. A bounded number of malformed source IDs are quarantined as complete
+records: they are never trimmed, normalized, or allowed to satisfy a requested
+ID, while an excessive number still fails the source closed. Display-name
+uniqueness is checked against the remaining complete valid native catalog, not
+only the requested IDs. Immediately before a Sheet write, the provider API and
+M3U are fetched again; a changed, conflicting, or unavailable identity is
 removed from the write set. Only then may the guarded writer create an enabled
 `KEEP_PANEL` row. The
 writer accepts `KEEP_PANEL` only from the exact in-memory verified allowlist;

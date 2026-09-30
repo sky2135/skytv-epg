@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -390,7 +391,7 @@ class NativeEpgReviewTests(unittest.TestCase):
         )
         self.assertEqual(result, native.NativeValidation(frozenset(), 0))
 
-    def test_oversized_ids_are_rejected_instead_of_truncated(self) -> None:
+    def test_malformed_source_ids_are_quarantined_without_normalization(self) -> None:
         oversized = "X" * 301
         with self.assertRaisesRegex(native.NativeReviewError, "candidate set"):
             native.validate_native_xmltv(
@@ -400,12 +401,55 @@ class NativeEpgReviewTests(unittest.TestCase):
                 now_epoch=self.NOW,
             )
 
-        document = xmltv_document(
-            channel_ids=[oversized],
-            programmes=useful_programmes(oversized),
+        padding = [f"Extra.Valid.{index:03d}" for index in range(100)]
+        result = self.validate(
+            xmltv_document(
+                channel_ids=["Good.ID", oversized, *padding],
+                programmes=(
+                    useful_programmes(" Good.ID ")
+                    + useful_programmes(oversized)
+                    + useful_programmes("Good.ID")
+                ),
+            ),
+            {"Good.ID"},
         )
-        with self.assertRaisesRegex(native.NativeReviewError, "source"):
-            self.validate(document, {"Good.ID"})
+        self.assertEqual(result.verified_ids, frozenset({"Good.ID"}))
+        self.assertEqual(result.quarantined_source_identities, 2)
+
+        malformed_only = self.validate(
+            xmltv_document(
+                channel_ids=["Good.ID", *padding],
+                programmes=useful_programmes(" Good.ID "),
+            ),
+            {"Good.ID"},
+        )
+        self.assertFalse(malformed_only.verified_ids)
+        self.assertEqual(malformed_only.quarantined_source_identities, 1)
+
+    def test_too_many_distinct_malformed_source_ids_fail_closed(self) -> None:
+        padding = [f"Extra.Valid.{index:03d}" for index in range(100)]
+        document = xmltv_document(
+            channel_ids=["Good.ID", *padding],
+            programmes=[
+                (
+                    " Bad.One ",
+                    "20260101000000 +0000",
+                    "20260101030000 +0000",
+                    "First",
+                ),
+                (
+                    " Bad.Two ",
+                    "20260101030000 +0000",
+                    "20260101060000 +0000",
+                    "Second",
+                ),
+            ],
+        )
+        with mock.patch.object(native, "MAX_NATIVE_INVALID_SOURCE_IDENTITIES", 1):
+            with self.assertRaisesRegex(
+                native.NativeReviewError, "too many invalid identities"
+            ):
+                self.validate(document, {"Good.ID"})
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ without either caller being able to weaken that boundary.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import stat
@@ -38,6 +39,7 @@ MAX_NATIVE_REQUEST_IDS = streaming.MAX_MAPPING_ROWS
 MIN_NATIVE_CATALOG_IDS = 100
 MAX_NATIVE_DISPLAY_NAMES_PER_ID = 16
 MAX_NATIVE_CATALOG_DISPLAY_NAME_KEYS = streaming.MAX_MAPPING_ROWS * 4
+MAX_NATIVE_INVALID_SOURCE_IDENTITIES = 1_024
 MAX_NATIVE_GATE_SIGNATURES = catalog_stream.MAX_GATE_SIGNATURES_PER_ID
 NATIVE_GATE_HORIZON_SECONDS = catalog_stream.DEFAULT_GATE_HORIZON_SECONDS
 NATIVE_GATE_MINIMUM_PROGRAMMES = catalog_stream.DEFAULT_GATE_MINIMUM_PROGRAMMES
@@ -85,6 +87,7 @@ class NativeValidation:
         default_factory=lambda: MappingProxyType({})
     )
     ambiguous_display_name_keys: frozenset[str] = frozenset()
+    quarantined_source_identities: int = 0
 
 
 @dataclass
@@ -103,6 +106,33 @@ def _strict_xmltv_id(value: object, *, source_value: bool) -> str:
         label = "source" if source_value else "candidate set"
         raise NativeReviewError(f"The native EPG {label} contains an invalid ID.")
     return text
+
+
+def _source_xmltv_id_or_none(
+    value: object,
+    *,
+    invalid_fingerprints: set[bytes],
+) -> str | None:
+    """Return one exact source ID, or quarantine a bounded malformed identity.
+
+    Source IDs are opaque.  A malformed value is therefore never cleaned into
+    a candidate: its complete record is ignored and only a fixed-size digest is
+    retained to enforce the distinct-identity ceiling without retaining or
+    reporting the private value.
+    """
+
+    try:
+        return _strict_xmltv_id(value, source_value=True)
+    except NativeReviewError:
+        fingerprint = hashlib.sha256(
+            str(value or "").encode("utf-8", errors="surrogatepass")
+        ).digest()
+        invalid_fingerprints.add(fingerprint)
+        if len(invalid_fingerprints) > MAX_NATIVE_INVALID_SOURCE_IDENTITIES:
+            raise NativeReviewError(
+                "A native XMLTV source has too many invalid identities."
+            ) from None
+        return None
 
 
 def native_display_name_key(value: object) -> str:
@@ -267,6 +297,7 @@ def validate_native_xmltv(
     handle, initial_state = _open_regular_file(source)
     source_ids: set[str] = set()
     duplicate_source_ids: set[str] = set()
+    invalid_source_id_fingerprints: set[bytes] = set()
     safe_ids: frozenset[str] | None = None
     display_names: dict[str, set[str]] = {
         value: set() for value in requested
@@ -358,11 +389,11 @@ def validate_native_xmltv(
                             raise NativeReviewError(
                                 "A native XMLTV source declares channels after programmes."
                             )
-                        source_id = _strict_xmltv_id(
+                        source_id = _source_xmltv_id_or_none(
                             element.get("id") or "",
-                            source_value=True,
+                            invalid_fingerprints=invalid_source_id_fingerprints,
                         )
-                        if source_id:
+                        if source_id is not None and source_id:
                             if source_id in source_ids:
                                 duplicate_source_ids.add(source_id)
                             source_ids.add(source_id)
@@ -415,11 +446,15 @@ def validate_native_xmltv(
                             ).difference(display_name_overflow).difference(
                                 duplicate_source_ids
                             )
-                        source_id = _strict_xmltv_id(
+                        source_id = _source_xmltv_id_or_none(
                             element.get("channel") or "",
-                            source_value=True,
+                            invalid_fingerprints=invalid_source_id_fingerprints,
                         )
-                        if safe_ids is not None and source_id in safe_ids:
+                        if (
+                            source_id is not None
+                            and safe_ids is not None
+                            and source_id in safe_ids
+                        ):
                             start_epoch = streaming.parse_xmltv_time(
                                 element.get("start")
                             )
@@ -541,12 +576,14 @@ def validate_native_xmltv(
         requested_ids=len(requested),
         display_names_by_id=frozen_display_names,
         ambiguous_display_name_keys=ambiguous_display_name_keys,
+        quarantined_source_identities=len(invalid_source_id_fingerprints),
     )
 
 
 __all__ = [
     "MAX_NATIVE_CATALOG_DISPLAY_NAME_KEYS",
     "MAX_NATIVE_DISPLAY_NAMES_PER_ID",
+    "MAX_NATIVE_INVALID_SOURCE_IDENTITIES",
     "MIN_NATIVE_CATALOG_IDS",
     "NativeReviewError",
     "NativeValidation",
