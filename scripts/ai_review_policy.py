@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Fail-closed policy for clustered Gemini-assisted EPG review.
+"""Fail-closed policy for clustered grounded-AI EPG review.
 
 The module is deliberately pure: it performs no network, Google Sheet, or
 filesystem I/O.  It groups only exact compatible REVIEW rows, builds stable
-opaque Gemini choices, bounds work, and independently verifies an untrusted
-Gemini result against a current local catalog snapshot and a terminal provider
+opaque grounded-search choices, bounds work, and independently verifies an
+untrusted result against a current local catalog snapshot and a terminal provider
 row snapshot.
 
 AI is a second verifier here, never a matcher or rule author.  A row can be
 returned as ``APPROVE`` only when two independent local rankings agree on the
-same candidate with strong scores/margins and Gemini HIGH selects that exact
+same candidate with strong scores/margins and grounded AI HIGH selects that exact
 opaque candidate.  Every other path returns ``REVIEW``.
 """
 from __future__ import annotations
@@ -25,11 +25,11 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Sequence
 
-import ai_review_gemini as gemini
+import ai_grounded_search as gemini
 
 
-POLICY_VERSION = "ai-review-policy-v2"
-AI_VERIFIED_GATE = "smart+gemini-high+catalog+programme"
+POLICY_VERSION = "ai-review-policy-v3-grounded"
+AI_VERIFIED_GATE = "smart+grounded-high+catalog+programme"
 
 MIN_CANDIDATES = 2
 MAX_CANDIDATES = 8
@@ -356,6 +356,11 @@ class ApprovalProvenance:
     programme_latest_stop_epoch: int
     supporting_servers: tuple[str, ...]
     row_binding_sha256: str
+    grounding_identity_claim: str
+    grounding_query: str
+    grounding_source_urls: tuple[str, ...]
+    grounding_source_authorities: tuple[str, ...]
+    grounding_evidence_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -875,23 +880,22 @@ def prepare_cluster_review(cluster: ReviewCluster) -> PreparedClusterReview:
         if not _semantics_compatible(reference.semantics, candidate.semantics):
             return _blocked(cluster, "CANDIDATE_SEMANTICS_CONFLICT")
 
-    keyed: list[tuple[str, str, CandidateEvidence]] = []
+    ordered_candidates: list[tuple[str, CandidateEvidence]] = []
     for candidate in reference.candidates:
         signature = _candidate_signature(candidate)
-        opaque = "k_" + _stable_digest(
-            "opaque-candidate-v2",
-            (cluster.cluster_id, signature[0], signature[1], signature[2], signature[3]),
-            size=24,
-        )
         order = _stable_digest(
-            "candidate-order-v2",
+            "candidate-order-v3-grounded",
             (cluster.cluster_id, signature[0], signature[1], signature[2], signature[3]),
             size=64,
         )
-        keyed.append((order, opaque, candidate))
-    if len({item[1] for item in keyed}) != len(keyed):
-        return _blocked(cluster, "OPAQUE_KEY_COLLISION")
-    keyed.sort(key=lambda item: (item[0], item[1]))
+        ordered_candidates.append((order, candidate))
+    ordered_candidates.sort(
+        key=lambda item: (item[0], _candidate_signature(item[1]))
+    )
+    keyed = tuple(
+        (f"c{index:03d}", candidate)
+        for index, (_order, candidate) in enumerate(ordered_candidates, start=1)
+    )
 
     representative = min(
         cluster.rows,
@@ -917,13 +921,22 @@ def prepare_cluster_review(cluster: ReviewCluster) -> PreparedClusterReview:
                 region=market,
                 feed=candidate.feed,
             )
-            for _order, opaque, candidate in keyed
+            for opaque, candidate in keyed
+        ),
+        # Use the transport's exact normalizer so the identity claim is bound
+        # to every discriminating provider token before any network request.
+        discriminating_tokens=gemini._identity_tokens(  # type: ignore[attr-defined]
+            gemini._identity_subject(  # type: ignore[attr-defined]
+                representative.channel_name
+            )
         ),
     )
     return PreparedClusterReview(
         cluster=cluster,
         request=request,
-        opaque_key_bindings=tuple((opaque, candidate.epg_id) for _order, opaque, candidate in keyed),
+        opaque_key_bindings=tuple(
+            (opaque, candidate.epg_id) for opaque, candidate in keyed
+        ),
         ranking=ranking,
     )
 
@@ -1029,6 +1042,111 @@ def _result_value(value: object) -> str | None:
     return token if token else ""
 
 
+def _grounded_result_evidence(
+    prepared: PreparedClusterReview,
+    result: object,
+    *,
+    candidate_key: str,
+    selected_epg_id: str,
+) -> tuple[str, str, tuple[str, ...], tuple[str, ...], str] | None:
+    """Revalidate the bounded evidence carried by the grounded transport.
+
+    The transport already checks Google Search citation spans.  This policy
+    boundary independently binds the returned claim and evidence to the local
+    request so a fabricated or partially copied result cannot become approval.
+    """
+
+    request = prepared.request
+    if request is None:
+        return None
+    try:
+        result_selected_epg_id = getattr(result, "selected_epg_id", None)
+        identity_claim = getattr(result, "identity_claim", None)
+        query = getattr(result, "query", None)
+        source_urls = getattr(result, "source_urls", None)
+        source_authorities = getattr(result, "source_authorities", None)
+    except Exception:
+        return None
+    if (
+        type(result_selected_epg_id) is not str
+        or result_selected_epg_id != selected_epg_id
+        or type(identity_claim) is not str
+        or not identity_claim
+        or len(identity_claim) > 700
+        or type(query) is not str
+        or not query.strip()
+        or query != query.strip()
+        or len(query) > 300
+        or type(source_urls) is not tuple
+        or type(source_authorities) is not tuple
+        or not 2 <= len(source_urls) <= 32
+        or len(source_urls) != len(source_authorities)
+    ):
+        return None
+    candidate = next(
+        (
+            item
+            for item in request.candidates
+            if item.candidate_key == candidate_key
+            and item.epg_id == selected_epg_id
+        ),
+        None,
+    )
+    if candidate is None:
+        return None
+    try:
+        subject = gemini._identity_subject(request.channel_name)  # type: ignore[attr-defined]
+        expected_claim = gemini._claim_for(  # type: ignore[attr-defined]
+            subject,
+            candidate.display_name,
+            candidate.epg_id,
+        )
+    except Exception:
+        return None
+    if identity_claim != expected_claim:
+        return None
+
+    normalized_urls: list[str] = []
+    normalized_authorities: list[str] = []
+    try:
+        for raw_url, raw_authority in zip(
+            source_urls, source_authorities, strict=True
+        ):
+            if type(raw_url) is not str or type(raw_authority) is not str:
+                return None
+            normalized_url, direct_host = gemini._normalize_source_url(  # type: ignore[attr-defined]
+                raw_url
+            )
+            authority = gemini._registrable_domain(  # type: ignore[attr-defined]
+                raw_authority
+            )
+            if authority is None or authority != raw_authority.casefold():
+                return None
+            direct_authority = gemini._registrable_domain(  # type: ignore[attr-defined]
+                direct_host
+            )
+            if (
+                direct_authority
+                and not gemini._is_google_host(direct_host)  # type: ignore[attr-defined]
+                and direct_authority != authority
+            ):
+                return None
+            normalized_urls.append(normalized_url)
+            normalized_authorities.append(authority)
+    except Exception:
+        return None
+    urls = tuple(normalized_urls)
+    authorities = tuple(normalized_authorities)
+    if len(set(urls)) < 2 or len(set(authorities)) < 2:
+        return None
+    evidence_sha256 = _stable_digest(
+        "grounded-search-evidence-v1",
+        (identity_claim, query, *urls, *authorities),
+        size=64,
+    )
+    return identity_claim, query, urls, authorities, evidence_sha256
+
+
 def _catalog_candidate_for(
     snapshot: LocalVerificationSnapshot, epg_id: str
 ) -> CatalogCandidateState | None:
@@ -1126,6 +1244,7 @@ def _row_binding_sha256(
     text_catalog_fingerprint_sha256: str,
     text_catalog_generated_token: str,
     cluster_id: str,
+    grounding_evidence_sha256: str,
 ) -> str:
     return _stable_digest(
         "ai-verified-row-binding-v2",
@@ -1141,6 +1260,7 @@ def _row_binding_sha256(
             text_catalog_fingerprint_sha256,
             text_catalog_generated_token,
             cluster_id,
+            grounding_evidence_sha256,
             POLICY_VERSION,
             AI_VERIFIED_GATE,
         ),
@@ -1203,6 +1323,27 @@ def _validate_high_agreement_impl(
     ranking = prepared.ranking
     if selected_epg_id != ranking.epg_id:
         return _review_all(prepared, "AI_DISAGREES_WITH_LOCAL_TOP")
+    try:
+        grounded_target = getattr(result, "selected_epg_id", None)
+    except Exception:
+        grounded_target = None
+    if grounded_target != selected_epg_id:
+        return _review_all(prepared, "AI_GROUNDING_TARGET_MISMATCH")
+    grounding = _grounded_result_evidence(
+        prepared,
+        result,
+        candidate_key=candidate_key,
+        selected_epg_id=selected_epg_id,
+    )
+    if grounding is None:
+        return _review_all(prepared, "AI_GROUNDING_EVIDENCE_INVALID")
+    (
+        grounding_identity_claim,
+        grounding_query,
+        grounding_source_urls,
+        grounding_source_authorities,
+        grounding_evidence_sha256,
+    ) = grounding
 
     source_sha256 = verification.source_sha256
     text_catalog_file_sha256 = verification.text_catalog_file_sha256
@@ -1377,7 +1518,13 @@ def _validate_high_agreement_impl(
                 ),
                 text_catalog_generated_token=text_catalog_generated_token,
                 cluster_id=prepared.cluster.cluster_id,
+                grounding_evidence_sha256=grounding_evidence_sha256,
             ),
+            grounding_identity_claim=grounding_identity_claim,
+            grounding_query=grounding_query,
+            grounding_source_urls=grounding_source_urls,
+            grounding_source_authorities=grounding_source_authorities,
+            grounding_evidence_sha256=grounding_evidence_sha256,
         )
         decisions.append(
             RowApprovalDecision(

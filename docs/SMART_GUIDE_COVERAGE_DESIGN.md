@@ -2,10 +2,10 @@
 
 ## Status and objective
 
-This document is a proposed production policy, not current write authority.
-The existing Matching Lab remains a shadow/proposal process, and its guarded
-writer still accepts only exact owner-approved rows. Implement and calibrate
-this design in shadow mode before granting any tier automatic authority.
+This document describes the production coverage policy. The separate Matching
+Lab remains a historical shadow/proposal process; its states and owner-approved
+writer do not grant production authority. Scheduled Workflow 1 implements the
+autonomous decision lanes described here.
 
 The objective is to give at least 99% of actionable channels a useful guide
 without claiming that 99% have a genuine one-to-one EPGShare schedule. The
@@ -16,11 +16,12 @@ system uses two honest outcomes:
 2. a channel-specific synthetic guide when a stable real schedule cannot be
    proven.
 
-A wrong real schedule is worse than an accurate synthetic description. AI may
-review a bounded local shortlist, but it cannot invent an EPG ID or override a
-hard conflict.
+A wrong real schedule is worse than an honest synthetic description. AI may
+research only a bounded local shortlist, cannot invent an EPG ID, and cannot
+override a hard conflict. Safe unresolved rows receive a local guide rather
+than waiting for row-by-row human matching.
 
-## Audit baseline
+## Dated audit baseline
 
 The September 18, 2026 00:41 UTC shadow bundle contained 23,381 disabled
 `REVIEW` rows:
@@ -43,16 +44,22 @@ with a passing programme guide. Even assuming every one of the 6,251 prefilled
 IDs could be trusted would put the uncalibrated real-guide ceiling at 58.76%.
 Threshold relaxation therefore cannot deliver 99% real-guide coverage.
 
-The complete Mapping snapshot had 49,759 rows and 26,378 active rows. Giving
-every non-alert backlog row either a verified real guide or a personalized
-synthetic guide produces 49,206 covered rows, or 98.89% of the complete table.
-It is 100% of the 49,206 actionable, non-quarantined rows. Resolving or safely
-classifying at least 56 of the 553 alert rows crosses 99% of the literal table.
+That historical estimate assumed every non-alert native candidate could be
+resolved without live panel evidence. The final safety boundary does not make
+that assumption. The September 30 offline ledger assigns 41,801 of 49,759 rows
+(84.00%) and quarantines 5,389 native candidates for credentialed per-row
+validation, plus 2,120 OPEN-alert and 449 manual-target rows. Resolving 2,983
+native candidates crosses 90%; resolving the whole cohort reaches 47,190
+assignments (94.84%).
 
-These counts describe one frozen audit. The newer September 18 XML has the
-same 27,128 exact IDs as its official TXT catalog but different source bytes
-and programme evidence. Recompute all decisions and coverage counts from the
-new paired snapshot before any canary.
+These are target-assignment figures, not actual programme coverage or
+real-match accuracy. The production `guideCoverage` object recomputes actual
+source-separated coverage from retained programme rows after native validation.
+
+These counts describe one frozen audit. A later September 18 XML had the same
+27,128 exact IDs as its official TXT catalog but different source bytes and
+programme evidence; the following v2 section records that historical rerun.
+Production recomputes decisions and coverage from its current paired snapshot.
 
 ### Fresh September 18 v2 verification
 
@@ -64,7 +71,7 @@ validation against both CSV snapshots. The 23,381 rows were classified as:
 | Version-2 state | Rows |
 |---|---:|
 | Shadow real-match evidence (`AUTO_ELIGIBLE`; still no write authority) | 460 |
-| Human review | 3,526 |
+| Unresolved by the historical proposal policy | 3,526 |
 | Programme verification failed | 753 |
 | Protected-semantics or row conflict | 1,380 |
 | No safe candidate / low evidence | 16,709 |
@@ -95,7 +102,7 @@ They are evidence scores, not probabilities.
 |---|---|---|---:|
 | Trusted exact | Human/curated/strict exact identity; or relaxed/compact/token-bag exact with score >= 0.60 and post-family margin >= 0.15 | Real EPG | 76 of 104 clean structural rows met the numeric gate |
 | Standard automatic | Non-South-Asian, non-variant row; score >= 0.80 and margin >= 0.10 | Real EPG after calibration | 765 rows, 764 non-South-Asian |
-| Standard AI-assisted | Score >= 0.75 and margin >= 0.15; both fixed local rankers and AI `HIGH` choose the same opaque candidate; target stable across two source snapshots | Real EPG after calibration | Upper bound 849 rows, 844 non-South-Asian |
+| Grounded AI-assisted | Both fixed local rankers choose the same supplied candidate; Gemini `HIGH` repeats one complete positive identity claim with all discriminating tokens; at least two independent web authorities support that same claim; every local gate still passes | Real EPG | Historical numeric upper bound 849 rows, 844 non-South-Asian |
 | Conservative language/variant | Curated, human, or strict exact identity; optional fuzzy candidate requires score >= 0.90 and margin >= 0.20 plus exact protected-semantic agreement | Real EPG only with unusually strong evidence | No meaningful new South-Asian fuzzy yield in the audited set |
 | Personalized synthetic | No candidate, programme failure, dynamic event, continuous channel, unsafe ambiguity, or score below a real-guide lane | Honest channel-derived XMLTV | Covers the safe remainder |
 
@@ -147,8 +154,9 @@ No real automatic match may proceed when any of these is present:
   collapsed;
 - fewer than two informative programmes, first useful programme outside the
   near-term window, or less than six hours of useful future coverage;
-- AI disagreement, invalid response, weak confidence, unavailable replay
-  evidence, or an AI choice outside the local shortlist; or
+- AI disagreement, invalid response, weak confidence, an invented/detached ID,
+  missing discriminating tokens, fewer than two independent web authorities,
+  unavailable replay evidence, or an AI choice outside the local shortlist; or
 - an active customer-report quarantine or negative alias lock.
 
 HD, SD, and UHD IDs may form one ambiguity family only when current schedule
@@ -177,6 +185,10 @@ Version 2 replaces that blanket conflict with this flow:
 5. Never turn a panel ID into an EPGShare ID merely because the strings look
    alike.
 
+An untracked operator target is protected rather than replaced. A valid
+`coverage-fallback-v1` synthetic is different: it is machine-owned rollback
+state and remains eligible for a later verified real-schedule upgrade.
+
 ## Personalized synthetic guides
 
 The existing 12,879 active dummy mappings show the scale and main templates:
@@ -188,7 +200,7 @@ The existing 12,879 active dummy mappings show the scale and main templates:
 | Continuous 24x7 | 1,673 | Clean channel-derived title with `24/7` subtitle |
 | Flo events | 866 | Parsed event or `No event currently scheduled` |
 | ESPN+ | 586 | Parsed event and Eastern Time; every audited name contained a date/time |
-| Blank/general fallback | 573 | Clean channel name, never generic `24/7 Programming` when identity is usable |
+| Blank/general fallback | 573 | `Schedule unavailable — <channel>` |
 | Adult | 344 | Bounded neutral adult-programming label |
 | Music Choice | 132 | Genre or station name plus `Music 24/7` |
 | Triller | 37 | Parsed event or upcoming-event placeholder |
@@ -198,6 +210,10 @@ Singer groups should use the parsed performer, for example `Akhil - Songs
 24/7`, rather than a generic title. Movie groups should retain meaningful
 language and genre but remove server decorations, quality markers, and slot
 numbers when the number is not content identity.
+
+Generic channel identity is not evidence of programme content. Richer titles
+are allowed only when positive metadata identifies a supported event, movie,
+artist, music, adult, or continuous-24/7 family.
 
 Use long, deterministic blocks to control output size: normally 12 or 24 hours
 for continuous channels and one event-specific window plus bounded pre/post
@@ -266,27 +282,19 @@ Feedback actions:
 Keep a negative alias lock until an admin resolves the incident. Retain the
 previous Mapping preimage so every rollback is exact and auditable.
 
-## Staged rollout
+## Production operation
 
-1. Rerun the complete shadow analysis on the fresh paired XML/TXT snapshot.
-2. Add the missing protected semantics and the prefilled-ID revalidation lane;
-   freeze boundary and adversarial tests.
-3. Deploy personalized synthetic titles first because they improve the guide
-   without changing real schedule identity.
-4. Correct event-slot identity handling and deduplicate existing alerts. Verify
-   that ordinary linear renames still quarantine.
-5. Label a representative corpus by market and risk cohort. Require measured
-   precision of at least 99% before enabling a real automatic tier.
-6. Apply 25 trusted/current approvals under the existing shared lock. Stop on
-   any confirmed wrong mapping, unexpected complaint cluster, drift, or failed
-   postread.
-7. Expand in bounded stages: 100 rows, 500 rows, 10% of eligible rows, then the
-   remainder. Hold each stage through at least one fresh EPG snapshot.
-8. Enable the standard automatic lane before the AI-assisted lane. South-Asian
-   and explicit-variant fuzzy rows remain synthetic until separately
-   calibrated.
-9. Let complaint-free, cross-server, cross-snapshot evidence improve future
-   exact alias coverage; never train directly from an unverified complaint.
+Workflow 1 runs the full safe order on every scheduled pass: deterministic
+EPGShare real, Server 2/3 verified native real, grounded Gemini real, truthful
+local synthetic, then `IGNORE` or quarantine. Scheduled apply and fallback caps
+default to `30000`. Manual dispatch remains default-zero and controllable.
+
+When `GEMINI_API_KEY` exists, scheduled grounded review is enabled unless the
+repository variable is explicitly `EPG_USE_GEMINI_AI=false`. An AI abstention,
+invalid response, quota failure, or outage falls through to synthetic for an
+otherwise safe row. `OPEN` alerts, identity drift, and untracked manual targets
+remain protected. Existing coverage-fallback synthetics are reconsidered as
+real-schedule upgrade candidates on later snapshots.
 
 Track real/synthetic coverage separately, plus confirmed-wrong rate, complaint
 rate, rollback time, alert age, programme-gate failures, per-market precision,
@@ -296,19 +304,22 @@ as real-match accuracy.
 
 ## Implementation boundaries
 
-The repository now implements the version-2 shadow lane, channel-derived
-synthetic builder, bounded coverage fallback, and strict event-slot identity
-handling without changing the frozen v7/v8 matcher sources. The customer
+The repository implements the version-2 shadow lane, autonomous production
+decision order, Google-Search-grounded review, channel-derived synthetic
+builder, upgradeable coverage fallback, source-separated `guideCoverage`, and
+strict event-slot identity handling without changing the frozen v7/v8 matcher
+sources. The customer
 feedback endpoint and UI remain application work. The maintained touch points
 are:
 
 - `matching_lab/policy.py`, `models.py`, `pipeline.py`, `normalization.py`,
   `retrieval.py`, and `validation.py` for lane evidence and replay validation;
-- `scripts/ai_review_policy.py` for same-candidate advisory rules;
+- `scripts/ai_review_policy.py` and `scripts/ai_grounded_search.py` for
+  same-candidate local gates and independently corroborated web evidence;
 - `scripts/sync_channel_inventory.py` for event-slot identity and alert
   deduplication;
-- the guarded apply lane for signed policy canaries, exact rollback state, and
-  customer quarantine checks; and
+- the guarded apply lane for exact rollback state, terminal identity checks,
+  and customer quarantine checks; and
 - the guide/event builder for personalized synthetic programme generation.
 
 Every policy boundary needs tests at one unit below, exactly at, and one unit

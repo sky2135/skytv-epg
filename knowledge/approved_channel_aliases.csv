@@ -60,6 +60,28 @@ super sports 3,AL,,SuperSport.3.al,verified_cross_server_identity,3 current NEED
 super sports 4,AL,,SuperSport.4.al,verified_cross_server_identity,3 current NEEDS rows; Albanian SuperSport number 4 is preserved exactly.
 super sports 5,AL,,SuperSport.5.al,verified_cross_server_identity,3 current NEEDS rows; Albanian SuperSport number 5 is preserved exactly.
 super sports 6,AL,,SuperSport.6.al,verified_cross_server_identity,3 current NEEDS rows; Albanian SuperSport number 6 is preserved exactly.
+dstv super motorsport,ZA,,MOTORSPORT.za,verified_brand_abbreviation,Official DStv lineup identifies SuperSport Motorsport as South African channel 215; current XML and TXT catalogs contain the programme-backed MOTORSPORT.za schedule.
+super motorsport,ZA,,MOTORSPORT.za,verified_brand_abbreviation,Official DStv lineup identifies SuperSport Motorsport as South African channel 215; this context-normalized spelling uses the same MOTORSPORT.za schedule.
+supersport cricket,ZA,,CRICKET.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Cricket; the catalog stores its schedule as CRICKET.za.
+supersports premier league,ZA,,SS.Premier.League.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Premier League; the catalog stores its schedule as SS.Premier.League.za.
+supersports laliga,ZA,,SS.La.Liga.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS La Liga; the catalog stores its schedule as SS.La.Liga.za.
+supersports football,ZA,,SS.Football.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Football; the catalog stores its schedule as SS.Football.za.
+supersports psl,ZA,,PSL.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS PSL; the catalog stores its schedule as PSL.za.
+super sports grandstand,ZA,,GRANDSTAND.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Grandstand; the catalog stores its schedule as GRANDSTAND.za.
+super sports rugby,ZA,,RUGBY.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Rugby; the catalog stores its schedule as RUGBY.za.
+super sports golf,ZA,,GOLF.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Golf; the catalog stores its schedule as GOLF.za.
+dstv super sports golf,ZA,,GOLF.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Golf; this provider spelling includes the DStv prefix and uses GOLF.za.
+super sports action,ZA,,SS.Action.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Action; the catalog stores its schedule as SS.Action.za.
+super sports tennis,ZA,,TENNIS.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Tennis; the catalog stores its schedule as TENNIS.za.
+dstv super sports tennis,ZA,,TENNIS.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Tennis; this provider spelling includes the DStv prefix and uses TENNIS.za.
+supersports variety 1,ZA,,SS.Variety.1.za,verified_brand_abbreviation,Verified legacy DStv SuperSport Variety 1 identity; the programme gate remains mandatory.
+supersports variety 2,ZA,,SS.Variety.2.za,verified_brand_abbreviation,Verified legacy DStv SuperSport Variety 2 identity; the programme gate remains mandatory.
+supersports variety 3,ZA,,SS.Variety.3.za,verified_brand_abbreviation,Verified legacy DStv SuperSport Variety 3 identity; the programme gate remains mandatory.
+supersports variety 4,ZA,,SS.Variety.4.za,verified_brand_abbreviation,Verified legacy DStv SuperSport Variety 4 identity; the programme gate remains mandatory.
+supersport blitz,ZA,,BLITZ.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Blitz; the catalog stores its schedule as BLITZ.za.
+supersport schools,ZA,,SuperSport.School.HD.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Schools; the catalog stores its schedule as SuperSport.School.HD.za.
+maximo 1 champions,ZA,,MAXIMO.1.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies SS Maximo; the provider's Champions label resolves to the catalog's MAXIMO.1.za schedule.
+espn 2,ZA,,ESPN.2.HD.za,verified_brand_abbreviation,Official DStv South Africa lineup identifies ESPN 2; the catalog stores its schedule as ESPN.2.HD.za.
 kanal 10,AL,,Kanal.10.al,verified_cross_server_identity,2 current NEEDS rows; exact channel number and Albanian market.
 rtv 21 plus,AL,,21.Plus.al,verified_cross_server_identity,2 current NEEDS rows; Plus edition is explicit and preserved.
 klan plus,AL,,Klan.Plus.al,verified_cross_server_identity,2 current NEEDS rows; Plus edition is explicit and preserved.

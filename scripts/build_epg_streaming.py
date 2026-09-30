@@ -1670,6 +1670,7 @@ _SYNTHETIC_ACRONYMS = {
     "cfl": "CFL",
     "chl": "CHL",
     "ctv": "CTV",
+    "dstv": "DSTV",
     "et": "ET",
     "espn": "ESPN",
     "f1": "F1",
@@ -1816,12 +1817,78 @@ _BLANK_EVENT_LABELS = frozenset(
     }
 )
 
+_SYNTHETIC_PROGRAMME_CLASSES = (
+    "adult",
+    "artist",
+    "continuous24x7",
+    "event",
+    "movie",
+    "musicChoice",
+    "scheduleUnavailable",
+)
+
 
 @dataclass(frozen=True)
 class SyntheticEventTitle:
     name: str
     start_epoch: int | None
     time_label: str
+
+
+def _synthetic_event_like(row: MappingRow) -> bool:
+    """Return whether approved metadata identifies an event-style stream."""
+
+    epg_id = row.epg_id.casefold()
+    return (
+        row.metadata.genre == "events"
+        or row.metadata.channel_role in {"event", "ppv"}
+        or "ppv.events" in epg_id
+        or "flo.events" in epg_id
+        or bool(re.search(r"\bESPN\+\s*\d+\b", row.channel_name, re.I))
+    )
+
+
+def synthetic_programme_classification(row: MappingRow) -> str:
+    """Classify what a generated guide title can truthfully claim.
+
+    A channel name alone is not programme information.  Only explicit
+    continuous/event/movie/artist/adult families are presented as programming;
+    every other generated schedule is labelled as schedule unavailable.
+    """
+
+    if row.metadata.genre == "adult" or row.metadata.content_rating == "adult":
+        return "adult"
+    if _synthetic_event_like(row):
+        return "event"
+
+    category = _security_normalize_text(row.category_name)
+    if re.search(r"\bsingers?\b", category):
+        return "artist"
+    if row.metadata.genre == "movies" or "movie.dummy" in row.epg_id.casefold():
+        return "movie"
+    if "music.choice" in row.epg_id.casefold():
+        return "musicChoice"
+
+    continuous_evidence = " ".join(
+        (
+            row.channel_name,
+            row.category_name,
+            row.canonical_name,
+            row.epg_id,
+        )
+    )
+    if (
+        row.metadata.channel_role == "virtual"
+        or "24.7.dummy" in row.epg_id.casefold()
+        or re.search(
+            r"\b(?:24\s*[/x.-]\s*7|24\s*hours?|continuous|"
+            r"all\s+day\s+one\s+movie|movie\s+loop)\b",
+            continuous_evidence,
+            re.I,
+        )
+    ):
+        return "continuous24x7"
+    return "scheduleUnavailable"
 
 
 def _plausible_event_datetime(
@@ -1895,13 +1962,7 @@ def decode_synthetic_event_title(
 ) -> SyntheticEventTitle | None:
     """Decode an event name/time only when the approved row supplies them."""
 
-    event_like = (
-        row.metadata.genre == "events"
-        or row.metadata.channel_role in {"event", "ppv"}
-        or "ppv.events" in row.epg_id.casefold()
-        or bool(re.search(r"\bESPN\+\s*\d+\b", row.channel_name, re.I))
-    )
-    if not event_like:
+    if not _synthetic_event_like(row):
         return None
 
     raw_text = unicodedata.normalize("NFKC", clean_text(row.channel_name, 300))
@@ -2041,7 +2102,9 @@ def synthetic_programme_title(
     technical decoration are removed.
     """
 
-    if row.metadata.genre == "adult" or row.metadata.content_rating == "adult":
+    programme_class = synthetic_programme_classification(row)
+
+    if programme_class == "adult":
         return "Adult Programming"
 
     event = decode_synthetic_event_title(
@@ -2055,9 +2118,7 @@ def synthetic_programme_title(
         return clean_text(f"{prefix}{event.name} — {event.time_label}", 180)
 
     title = _clean_synthetic_channel_label(row.channel_name)
-    category = _security_normalize_text(row.category_name)
-    is_singer_group = bool(re.search(r"\bsingers?\b", category))
-    if is_singer_group:
+    if programme_class == "artist":
         language_pattern = "|".join(_SYNTHETIC_LANGUAGE_NAMES)
         artist = re.sub(
             rf"^(?:{language_pattern})\s*[|:\-]*\s*",
@@ -2070,8 +2131,7 @@ def synthetic_programme_title(
         if artist:
             return clean_text(f"{_smart_synthetic_title(artist)} Songs", 180)
 
-    is_movie = row.metadata.genre == "movies" or "movie.dummy" in row.epg_id.casefold()
-    if is_movie and title:
+    if programme_class == "movie" and title:
         generic_numbered = re.fullmatch(
             rf"({'|'.join(_SYNTHETIC_LANGUAGE_NAMES)})\s+movies?\s+\d+",
             title,
@@ -2102,6 +2162,13 @@ def synthetic_programme_title(
         )
 
     rendered = _smart_synthetic_title(title)
+    if programme_class == "scheduleUnavailable":
+        return clean_text(
+            f"Schedule unavailable — {rendered}"
+            if rendered
+            else "Schedule unavailable",
+            180,
+        )
     if rendered:
         return rendered
     genre_label = _SYNTHETIC_GENRE_LABELS.get(row.metadata.genre, "")
@@ -4242,6 +4309,339 @@ def server_mapping_sha256(rows: Sequence[MappingRow]) -> str:
     return canonical_mapping_sha256(list(rows))
 
 
+def _guide_coverage_percent(count: int, denominator: int) -> float:
+    if int(denominator) <= 0:
+        return 0.0
+    return round(int(count) * 100.0 / int(denominator), 2)
+
+
+def _guide_coverage_payload(
+    *,
+    scope: str,
+    denominators: Mapping[str, int],
+    counts: Mapping[str, int],
+    synthetic_classes: Mapping[str, int],
+    all_programme_streams_loaded: bool,
+    server_1_external_panel_forbidden: bool,
+) -> dict[str, Any]:
+    """Render and enforce the all-row guide-coverage accounting contract."""
+
+    literal_rows = int(denominators["literalLoadedMappingRows"])
+    channel_rows = int(
+        denominators["channelRowsExcludingIgnoredNonChannels"]
+    )
+    actionable_rows = int(
+        denominators["actionableNonQuarantinedRows"]
+    )
+    values = {key: int(value) for key, value in counts.items()}
+    classes = {
+        key: int(synthetic_classes.get(key, 0))
+        for key in _SYNTHETIC_PROGRAMME_CLASSES
+    }
+
+    reconciliation = {
+        "realSourcesEqualRealGuide": (
+            values["verifiedEpgShareReal"] + values["nativePanelReal"]
+            == values["realGuide"]
+        ),
+        "realPlusSyntheticEqualsUsefulGuide": (
+            values["realGuide"] + values["localSynthetic"]
+            == values["usefulGuide"]
+        ),
+        "exclusiveOutcomesEqualLiteralLoadedRows": (
+            values["usefulGuide"]
+            + values["ignoredNonChannel"]
+            + values["uncovered"]
+            == literal_rows
+        ),
+        "usefulPlusUncoveredEqualsChannelRows": (
+            values["usefulGuide"] + values["uncovered"] == channel_rows
+        ),
+        "usefulPlusActionableUncoveredEqualsActionableRows": (
+            values["usefulGuide"] + values["actionableUncovered"]
+            == actionable_rows
+        ),
+        "uncoveredBreakdownEqualsUncovered": (
+            values["quarantinedReview"]
+            + values["disabledReview"]
+            + values["otherUncovered"]
+            == values["uncovered"]
+        ),
+        "syntheticClassesEqualLocalSynthetic": (
+            sum(classes.values()) == values["localSynthetic"]
+        ),
+        "allProgrammeStreamsLoaded": bool(all_programme_streams_loaded),
+        "server1ExternalPanelForbidden": bool(
+            server_1_external_panel_forbidden
+        ),
+    }
+    failed = [key for key, passed in reconciliation.items() if not passed]
+    if failed:
+        raise BuildError(
+            "Guide coverage reconciliation failed: " + ", ".join(failed)
+        )
+
+    literal_keys = (
+        "verifiedEpgShareReal",
+        "nativePanelReal",
+        "localSynthetic",
+        "realGuide",
+        "usefulGuide",
+        "ignoredNonChannel",
+        "uncovered",
+        "quarantinedReview",
+        "disabledReview",
+        "otherUncovered",
+    )
+    channel_keys = tuple(
+        key for key in literal_keys if key != "ignoredNonChannel"
+    )
+    actionable_counts = {
+        key: values[key]
+        for key in (
+            "verifiedEpgShareReal",
+            "nativePanelReal",
+            "localSynthetic",
+            "realGuide",
+            "usefulGuide",
+        )
+    }
+    actionable_counts["uncovered"] = values["actionableUncovered"]
+
+    return {
+        "schemaVersion": 1,
+        "scope": clean_text(scope, 80) or "server",
+        "countUnit": "mappingRowsWithUniqueServerStreamIds",
+        "coverageBasis": "ACTUAL_RETAINED_PROGRAMME_ROWS",
+        "outcomeDefinitions": {
+            "verifiedEpgShareReal": (
+                "Eligible EPGShare mapping with at least one retained, "
+                "externally sourced programme row."
+            ),
+            "nativePanelReal": (
+                "Eligible native-panel mapping with at least one retained, "
+                "externally sourced programme row."
+            ),
+            "localSynthetic": (
+                "Eligible local generated guide with at least one retained row; "
+                "scheduleUnavailable is disclosed in localSyntheticClasses."
+            ),
+            "ignoredNonChannel": "Mapping row explicitly marked IGNORE.",
+            "uncovered": (
+                "Non-ignored channel row with no retained programme rows."
+            ),
+        },
+        "denominatorDefinitions": {
+            "literalLoadedMappingRows": "Every loaded mapping row.",
+            "channelRowsExcludingIgnoredNonChannels": (
+                "Loaded rows except rows explicitly marked IGNORE."
+            ),
+            "actionableNonQuarantinedRows": (
+                "Rows eligible for runtime publication: enabled, active action, "
+                "non-empty EPG ID, and not source-policy blocked."
+            ),
+        },
+        "denominators": {
+            "literalLoadedMappingRows": literal_rows,
+            "channelRowsExcludingIgnoredNonChannels": channel_rows,
+            "actionableNonQuarantinedRows": actionable_rows,
+        },
+        "counts": values,
+        "percentages": {
+            "ofLiteralLoadedMappingRows": {
+                key: _guide_coverage_percent(values[key], literal_rows)
+                for key in literal_keys
+            },
+            "ofChannelRowsExcludingIgnoredNonChannels": {
+                key: _guide_coverage_percent(values[key], channel_rows)
+                for key in channel_keys
+            },
+            "ofActionableNonQuarantinedRows": {
+                key: _guide_coverage_percent(value, actionable_rows)
+                for key, value in actionable_counts.items()
+            },
+        },
+        "localSyntheticClasses": {
+            key: {
+                "count": classes[key],
+                "percentOfLocalSynthetic": _guide_coverage_percent(
+                    classes[key], values["localSynthetic"]
+                ),
+            }
+            for key in _SYNTHETIC_PROGRAMME_CLASSES
+        },
+        "reconciliation": reconciliation,
+    }
+
+
+def build_guide_coverage(
+    rows: Sequence[MappingRow],
+    streams_with_programmes: set[str],
+    *,
+    scope: str,
+) -> dict[str, Any]:
+    """Account for every loaded mapping row in mutually exclusive outcomes."""
+
+    row_by_stream: dict[str, MappingRow] = {}
+    for row in rows:
+        if row.stream_id in row_by_stream:
+            raise BuildError(
+                f"Guide coverage received duplicate stream ID {row.stream_id!r}."
+            )
+        row_by_stream[row.stream_id] = row
+    programme_streams = {str(value) for value in streams_with_programmes}
+    missing_streams = sorted(
+        programme_streams - set(row_by_stream), key=stream_sort_key
+    )
+    if missing_streams:
+        raise BuildError(
+            "Guide coverage received programme streams absent from the loaded "
+            "mapping: " + ", ".join(missing_streams[:10])
+        )
+
+    verified_epgshare = 0
+    native_panel = 0
+    local_synthetic = 0
+    ignored_non_channel = 0
+    quarantined_review = 0
+    disabled_review = 0
+    other_uncovered = 0
+    synthetic_classes: Counter[str] = Counter()
+
+    for row in rows:
+        if row.stream_id in programme_streams:
+            if not row.runtime_eligible:
+                raise BuildError(
+                    "Guide coverage found programmes on an ineligible mapping "
+                    f"row: {row.server_id}/{row.stream_id}."
+                )
+            if row.requested_source == "dummy":
+                local_synthetic += 1
+                synthetic_classes[synthetic_programme_classification(row)] += 1
+            elif row.effective_source == "panel":
+                native_panel += 1
+            elif row.effective_source == "epgshare01":
+                verified_epgshare += 1
+            else:
+                raise BuildError(
+                    "Guide coverage cannot classify programme source for "
+                    f"{row.server_id}/{row.stream_id}."
+                )
+            continue
+
+        if row.action.upper() == "IGNORE":
+            ignored_non_channel += 1
+        elif row.reason == EFFECTIVE_QUARANTINE_REASON:
+            quarantined_review += 1
+        elif row.action.upper() == "REVIEW" and not row.enabled:
+            disabled_review += 1
+        else:
+            other_uncovered += 1
+
+    useful = verified_epgshare + native_panel + local_synthetic
+    real = verified_epgshare + native_panel
+    uncovered = quarantined_review + disabled_review + other_uncovered
+    actionable_rows = sum(1 for row in rows if row.runtime_eligible)
+    actionable_uncovered = sum(
+        1
+        for row in rows
+        if row.runtime_eligible and row.stream_id not in programme_streams
+    )
+    denominators = {
+        "literalLoadedMappingRows": len(rows),
+        "channelRowsExcludingIgnoredNonChannels": (
+            len(rows) - ignored_non_channel
+        ),
+        "actionableNonQuarantinedRows": actionable_rows,
+    }
+    counts = {
+        "verifiedEpgShareReal": verified_epgshare,
+        "nativePanelReal": native_panel,
+        "localSynthetic": local_synthetic,
+        "realGuide": real,
+        "usefulGuide": useful,
+        "ignoredNonChannel": ignored_non_channel,
+        "uncovered": uncovered,
+        "quarantinedReview": quarantined_review,
+        "disabledReview": disabled_review,
+        "otherUncovered": other_uncovered,
+        "actionableUncovered": actionable_uncovered,
+    }
+    server_1_panel_forbidden = all(
+        row.server_id != "server_1" or row.effective_source != "panel"
+        for row in rows
+    ) and all(
+        row.server_id != "server_1"
+        or row.requested_source != "panel"
+        or row.stream_id not in programme_streams
+        for row in rows
+    )
+    return _guide_coverage_payload(
+        scope=scope,
+        denominators=denominators,
+        counts=counts,
+        synthetic_classes=synthetic_classes,
+        all_programme_streams_loaded=not missing_streams,
+        server_1_external_panel_forbidden=server_1_panel_forbidden,
+    )
+
+
+def aggregate_guide_coverage(
+    summaries: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Sum reconciled per-server coverage without losing denominator meaning."""
+
+    denominator_keys = (
+        "literalLoadedMappingRows",
+        "channelRowsExcludingIgnoredNonChannels",
+        "actionableNonQuarantinedRows",
+    )
+    count_keys = (
+        "verifiedEpgShareReal",
+        "nativePanelReal",
+        "localSynthetic",
+        "realGuide",
+        "usefulGuide",
+        "ignoredNonChannel",
+        "uncovered",
+        "quarantinedReview",
+        "disabledReview",
+        "otherUncovered",
+        "actionableUncovered",
+    )
+    denominators = {
+        key: sum(
+            int(summary["denominators"][key]) for summary in summaries
+        )
+        for key in denominator_keys
+    }
+    counts = {
+        key: sum(int(summary["counts"][key]) for summary in summaries)
+        for key in count_keys
+    }
+    synthetic_classes = {
+        key: sum(
+            int(summary["localSyntheticClasses"][key]["count"])
+            for summary in summaries
+        )
+        for key in _SYNTHETIC_PROGRAMME_CLASSES
+    }
+    return _guide_coverage_payload(
+        scope="global",
+        denominators=denominators,
+        counts=counts,
+        synthetic_classes=synthetic_classes,
+        all_programme_streams_loaded=all(
+            bool(summary["reconciliation"]["allProgrammeStreamsLoaded"])
+            for summary in summaries
+        ),
+        server_1_external_panel_forbidden=all(
+            bool(summary["reconciliation"]["server1ExternalPanelForbidden"])
+            for summary in summaries
+        ),
+    )
+
+
 def build_server(
     *,
     server_id: str,
@@ -4270,6 +4670,11 @@ def build_server(
         connection=connection,
         schedule_stats=schedule_stats,
         icon_overrides=icon_overrides,
+    )
+    guide_coverage = build_guide_coverage(
+        server_rows,
+        streams_with_programmes,
+        scope=server_id,
     )
     xml_path = staging_public / "epg" / f"{server_id}_tivimate.xml.gz"
     xml_result = write_tivimate_xmltv(
@@ -4433,6 +4838,7 @@ def build_server(
         "mappingProgrammeCoveragePercent": round(
             len(streams_with_programmes) * 100.0 / max(1, len(mapped_rows)), 2
         ),
+        "guideCoverage": guide_coverage,
         "xmltvChannels": xml_result["channels"],
         "channelNameEntries": xml_result["channelNameEntries"],
         "canonicalEpgIdEntries": xml_result["canonicalEpgChannels"],
@@ -4475,6 +4881,7 @@ def build_server(
             "app": app_result,
             "metadata": metadata_result,
             "reports": report_counts,
+            "guideCoverage": guide_coverage,
             "server1PolicyEnforced": (
                 server_id != "server_1" or not native_panel_used
             ),
@@ -4510,6 +4917,7 @@ def build_server(
         "syntheticEventWindowHours": (
             server_source_provenance.get("synthetic", {}).get("eventWindowHours")
         ),
+        "guideCoverage": guide_coverage,
     }
     write_json(
         staging_public / "EPG" / f"{server_id}_epg_manifest.json",
@@ -5208,6 +5616,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_provenance["synthetic"] = {
                 "inputMode": "generated",
                 "titlePolicy": "CHANNEL_DERIVED_NO_INVENTED_PROGRAMME_DETAILS",
+                "genericTitlePolicy": "SCHEDULE_UNAVAILABLE_PREFIX",
                 "blockHours": synthetic_stats.block_hours,
                 "eventWindowHours": synthetic_stats.event_window_hours,
                 "futureDays": int(args.synthetic_future_days),
@@ -5281,6 +5690,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "iconCoveragePercent": manifest["iconCoveragePercent"],
                     "sourcePolicy": manifest["sourcePolicy"],
                     "nativePanelXmltvUsed": manifest["nativePanelXmltvUsed"],
+                    "guideCoverage": manifest["guideCoverage"],
                 }
             )
             app_builds.append(
@@ -5296,9 +5706,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ],
                     "coveragePercent": app_manifest["coveragePercent"],
                     "programmeRows": app_manifest["programmeRows"],
+                    "guideCoverage": app_manifest["guideCoverage"],
                 }
             )
 
+        global_guide_coverage = aggregate_guide_coverage(
+            [build["guideCoverage"] for build in tivimate_builds]
+        )
         write_json(staging_public / "EPG" / "taxonomy.json", taxonomy_payload())
         write_json(
             staging_public / "epg" / "index.json",
@@ -5312,6 +5726,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "matcherPolicy": "APPROVED_MAPPINGS_ONLY_NO_AUTOMATIC_REMATCH",
                 "mappingSource": "PRIVATE_GOOGLE_SHEET_EPHEMERAL_SNAPSHOT",
                 "mappingSha256": mapping_sha,
+                "guideCoverage": global_guide_coverage,
                 "builds": tivimate_builds,
             },
         )
@@ -5326,6 +5741,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "mappingSource": "PRIVATE_GOOGLE_SHEET_EPHEMERAL_SNAPSHOT",
                 "mappingSha256": mapping_sha,
                 "taxonomyFile": "EPG/taxonomy.json",
+                "guideCoverage": global_guide_coverage,
                 "builds": app_builds,
             },
         )

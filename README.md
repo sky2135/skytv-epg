@@ -23,33 +23,31 @@ to repair it without replacing the Sheet or creating another repository.
 
 The daily workflow asks all three configured providers for their live-channel
 inventories. Every valid unique stream returned by the API or playlist fallback
-is compared by `(server_id, stream_id)`. For an unseen pair, Version 1 tries the
-frozen Smart Rules matcher against the complete EPGShare catalog. It enables a
-row only when there is one exact, region-consistent real channel ID confirmed
-case-sensitively in both the XML and official text catalog, and that same
-downloaded guide contains a useful current/future schedule. All uncertain rows
-are appended disabled for review. Separately, a verified placeholder family may
-be enabled as `AUTO_DUMMY`, and a decorative heading may be disabled as
-`IGNORE`; neither exception is treated as a real EPG match. Workflow 1 rechecks
-existing disabled `REVIEW` rows with the same safety rules every day and can
-also be dispatched manually. Existing Sheet rows are never deleted or silently
-remapped. The same single EPGShare parse is reused to build the
+is compared by `(server_id, stream_id)`. It then decides each safe identity in
+this order: deterministic EPGShare real schedule, verified Server 2/3 native
+schedule, Google-Search-grounded Gemini verification of a supplied real
+candidate, and finally a truthful per-stream local synthetic guide. Decorative
+non-channels become `IGNORE`; `OPEN` alerts, identity drift, and untracked manual
+targets remain quarantined or protected. This is an unattended backlog process,
+not a request for someone to match channels row by row. Existing Sheet rows are
+never deleted or silently remapped. The same single EPGShare parse is reused to build the
 TiviMate XMLTV and app JSON outputs, which are validated and deployed through
 GitHub Pages.
 
-Server 1 programme data is always sourced from EPGShare. Server 1 credentials
-are used only by the inventory step to discover its channel list; they are not
-available to the EPG-building step.
+Server 1 external real programme data is sourced only from EPGShare; unresolved
+safe rows may use a local synthetic guide. Server 1 credentials are used only
+by the inventory step to discover its channel list and are not available to the
+EPG-building step.
 
 ## Workflows
 
 - `1 - Sync channels to Google Sheet` — runs daily at **02:17 Toronto time** and
   can also be dispatched manually. The scheduled run appends missing channels,
-  rechecks existing `REVIEW` rows on all servers, but writes none of those rows
-  unless `EPG_REVIEW_APPLY_LIMIT` is explicitly set to an allowed nonzero
-  value. Gemini is also off unless `EPG_USE_GEMINI_AI=true`. Smart Rules always
-  run first. Manual dispatch defaults to no new-row write, `dry-run`, Gemini
-  off, and a zero REVIEW apply limit.
+  rechecks existing `REVIEW` rows on all servers, and defaults the total apply
+  and synthetic fallback limits to `30000`. Scheduled Gemini turns on when its
+  API-key secret exists unless `EPG_USE_GEMINI_AI=false`. Manual dispatch stays
+  conservative: no new-row write, `dry-run`, Gemini off, and zero write limits
+  until explicitly changed.
 - `2 - Build and publish EPG` — daily and manual inventory, build, validation,
   and GitHub Pages deployment.
 
@@ -67,13 +65,15 @@ and an optional local observation ledger with chain-consistency checks. It has
 no Mapping-write path; even its
 strongest shadow state carries no apply authority. Start with
 [the design decision](docs/MATCHING_LAB_DESIGN.md) and
-[the operating guide](docs/MATCHING_LAB_OPERATIONS.md). The proposed
+[the operating guide](docs/MATCHING_LAB_OPERATIONS.md). The production
 [smart guide coverage policy](docs/SMART_GUIDE_COVERAGE_DESIGN.md) describes
 how calibrated real matches, channel-specific synthetic guides, event-slot
 handling, and customer feedback can provide near-complete useful coverage
-without presenting uncertain matches as real schedules. The implemented,
-opt-in [Smart Coverage Fallback](docs/SMART_COVERAGE_FALLBACK.md) explains the
-bounded rollout control and rollback evidence for local synthetic guides. A standalone private
+without presenting uncertain matches as real schedules. The concise
+[autonomous coverage contract](docs/AUTONOMOUS_COVERAGE.md) defines production
+decision order, controls, and coverage semantics. The implemented
+[Smart Coverage Fallback](docs/SMART_COVERAGE_FALLBACK.md) explains rollback
+evidence for local synthetic guides. A standalone private
 approval package can bind an owner's decision to one exact unexpired run, and a
 prepare-only command can stage a deterministic canary of at most 25 rows. Both
 artifacts remain non-authoritative and preserve existing automated Mapping notes
@@ -88,39 +88,41 @@ write was performed as part of implementing or testing this lane.
 
 The supplied workbook and CSV seed both begin with the same 25,170 historical
 mapping rows. They include 11,939 approved dummy-guide placeholders and 171
-disabled rows that remain in `REVIEW`. Those 171 rows stay private and are
-excluded from schedules, public metadata, and personalization until reviewed,
-approved, and enabled. The files are migration starters, not proof of the
+disabled rows that begin in `REVIEW`. Production automation re-evaluates safe
+rows and gives the unresolved remainder a truthful local guide; protected or
+quarantined rows remain excluded. The files are migration starters, not proof of the
 providers' complete current lineups. The CSV seed is a frozen backup and never
 updates. The imported private Google Sheet becomes the live mapping authority.
 The first successful strict inventory sync asks each server for its live list
 and appends every missing valid, uniquely identified row returned in that run.
 Safe exact EPGShare matches with a verified programme guide are enabled
-automatically. Verified placeholder families may become `AUTO_DUMMY`, and
-decorative headings may become disabled `IGNORE`; the rest use
-`enabled=FALSE` and `action=REVIEW`. Later runs repeat that exact-key comparison
-automatically.
+automatically. Verified Server 2/3 native schedules may become `KEEP_PANEL`.
+Safe rows not proven real become `AUTO_DUMMY` with a truthful, unique local
+guide, and decorative headings become disabled `IGNORE`. Later runs retry local
+coverage fallbacks as real-schedule upgrade candidates.
 
-Workflow 1 can also recheck those existing `REVIEW` rows. Smart Rules always
-run first. A match is enabled only after the same exact-ID, region, catalog,
-and programme checks used for a new channel all pass. Smart Rules may analyze
-the whole eligible scope, but one explicit `review_apply_limit` of `0`, `25`,
-`100`, `500`, `2500`, or `5000` caps the total existing-`REVIEW` rows persisted
-across deterministic, native, synthetic, heading, and AI lanes. The default is
-`0`, which guarantees no existing-`REVIEW` mutation.
+Workflow 1 also rechecks existing `REVIEW` rows and earlier
+`coverage-fallback-v1` synthetics. Smart Rules always run first. A real match is
+enabled only after the exact-ID, region, catalog, and programme checks used for
+a new channel all pass. One `review_apply_limit` of `0`, `25`, `100`, `500`,
+`2500`, `5000`, or `30000` caps the total persisted across deterministic,
+native, synthetic, heading, and AI lanes. Scheduled runs default to `30000`;
+manual dispatch defaults to `0`.
 For Server 2 and Server 3, the same run may also recover an exact native ID
 from current API/M3U evidence, but only after whole-catalog name uniqueness,
 current programme, and immediate pre-write provider checks pass. Server 1
-remains EPGShare-only.
-Gemini verification is opt-in and limited to the smaller of 200 affected rows
-or the capacity remaining under the total REVIEW apply limit. Gemini
-cannot invent an ID: it sees only opaque choices from a
-local shortlist. A row is enabled only when two fixed local rankers independently
-choose the same candidate with strong scores and margins, Gemini returns `HIGH`
-for that exact choice, the current XML/text catalogs and programme gate pass,
-and terminal Sheet, alert, and provider rereads are unchanged. Every other
-answer leaves the row untouched in `REVIEW`; API errors never block deterministic
-work. Server 1 remains EPGShare-only.
+has no native-real lane.
+Grounded Gemini verification is limited to the smaller of 200 affected rows or
+the capacity remaining under the total apply limit. It is scheduled
+automatically when `GEMINI_API_KEY` exists unless explicitly disabled with
+`EPG_USE_GEMINI_AI=false`. Gemini cannot invent an ID: it sees only opaque
+choices from a local shortlist. A row is enabled as real only when both local
+rankers agree, Gemini returns `HIGH` for that exact choice, one complete
+positive identity claim is supported by at least two independent web
+authorities, and every catalog, programme, provider, Sheet, alert, score,
+margin, and semantics gate passes. An abstention or AI failure does not block
+the run; the safe unresolved row receives a local synthetic guide. Server 1
+remains EPGShare-only for external real schedules.
 
 Smart Rules rebuild durable alias memory from the private Sheet every run. One
 enabled current human `MANUAL`/`APPROVED` row may teach its exact alias, market,
@@ -141,7 +143,20 @@ responses and strictly verified rows actually enabled in the Sheet are separate
 counters, so a dry-run is never presented as a write. Do not infer the review
 backlog by subtracting one output count from the provider's total channel count,
 because disabled, missing, ignored, quarantined, and already mapped rows are
-different states.
+different states. Published `guideCoverage` data separately reports literal,
+channel-only, and actionable denominators plus verified EPGShare real, native
+real, local synthetic, ignored, quarantined, and uncovered outcomes. Useful
+coverage must never be presented as real-match accuracy.
+
+The final September 30, 2026 offline decision base contains all 49,759 Mapping
+rows. It assigns 41,801 targets (84.00%): 10,526 EPGShare real, 3,977 retained
+native, and 27,298 truthful local synthetic. It quarantines 5,389 native
+candidates for the credentialed live XMLTV verifier, 2,120 OPEN-alert rows, and
+449 protected manual candidates. Resolving at least 2,983 of the native cohort
+as either verified native or a definitive-miss synthetic crosses 90%; resolving
+the complete native cohort reaches 47,190 assigned rows (94.84%). These are
+target-assignment figures, not measured programme coverage or real-match
+accuracy; the production `guideCoverage` object is authoritative after build.
 
 New rows contain conservative metadata suggestions for sorting and review.
 Automatic schedule approval does **not** approve personalization metadata:
@@ -219,8 +234,8 @@ reports are generated automatically.
   same feed and market. If the family mixes real/dummy status or differs by
   feed or market, the entire preflight stops. Separately, an unscoped real
   candidate routed as `ALL` remains available for an exact existing mapping,
-  but a strong station-identity collision with a routed new proposal keeps that
-  proposal disabled in `REVIEW`.
+  but a strong station-identity collision prevents real approval and sends an
+  otherwise safe proposal to local synthetic coverage.
 - Selected schedules are staged in disk-backed SQLite.
 - XML and JSON outputs are written as deterministic gzip streams.
 - Untrusted downloads, XML structure, compressed/expanded sizes, Sheet rows,
@@ -228,9 +243,9 @@ reports are generated automatically.
 - Generated Pages output is published atomically only after all checks pass.
 - The Pages payload is kept below a 900 MiB safety ceiling for GitHub Pages'
   1 GB published-site limit.
-- Row-level uncertain mappings and severe stream-identity changes fail safe to
-  review; catalog-wide provenance contradictions stop the run before a Sheet
-  write.
+- Safe row-level uncertainty fails to a disclosed local synthetic guide. Severe
+  stream-identity changes remain quarantined; catalog-wide provenance
+  contradictions stop the run before a Sheet write.
 - The private mapping snapshot and every generated upload pass
   credential-safety checks before the builder or Pages upload can continue;
   gzip outputs are checked after streaming decompression.

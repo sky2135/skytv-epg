@@ -11,7 +11,7 @@ SCRIPTS_DIR = REPOSITORY_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import ai_review_gemini as gemini  # noqa: E402
+import ai_grounded_search as gemini  # noqa: E402
 import ai_review_policy as policy  # noqa: E402
 
 
@@ -244,11 +244,41 @@ def result_for(
             for candidate_key, bound_id in prepared.opaque_key_bindings
             if bound_id == epg_id
         )
+    candidate_item = next(
+        (
+            item
+            for item in (prepared.request.candidates if prepared.request else ())
+            if item.epg_id == epg_id
+        ),
+        None,
+    )
+    grounded = (
+        decision is gemini.ReviewDecision.SUGGEST
+        and confidence is gemini.ReviewConfidence.HIGH
+        and candidate_item is not None
+    )
+    claim = None
+    if grounded and prepared.request is not None:
+        claim = gemini._claim_for(
+            gemini._identity_subject(prepared.request.channel_name),
+            candidate_item.display_name,
+            candidate_item.epg_id,
+        )
     return gemini.ReviewResult(
         review_id=review_id or prepared.cluster.cluster_id,
         decision=decision,
         candidate_key=key,
         confidence=confidence,
+        selected_epg_id=epg_id if grounded else None,
+        identity_claim=claim,
+        query="Alpha News channel EPG" if grounded else None,
+        source_urls=(
+            "https://example.com/channel",
+            "https://example.org/channel",
+        )
+        if grounded
+        else (),
+        source_authorities=("example.com", "example.org") if grounded else (),
     )
 
 
@@ -347,7 +377,10 @@ class StableOpaqueRequestTests(unittest.TestCase):
         self.assertEqual(prepared_a.opaque_key_bindings, prepared_b.opaque_key_bindings)
         self.assertEqual(prepared_a.request, prepared_b.request)
         self.assertTrue(
-            all(key.startswith("k_") and len(key) == 26 for key, _epg_id in prepared_a.opaque_key_bindings)
+            all(
+                key.startswith("c") and len(key) == 4 and key[1:].isdigit()
+                for key, _epg_id in prepared_a.opaque_key_bindings
+            )
         )
         self.assertNotIn("c01", {key for key, _epg_id in prepared_a.opaque_key_bindings})
 
@@ -552,7 +585,7 @@ class StrictLocalVerificationTests(unittest.TestCase):
         )
         cases: tuple[tuple[object, str], ...] = (
             (result_for(self.prepared, candidate_key=other_key), "AI_DISAGREES_WITH_LOCAL_TOP"),
-            (result_for(self.prepared, candidate_key="k_invented"), "AI_UNKNOWN_CANDIDATE_KEY"),
+            (result_for(self.prepared, candidate_key="c999"), "AI_UNKNOWN_CANDIDATE_KEY"),
             (
                 result_for(
                     self.prepared,

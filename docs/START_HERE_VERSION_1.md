@@ -12,6 +12,10 @@ Follow these sections in order. Do not skip ahead.
 - Keep the private Google Sheet as the mapping master. Do not publish it and do
   not upload the mapping CSV to GitHub.
 
+Schedule matching is unattended; see
+[`AUTONOMOUS_COVERAGE.md`](AUTONOMOUS_COVERAGE.md) for its decision order,
+controls, and honest coverage definitions.
+
 ## 1. Collect what you need
 
 Have these ready before starting:
@@ -147,14 +151,15 @@ The private Google Sheet becomes the live mapping after Sections 11 and 12.
 The inventory run in Section 12 adds channels that are not already present and
 tries to assign their EPG automatically. After that successful run, `Mappings`
 contains every valid, unique live stream returned by the configured API or M3U
-for each server during that run. Safe exact matches are enabled; uncertain rows
-remain disabled for review.
+for each server during that run. Safe real matches are enabled, the safe
+unresolved remainder receives truthful local guide coverage, and only protected
+or quarantined exceptions remain disabled.
 
 The 25,170 starter rows are historical schedule mappings, not a completely
 human-reviewed personalization catalog. They include 11,939 approved
-dummy-guide placeholders and 171 disabled rows that remain in `REVIEW`. Those
-171 rows stay private and are excluded from schedules, public metadata, and
-personalization until you review, approve, and enable them. All starter metadata
+dummy-guide placeholders and 171 disabled rows that begin in `REVIEW`. The
+scheduled autonomous pass re-evaluates those rows; only a protected or
+quarantined exception stays excluded. All starter metadata
 is automatically inferred and unlocked. In particular, 22,720 rows start with
 an undetermined primary language, 11,447 with an unknown region, and 8,030 with
 an unknown genre. This is safe: an unknown value does not enter a specific
@@ -286,13 +291,13 @@ Open the **Variables** tab. Click **New repository variable** for each row:
 | `GOOGLE_SHEET_TAB` | `Mappings` |
 | `EPG_PUBLIC_BASE_URL` | `https://sky2135.github.io/skytv-epg` |
 
-Optional scheduled-rollout variables are deliberately unset by default:
+These optional variables override the unattended scheduled defaults:
 
 | Name | Allowed value | Effect |
 |---|---|---|
-| `EPG_REVIEW_APPLY_LIMIT` | `0`, `25`, `100`, `500`, `2500`, or `5000` | Total existing-`REVIEW` rows that one scheduled run may persist. Unset/`0` means none. |
-| `EPG_COVERAGE_FALLBACK_LIMIT` | `0`, `500`, `2500`, or `5000` | Maximum local synthetic-guide proposals per scheduled run. Unset/`0` disables new fallback proposals. |
-| `EPG_USE_GEMINI_AI` | `true` (case-insensitive) | Enables scheduled Gemini review. Unset or any other value means off; the API-key secret alone does not enable it. A nonzero `EPG_REVIEW_APPLY_LIMIT` is also required before any rows are sent for AI review. |
+| `EPG_REVIEW_APPLY_LIMIT` | `0`, `25`, `100`, `500`, `2500`, `5000`, or `30000` | Total existing-row decisions one scheduled run may persist. Unset uses `30000`; `0` disables scheduled existing-row writes. |
+| `EPG_COVERAGE_FALLBACK_LIMIT` | `0`, `500`, `2500`, `5000`, or `30000` | Maximum local synthetic-guide proposals per scheduled run. Unset uses `30000`; `0` disables new fallback proposals. |
+| `EPG_USE_GEMINI_AI` | `false` (case-insensitive) | Explicitly disables scheduled grounded Gemini review. When unset, Gemini is enabled automatically if `GEMINI_API_KEY` exists. |
 
 If an old variable named `EPG_MAPPING_CSV_URL` exists, delete it. Version 1
 reads the private Sheet directly and does not use that URL.
@@ -338,10 +343,10 @@ For `GOOGLE_SERVICE_ACCOUNT_JSON`:
 
 ### 9C. Add Gemini for strict unresolved-channel verification
 
-Smart Rules work without Gemini. Gemini is an optional strict second verifier
-for only the strongest unresolved local candidates. Adding the secret does not
-turn it on: use the manual input for one run or set `EPG_USE_GEMINI_AI=true`
-for scheduled runs.
+Smart Rules work without Gemini. Gemini is a strict grounded second verifier
+for the strongest unresolved local candidates. Adding the secret enables it on
+scheduled runs unless `EPG_USE_GEMINI_AI=false`; manual runs still use their
+explicit Gemini switch.
 
 1. Open [Google AI Studio](https://aistudio.google.com/app/apikey).
 2. Sign in and create a Gemini API key.
@@ -353,15 +358,18 @@ for scheduled runs.
 
 Never paste the key into the Sheet, repository, workflow input, issue, or chat.
 Google's free tier may use submitted data to improve Google products. Version 1
-sends only cleaned channel/category text and opaque choices for two to eight
-real EPGShare candidates—never credentials, provider URLs, playlists, the full
-channel list, or the full guide. Gemini cannot invent an ID. A row is enabled
-only when two fixed local rankers, Gemini `HIGH`, current catalog/programme
-evidence, and terminal Sheet/provider/alert rereads all agree.
+sends only cleaned channel/category text and one to eight opaque, locally
+discovered real EPGShare choices—never credentials, provider URLs, playlists,
+the full channel list, or the full guide. Gemini cannot invent an ID. A real
+match requires both local rankers, Gemini `HIGH`, one complete positive identity
+claim containing all discriminating tokens, at least two independent web
+authorities supporting that same claim, current catalog/programme evidence, and
+terminal Sheet/provider/alert rereads. A failed or abstaining AI call falls
+through to a truthful local synthetic guide when the row is otherwise safe.
 
 Server 1 credentials are used only to discover Server 1's channel list. The EPG
-builder still forces Server 1 programme data to EPGShare and does not download
-Server 1's native guide.
+builder permits EPGShare external real schedules or local synthetic schedules
+and does not download Server 1's native guide.
 
 ## 10. Enable GitHub Pages
 
@@ -436,8 +444,9 @@ queued or running.
 9. Return to the Google Sheet and reload the page.
 10. Open the `Mappings` tab.
 11. Filter `action` for `AUTO_EPGSHARE` to see safe exact matches that were
-    enabled automatically. Filter `action` for `REVIEW` to see uncertain new
-    channels that remain disabled.
+    enabled automatically. Filter `action` for `AUTO_DUMMY` to see truthful
+    local guides. `REVIEW` should contain protected or quarantined exceptions,
+    not an ordinary unmatched backlog.
 12. Open `Sync Alerts` and filter the `status` column for `OPEN`.
 
 If the workflow says that the automatic-approval batch exceeded its Version 1
@@ -446,12 +455,12 @@ exact error and provide it for a one-time review of the unusually large batch.
 
 The new-channel sync never edits or deletes an existing mapping row. It appends
 only a previously unseen `(server_id, stream_id)` pair. The separate backlog
-recheck can update only a small set of schedule fields on eligible
-disabled `REVIEW` rows. A channel that disappears from a provider is counted in
-the workflow summary but is not automatically removed.
+recheck can update only the bounded schedule fields on eligible rows. A channel
+that disappears from a provider is counted in the workflow summary but is not
+automatically removed.
 
-For a new channel, automatic EPG approval requires all of the following in the
-same run:
+For a new channel, the deterministic real-EPG lane requires all of the
+following in the same run:
 
 - one exact real EPGShare ID, with no second candidate;
 - that exact, case-sensitive ID appears in both the EPGShare XML and official
@@ -461,11 +470,13 @@ same run:
 - the first useful programme starts within six hours and the guide extends at
   least six hours ahead.
 
-Fuzzy, ambiguous, adult-real, unsafe-numbered, or weak-guide results remain
-disabled in `REVIEW`. Two narrow non-real exceptions are allowed: a verified
-placeholder family may become enabled `AUTO_DUMMY`, and a decorative heading
-may become disabled `IGNORE`. Server 1 is always matched only to EPGShare for
-real programme data; its native EPG ID is never used.
+After deterministic matching, Server 2/3 native validation and grounded Gemini
+may still verify a real schedule. Otherwise a safe fuzzy, ambiguous,
+adult-real, unsafe-numbered, weak-guide, or AI-failed result becomes
+`AUTO_DUMMY` with a truthful local guide. A decorative heading becomes
+disabled `IGNORE`. An alert, identity drift, or untracked manual target remains
+quarantined. Server 1 is always matched only to EPGShare for external real
+programme data; its native EPG ID is never used.
 
 There is one important difference between a channel-level uncertainty and a
 bad source catalog. If the official text catalog labels the same ID as both
@@ -474,22 +485,23 @@ multiple country markets, the complete matching preflight stops before any
 Sheet write. It does not ignore that entry and continue. IDs that could become
 confusable only after case or Unicode-whitespace normalization remain as safe
 competition: they can prevent a false automatic match but can never be
-automatically approved themselves. An affected new channel stays disabled in
-`REVIEW`. One conservative blocker may represent a confusable family only when
+automatically approved themselves. An affected safe channel may receive a local
+synthetic guide instead. One conservative blocker may represent a confusable family only when
 all members are the same catalog type (all real or all dummy) and share the
 same exact feed and country/market route. If IDs collapsing to the same
 engine-safe identity mix real/dummy status or differ by feed or market, the
 complete preflight stops. Separately, an unscoped real `ALL`-market candidate
 can still serve an exact existing mapping. If it has the same strong station
-identity as a routed new proposal, that new proposal stays disabled in
-`REVIEW`.
+identity as a routed new proposal, that proposal cannot enter a real lane and
+uses the synthetic lane when otherwise safe.
 
 ### 12A. Let the daily workflow reduce channels waiting in REVIEW
 
 The Section 12 apply run starts the backlog process. Workflow 1 then runs daily
-before Workflow 2, but it reduces the existing backlog only after you set
-`EPG_REVIEW_APPLY_LIMIT` to a verified nonzero cap. With that variable unset or
-`0`, the schedule analyzes and defers existing rows without changing them.
+before Workflow 2. With the repository variables unset, the scheduled run uses
+`30000` for both the total existing-row apply cap and the synthetic fallback
+cap. Set either variable to `0` only when you intentionally want to disable that
+class of scheduled writes.
 **Do not edit, sort, insert, or delete rows in `Mappings` while an apply run is
 queued or running.**
 
@@ -515,27 +527,26 @@ For an immediate apply outside the daily schedule:
 3. Set the total existing-`REVIEW` apply limit. Start with **25**; `0` performs
    no existing-`REVIEW` writes even when the mode says `apply`.
 4. Keep the same server choice. Turn Gemini on only if `GEMINI_API_KEY` was
-   added in Section 9C. Gemini uses only capacity remaining under the total cap.
+   added in Section 9C. Manual dispatch never infers that switch from the
+   secret. Gemini uses only capacity remaining under the total cap.
 5. If Gemini is on, choose up to **200** affected rows per run.
 6. Start the run and do not touch the Sheet until the run has a green check.
 7. Read **REVIEW rows safely updated** in the summary. If Gemini is on,
    **Gemini HIGH responses** is the model result and **verified channels
    enabled** is the smaller number that passed every local and terminal gate
    and was durably stored.
-8. If a safe remainder is reported, leave it for the next scheduled run after
-   setting a nonzero `EPG_REVIEW_APPLY_LIMIT`. You may
-   dispatch another apply only if you need it sooner.
+8. If a safe remainder is reported, leave it for the next scheduled run. You
+   may dispatch another explicit apply only if you need it sooner.
 
-Smart Rules and the exact Server 2/3 native validation lane run before Gemini.
-A verified EPGShare match becomes `AUTO_EPGSHARE`; a verified Server 2/3 native
-match becomes `KEEP_PANEL`. Both are enabled. Smart Rules may also enable a
-verified placeholder as `AUTO_DUMMY` or disable a decorative heading as
-`IGNORE`. Gemini sees at most 200 affected rows and only supplied opaque
-candidate keys. It becomes an enabled
-`AUTO_EPGSHARE` row only when Gemini `HIGH` agrees with both strong local
-rankings and all catalog, programme, provider, Sheet, and alert gates. Every
-other answer makes no row change and remains retryable. Server 1 is always
-EPGShare-only.
+The production order is deterministic EPGShare real, exact Server 2/3 native
+real, Google-Search-grounded Gemini real, truthful local synthetic, then
+`IGNORE` or quarantine. Gemini sees at most 200 affected rows and only supplied
+opaque candidate keys. It becomes an enabled `AUTO_EPGSHARE` row only when
+Gemini `HIGH` agrees with both strong local rankings, one complete positive
+identity claim has every discriminating token and support from at least two
+independent web authorities, and all catalog, programme, provider, Sheet, and
+alert gates pass. Every other safe answer falls through to a local synthetic
+guide. Server 1 external real schedules are always EPGShare-only.
 
 The recheck learns safely from the private Sheet. One enabled current human
 `MANUAL` or `APPROVED` row may teach its exact alias/market/EPGShare target.
@@ -546,62 +557,25 @@ normal market, catalog, and programme checks on every future use. Nothing is
 written to a public rules file; verified decisions become durable evidence in
 the private Sheet and are rebuilt into Smart Rule memory each run.
 
-## 13. Review only the channels that automation could not safely decide
+## 13. Inspect protected exceptions, not channel matches
 
-1. Open the `Mappings` tab.
-2. Use the filter on the `action` column and select only `REVIEW`.
-   These are the rows that deterministic rules, native validation, and strict
-   AI agreement could not safely decide.
-3. For each channel you want in the guide:
-   - check `channel_name` and `category_name`;
-   - check `region_code`, `genre`, `primary_language`, and the other metadata;
-   - enter or verify the exact EPGShare channel ID in `epg_id`;
-   - set `source` to `epgshare01`;
-   - set `epg_feed` to `ALL_SOURCES1`;
-   - set `action` to `APPROVED`;
-   - set `metadata_status` to `approved` after checking its classification; and
-   - set `metadata_locked` to `TRUE` when the metadata should no longer be
-     automatically inferred; then
-   - set `enabled` to `TRUE` only after every check above is complete.
-4. If you do not know the exact EPG ID, leave the row as `REVIEW`. Do not guess.
-5. If you never want a channel, set `enabled` to `FALSE` and `action` to
-   `IGNORE`. Do not delete the row, because the next inventory run would find
-   and add it again.
+Normal operation does not require anyone to work through unmatched channels or
+search for EPG IDs. Automation selects a verified real schedule when it can;
+otherwise a safe row receives a local `AUTO_DUMMY` guide. A generic guide says
+`Schedule unavailable — <channel>` rather than inventing programme details.
 
-Rows that did not meet every automatic safety rule start with `enabled=FALSE`
-and `action=REVIEW`, so they cannot enter any public guide. A provisional exact
-EPGShare ID may be shown to help you review it, but the row stays disabled.
+Earlier `coverage-fallback-v1` synthetics remain automatic real-schedule
+upgrade candidates on later runs. Do not replace them by hand. The only rows
+left disabled are deliberate exceptions such as an `OPEN` stream-identity
+alert, current provider/Sheet drift, or an untracked manual target. Automation
+must not overwrite those states.
 
-Rows that did meet every rule use `action=AUTO_EPGSHARE` and `enabled=TRUE`.
-You do not need to choose their schedule manually. Their personalization
-metadata still uses `metadata_status=review`; schedule matching does not guess
-or approve language, religion, sport, or other app-group metadata.
+For Server 1, external real programmes always use EPGShare; native Server 1 EPG
+is blocked. Servers 2 and 3 may use a separately verified native panel guide.
 
-For Server 1, always use `epgshare01`; native Server 1 EPG is blocked. Servers 2
-and 3 can use native panel EPG when deliberately configured, but EPGShare is the
-normal choice for a new row.
-
-Google Sheets saves changes automatically. Wait until the Sheet says
-**Saved to Drive** before running the EPG build.
-
-### Find an exact EPGShare ID
-
-Use these steps whenever an `epgshare01` row has a blank or uncertain `epg_id`:
-
-1. Open the official
-   [EPGShare ALL Sources ID list (PDF)](https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.pdf).
-2. Press **Ctrl + F** on Windows or **Command + F** on macOS.
-3. Search for the channel name without quality labels such as `HD`, `FHD`, or
-   `4K` if the first search finds nothing.
-4. Compare the displayed channel, country, network, and regional edition. Do
-   not choose an ID only because part of the name is similar.
-5. Copy the complete ID exactly as shown and paste it into the row's `epg_id`
-   cell. Keep `source=epgshare01` and `epg_feed=ALL_SOURCES1`.
-6. If the PDF is difficult to search, use the official
-   [plain-text ID list](https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.txt)
-   instead.
-7. If the channel is absent or two IDs are still possible, leave
-   `action=REVIEW`. Do not guess.
+Schedule mapping and personalization metadata are separate. Unknown language,
+region, genre, sport, or religion values do not prevent the autonomous guide
+from running and do not need to be filled in as part of schedule matching.
 
 ### Review existing metadata for personalized groups
 
@@ -743,21 +717,19 @@ After the first setup, the system runs automatically:
 1. Every day at **02:17 Toronto time**, Workflow 1 checks all three servers,
    appends missing channels, and rechecks eligible existing `REVIEW` rows in
    `apply` mode.
-2. Smart Rules analyzes eligible rows, but the scheduled job persists no
-   existing-`REVIEW` decision unless `EPG_REVIEW_APPLY_LIMIT` is explicitly
-   nonzero. That one cap covers deterministic, native, synthetic, heading, and
-   AI decisions together. Verified real
-   EPGShare matches become `AUTO_EPGSHARE`, Server 2/3 native matches become
-   `KEEP_PANEL`, verified placeholders may become `AUTO_DUMMY`, and decorative
-   headings may become disabled `IGNORE`.
-3. Scheduled Gemini is off unless `EPG_USE_GEMINI_AI=true`; when enabled it can
-   consider at most **200** of the strongest unresolved rows and only the
-   capacity remaining under the total apply cap. Gemini can enable only a supplied candidate
-   that also passes both local rankers and every catalog, programme, provider,
-   Sheet, and alert reread; all other rows remain unchanged in `REVIEW`.
-4. Any verified remainder stays deferred until a later run with nonzero apply
-   capacity. Manual dispatch remains available for a dry-run or a bounded
-   immediate apply.
+2. The scheduled total apply and synthetic fallback caps each default to
+   `30000`. Repository variables can reduce either cap or set it to `0`. The
+   total cap covers deterministic, native, synthetic, heading, and AI decisions.
+3. The decision order is deterministic EPGShare real, verified Server 2/3 native
+   real, grounded Gemini real, truthful per-stream local synthetic, then
+   `IGNORE` or quarantine. Existing coverage-fallback synthetics are retried for
+   a verified real upgrade.
+4. Scheduled Gemini runs when `GEMINI_API_KEY` exists unless
+   `EPG_USE_GEMINI_AI=false`. It can consider at most **200** of the strongest
+   unresolved rows and only remaining total-cap capacity. A real approval also
+   requires two independent web authorities for the same complete identity
+   claim and every local and terminal gate. AI failure or abstention falls
+   through to synthetic when the row is otherwise safe.
 5. Every day at **04:37 Toronto time**, Workflow 2 refreshes the private Sheet
    snapshot, builds and validates the guide, and deploys the XML and JSON
    outputs.
@@ -780,21 +752,11 @@ unresolved route stops the run because it cannot reliably block a false match.
 A real/dummy contradiction or contradictory/multiple-country evidence anywhere
 in the official text catalog also stops the full unattended-matching preflight.
 
-Your regular task is:
-
-1. After a successful canary, set `EPG_REVIEW_APPLY_LIMIT` to the intended
-   nonzero scheduled cap and let Workflow 1 safely reduce the backlog each day;
-   leave it unset/`0` for analysis-only runs and use a manual `dry-run` when you
-   want a read-only preview.
-2. Open the Google Sheet and filter `action` to `REVIEW`.
-3. Manually decide only the remaining uncertain rows. Leave anything you
-   cannot verify disabled and in review.
-4. Gradually review the unknown personalization metadata described in Section
-   13, starting with the languages and interests your users select.
-5. Open `Sync Alerts`, filter `status` to `OPEN`, and follow the alert-resolution
-   steps in Section 13.
-6. Run **2 - Build and publish EPG** manually when you want approved changes published
-   immediately; otherwise the next daily build will publish them.
+No regular row-by-row matching task is required. Use a manual `dry-run` only
+when you want a read-only diagnostic. Inspect `OPEN` Sync Alerts only as an
+exception-handling task; leaving an unresolved identity quarantined is safe.
+Run **2 - Build and publish EPG** manually only when you want accepted changes
+published immediately; otherwise the next daily build publishes them.
 
 ## 17. Safe recovery steps
 
@@ -960,12 +922,13 @@ the inventory see it as new and add it again. Instead:
 - [ ] GitHub Pages source set to **GitHub Actions**
 - [ ] Inventory report-only run completed successfully
 - [ ] Inventory write run completed successfully
-- [ ] Existing `REVIEW` dry-run checked and one all-server 25-row canary apply
-      completed; `EPG_REVIEW_APPLY_LIMIT` set to the intended scheduled cap
-      only after the canary result was verified
+- [ ] Existing `REVIEW` dry-run checked and one all-server 25-row manual canary
+      completed; scheduled caps left at their `30000` defaults or deliberately
+      overridden
 - [ ] If Gemini will be used, `GEMINI_API_KEY` stored as a GitHub secret
-- [ ] Automatic EPG matches reviewed by count; remaining `REVIEW` rows checked
-      and uncertain rows left disabled
+- [ ] `guideCoverage` checked for separate real, native, synthetic, ignored,
+      quarantined, and uncovered counts; useful coverage not treated as real
+      matching accuracy
 - [ ] Important language, region, genre, sport, and religion metadata reviewed;
       uncertain values deliberately left unknown
 - [ ] `OPEN` Sync Alerts reviewed and resolved, or deliberately left quarantined
