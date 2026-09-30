@@ -983,6 +983,47 @@ jobs:
                       "- Native EPG sources unavailable: "
                       f"**{native_unavailable:,}**\n"
                   )
+                  failure_kinds = payload.get(
+                      "native_review_source_failure_kinds", {}
+                  )
+                  allowed_failure_kinds = {
+                      "configuration",
+                      "tls",
+                      "redirect",
+                      "remote_non_xml",
+                      "remote_empty",
+                      "remote_too_large",
+                      "local_io",
+                      "auth_http",
+                      "http_non_transient",
+                      "download_other",
+                      "transient_transport",
+                      "validation_security",
+                      "validation_not_xmltv",
+                      "validation_malformed",
+                      "validation_empty",
+                      "validation_incomplete",
+                      "validation_limits",
+                      "validation_file",
+                      "validation_other",
+                  }
+                  if not isinstance(failure_kinds, dict) or any(
+                      server_id not in {"server_2", "server_3"}
+                      or kind not in allowed_failure_kinds
+                      for server_id, kind in failure_kinds.items()
+                  ):
+                      raise SystemExit(
+                          "Invalid native EPG failure classes in summary.json."
+                      )
+                  if failure_kinds:
+                      rendered_failure_kinds = ", ".join(
+                          f"{server_id}={failure_kinds[server_id]}"
+                          for server_id in sorted(failure_kinds)
+                      )
+                      handle.write(
+                          "- Native EPG failure classes: "
+                          f"**{rendered_failure_kinds}**\n"
+                      )
                   native_outage_fallbacks = count(
                       payload,
                       "terminal_coverage_fallback_native_outage_rows",

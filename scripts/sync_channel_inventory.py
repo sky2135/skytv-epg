@@ -5480,7 +5480,32 @@ def _row_identity(row: Mapping[str, Any]) -> tuple[str, str]:
     )
 
 
-def _native_review_summary_defaults() -> dict[str, int]:
+NATIVE_REVIEW_SOURCE_FAILURE_KINDS = frozenset(
+    {
+        "configuration",
+        "tls",
+        "redirect",
+        "remote_non_xml",
+        "remote_empty",
+        "remote_too_large",
+        "local_io",
+        "auth_http",
+        "http_non_transient",
+        "download_other",
+        "transient_transport",
+        "validation_security",
+        "validation_not_xmltv",
+        "validation_malformed",
+        "validation_empty",
+        "validation_incomplete",
+        "validation_limits",
+        "validation_file",
+        "validation_other",
+    }
+)
+
+
+def _native_review_summary_defaults() -> dict[str, Any]:
     return {
         "native_review_candidates": 0,
         "native_review_verified": 0,
@@ -5496,7 +5521,70 @@ def _native_review_summary_defaults() -> dict[str, int]:
         "native_review_revalidation_checked": 0,
         "native_review_revalidation_rejected": 0,
         "native_review_revalidation_unavailable": 0,
+        "native_review_source_failure_kinds": {},
     }
+
+
+def _native_review_download_failure_kind(exc: streaming.BuildError) -> str:
+    """Return one public, non-secret class for a controlled download failure."""
+
+    message = str(exc).casefold()
+    if (
+        "secrets are incomplete" in message
+        or "password is too short" in message
+        or "panel base url" in message
+        or "allow_insecure_panel_http" in message
+    ):
+        return "configuration"
+    if "tls validation failed" in message:
+        return "tls"
+    if "redirect" in message:
+        return "redirect"
+    if "non-xml response" in message:
+        return "remote_non_xml"
+    if "empty response" in message:
+        return "remote_empty"
+    if "too large" in message:
+        return "remote_too_large"
+    if "local i/o error" in message:
+        return "local_io"
+    status = re.search(r"\bhttp\s+(\d{3})\b", message)
+    if status is not None:
+        return (
+            "auth_http"
+            if int(status.group(1)) in {401, 403}
+            else "http_non_transient"
+        )
+    return "download_other"
+
+
+def _native_review_validation_failure_kind(exc: BaseException) -> str:
+    """Return one public, non-secret class for a controlled validation failure."""
+
+    message = str(exc).casefold()
+    if "security preflight" in message or "forbidden" in message:
+        return "validation_security"
+    if "not an xmltv document" in message:
+        return "validation_not_xmltv"
+    if "malformed or unavailable" in message:
+        return "validation_malformed"
+    if "source is empty" in message:
+        return "validation_empty"
+    if "completeness floor" in message:
+        return "validation_incomplete"
+    if (
+        "configured limit" in message
+        or "too many" in message
+        or "candidate set is too large" in message
+    ):
+        return "validation_limits"
+    if (
+        "source is unavailable" in message
+        or "regular file" in message
+        or "source changed" in message
+    ):
+        return "validation_file"
+    return "validation_other"
 
 
 def _parse_generated_epoch(value: str) -> int:
@@ -5644,26 +5732,40 @@ def _build_verified_native_review_updates(
             requested_ids = frozenset(
                 epg_id for _row, epg_id, _name in server_candidates.values()
             )
+            failure_kinds = summary["native_review_source_failure_kinds"]
+            if not isinstance(failure_kinds, dict):
+                raise SyncError("Native EPG failure classes are inconsistent.")
             try:
                 panel_path, _details = streaming.download_panel_xmltv(
                     server_id, private_root / f"{server_id}.xmltv"
-                )
-                validation = native_review.validate_native_xmltv(
-                    panel_path,
-                    server_id=server_id,
-                    requested_ids=requested_ids,
-                    now_epoch=now_epoch,
                 )
             except streaming.PanelSourceUnavailable:
                 summary["native_review_source_unavailable"] += 1
                 summary["native_review_transient_outage_candidates"] += len(
                     server_candidates
                 )
+                failure_kinds[server_id] = "transient_transport"
                 if transient_outage_keys_out is not None:
                     transient_outage_keys_out.update(server_candidates)
                 continue
-            except (native_review.NativeReviewError, streaming.BuildError):
+            except streaming.BuildError as exc:
                 summary["native_review_source_unavailable"] += 1
+                failure_kinds[server_id] = _native_review_download_failure_kind(
+                    exc
+                )
+                continue
+            try:
+                validation = native_review.validate_native_xmltv(
+                    panel_path,
+                    server_id=server_id,
+                    requested_ids=requested_ids,
+                    now_epoch=now_epoch,
+                )
+            except (native_review.NativeReviewError, streaming.BuildError) as exc:
+                summary["native_review_source_unavailable"] += 1
+                failure_kinds[server_id] = _native_review_validation_failure_kind(
+                    exc
+                )
                 continue
 
             names_by_id = getattr(validation, "display_names_by_id", None)
