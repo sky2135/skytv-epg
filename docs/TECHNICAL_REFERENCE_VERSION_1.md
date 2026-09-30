@@ -742,6 +742,18 @@ Servers 2 and 3 may use EPGShare or their native panel XMLTV row by row. Panel
 guides are downloaded when an eligible mapping requests them or when an
 explicit REVIEW recheck has current native-ID candidates to validate.
 
+A transient runtime panel outage is not allowed to blank the entire published
+guide. After three failed attempts caused by a timeout, connection failure,
+HTTP 408/425/429, or HTTP 5xx response, each otherwise-runnable native row
+receives its own truthful channel-derived synthetic schedule for that build.
+This does not edit the private Sheet or its canonical mapping hash. Metadata
+uses `guideMode: synthetic` with
+`guideFallbackReason: nativePanelUnavailable`; manifests count the rows under
+`localSynthetic` and `nativePanelUnavailableSyntheticStreams` and retain the
+safe last-result status in source provenance. Authentication errors, unsafe
+redirects, TLS validation failures, empty/non-XML/malformed payloads, and local
+I/O failures stay fail-closed.
+
 ## GitHub configuration
 
 ### Repository variables

@@ -239,6 +239,18 @@ class BuildError(RuntimeError):
     """A safe production error that never includes credentials."""
 
 
+class PanelSourceUnavailable(BuildError):
+    """A transient native-panel outage that may use a truthful runtime guide."""
+
+    def __init__(self, server_id: str, last_result: str) -> None:
+        self.server_id = clean_text(server_id, 40)
+        self.last_result = clean_text(last_result, 80) or "request error"
+        super().__init__(
+            f"{self.server_id} panel XMLTV download failed after 3 attempts "
+            f"(last result: {self.last_result})."
+        )
+
+
 class _XmlRootReached(RuntimeError):
     """Private control-flow signal used to stop the bounded prolog parser."""
 
@@ -285,17 +297,24 @@ class MappingRow:
     reason: str
     notes: str
     metadata: ChannelMetadata
+    runtime_synthetic_reason: str = ""
+
+    @property
+    def uses_local_synthetic(self) -> bool:
+        return (
+            self.requested_source == "dummy"
+            or self.runtime_synthetic_reason == "nativePanelUnavailable"
+        )
 
     @property
     def source_key(self) -> str:
+        if self.uses_local_synthetic:
+            # Runtime panel-outage fallbacks are deliberately per stream too.
+            # They never reuse a native ID in the EPGShare namespace and never
+            # mutate the authoritative Sheet mapping.
+            return f"synthetic:{self.synthetic_identity}"
         if self.effective_source == "panel":
             return f"panel:{self.server_id}"
-        if self.requested_source == "dummy":
-            # A generic EPGShare dummy ID is shared by thousands of unrelated
-            # channels.  Give every mapped stream its own deterministic source
-            # namespace so a useful channel-derived title cannot bleed into a
-            # different stream which happens to use the same placeholder ID.
-            return f"synthetic:{self.synthetic_identity}"
         return "epgshare01"
 
     @property
@@ -305,7 +324,7 @@ class MappingRow:
 
     @property
     def schedule_key(self) -> str:
-        if self.requested_source == "dummy":
+        if self.uses_local_synthetic:
             return f"DUMMY_CHANNELS::{self.synthetic_identity}"
         elif self.effective_source == "panel" or self.source_policy_blocked:
             prefix = "PANEL"
@@ -2220,7 +2239,7 @@ def insert_synthetic_guides(
         (
             row
             for row in rows
-            if row.runtime_eligible and row.requested_source == "dummy"
+            if row.runtime_eligible and row.uses_local_synthetic
         ),
         key=lambda row: (
             row.server_id,
@@ -3036,6 +3055,7 @@ def panel_payload_is_non_xmltv(prefix: bytes) -> bool:
 
 
 PANEL_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+PANEL_TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429})
 PANEL_MAX_REDIRECTS = 5
 PANEL_REQUEST_TIMEOUT = (25, 300)
 PANEL_CREDENTIALLESS_REDIRECT_HOSTS = frozenset(
@@ -3149,11 +3169,15 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
     credentials = {"username": username, "password": password}
     redirect_session = None
     last_issue = "request error"
+    last_failure_kind = "network"
+    last_http_status: int | None = None
     try:
         for attempt in range(1, 4):
             temporary.unlink(missing_ok=True)
             response = None
             last_issue = "request error"
+            last_failure_kind = "network"
+            last_http_status = None
             try:
                 request_url = endpoint
                 request_session = session
@@ -3202,7 +3226,9 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                     )
 
                 if response.status_code != 200:
-                    last_issue = f"HTTP {response.status_code}"
+                    last_http_status = int(response.status_code)
+                    last_issue = f"HTTP {last_http_status}"
+                    last_failure_kind = "http"
                     raise requests.RequestException()
                 total = 0
                 digest = hashlib.sha256()
@@ -3221,6 +3247,7 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                     os.fsync(output.fileno())
                 if total == 0:
                     last_issue = "empty response"
+                    last_failure_kind = "invalid_payload"
                     raise requests.RequestException()
                 if panel_payload_is_non_xmltv(prefix):
                     raise BuildError(f"{server_id} panel returned a non-XML response.")
@@ -3232,14 +3259,21 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
             except BuildError:
                 temporary.unlink(missing_ok=True)
                 raise
+            except requests.exceptions.SSLError:
+                temporary.unlink(missing_ok=True)
+                raise BuildError(
+                    f"{server_id} panel TLS validation failed."
+                ) from None
             except requests.Timeout:
                 last_issue = "timeout"
+                last_failure_kind = "network"
                 temporary.unlink(missing_ok=True)
                 if attempt == 3:
                     break
                 time.sleep(2 ** (attempt - 1))
             except requests.ConnectionError:
                 last_issue = "connection error"
+                last_failure_kind = "network"
                 temporary.unlink(missing_ok=True)
                 if attempt == 3:
                     break
@@ -3251,6 +3285,7 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                 time.sleep(2 ** (attempt - 1))
             except OSError:
                 last_issue = "local I/O error"
+                last_failure_kind = "local_io"
                 temporary.unlink(missing_ok=True)
                 if attempt == 3:
                     break
@@ -3262,10 +3297,38 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
         if redirect_session is not None:
             close_panel_transport(redirect_session)
         close_panel_transport(session)
+    transient_http = (
+        last_http_status is not None
+        and (
+            last_http_status >= 500
+            or last_http_status in PANEL_TRANSIENT_HTTP_STATUSES
+        )
+    )
+    if last_failure_kind == "network" or transient_http:
+        raise PanelSourceUnavailable(server_id, last_issue)
     raise BuildError(
         f"{server_id} panel XMLTV download failed after 3 attempts "
         f"(last result: {last_issue})."
     )
+
+
+def activate_native_panel_runtime_fallback(
+    rows: Sequence[MappingRow], server_id: str
+) -> int:
+    """Use per-stream synthetic schedules without changing Sheet decisions."""
+
+    if server_id not in {"server_2", "server_3"}:
+        raise BuildError("Runtime native-panel fallback is restricted to Server 2/3.")
+    selected = [
+        row
+        for row in rows
+        if row.server_id == server_id
+        and row.runtime_eligible
+        and row.effective_source == "panel"
+    ]
+    for row in selected:
+        row.runtime_synthetic_reason = "nativePanelUnavailable"
+    return len(selected)
 
 
 @dataclass(frozen=True)
@@ -3568,7 +3631,7 @@ def build_xml_entries(
         entry_priority = (
             2
             if entry_type in {"canonical_epg_id", "synthetic_stream_id"}
-            else (0 if row.requested_source == "dummy" else 1)
+            else (0 if row.uses_local_synthetic else 1)
         )
         candidate_names = {
             clean_text(value, 300) for value in display_names if clean_text(value, 300)
@@ -3668,7 +3731,7 @@ def build_xml_entries(
             icon_url,
             "channel_name",
         )
-        if row.requested_source == "dummy" and channel_name_counts[
+        if row.uses_local_synthetic and channel_name_counts[
             clean_identifier(row.channel_name, 300)
         ] > 1:
             # Duplicate provider names cannot represent two per-stream guides
@@ -3681,7 +3744,7 @@ def build_xml_entries(
                 icon_url,
                 "synthetic_stream_id",
             )
-        elif row.requested_source != "dummy":
+        elif not row.uses_local_synthetic:
             register(
                 row.epg_id,
                 [source_name, row.canonical_name, row.channel_name],
@@ -4046,7 +4109,7 @@ def write_metadata_json(
                 "canonicalName": row.canonical_name,
                 "guideMode": (
                     "synthetic"
-                    if row.requested_source == "dummy"
+                    if row.uses_local_synthetic
                     else ("panel" if row.effective_source == "panel" else "epgshare")
                 ),
                 "providerCategory": row.category_name,
@@ -4059,6 +4122,8 @@ def write_metadata_json(
                 "personalizationEligibleDimensions": eligible_dimensions,
                 **metadata,
             }
+            if row.runtime_synthetic_reason:
+                payload["guideFallbackReason"] = row.runtime_synthetic_reason
             output.write(json_compact(row.stream_id) + ":" + json_compact(payload))
         output.write("}}")
         finish_deterministic_gzip(
@@ -4515,7 +4580,7 @@ def build_guide_coverage(
                     "Guide coverage found programmes on an ineligible mapping "
                     f"row: {row.server_id}/{row.stream_id}."
                 )
-            if row.requested_source == "dummy":
+            if row.uses_local_synthetic:
                 local_synthetic += 1
                 synthetic_classes[synthetic_programme_classification(row)] += 1
             elif row.effective_source == "panel":
@@ -4744,20 +4809,31 @@ def build_server(
             (item.source_key, item.epg_id): item for item in mapped_rows
         }.values()
     )
-    native_panel_used = any(row.effective_source == "panel" for row in mapped_rows)
+    native_panel_used = any(
+        row.effective_source == "panel" and not row.uses_local_synthetic
+        for row in mapped_rows
+    )
     dummy_guide_streams = sum(
         1 for row in mapped_rows if row.requested_source == "dummy"
+    )
+    panel_outage_synthetic_streams = sum(
+        1
+        for row in mapped_rows
+        if row.runtime_synthetic_reason == "nativePanelUnavailable"
+    )
+    synthetic_guide_streams = (
+        dummy_guide_streams + panel_outage_synthetic_streams
     )
     source_policy = (
         (
             "EPGSHARE_ALL_PLUS_CHANNEL_DERIVED"
-            if dummy_guide_streams
+            if synthetic_guide_streams
             else "EPGSHARE_ALL_ONLY"
         )
         if server_id == "server_1"
         else (
             "MAPPING_SELECTED_PLUS_CHANNEL_DERIVED"
-            if dummy_guide_streams
+            if synthetic_guide_streams
             else "MAPPING_SELECTED"
         )
     )
@@ -4768,10 +4844,18 @@ def build_server(
         if key in used_source_keys
     }
     if "synthetic" in source_provenance and any(
-        row.runtime_eligible and row.requested_source == "dummy"
+        row.runtime_eligible and row.uses_local_synthetic
         for row in server_rows
     ):
         server_source_provenance["synthetic"] = source_provenance["synthetic"]
+    unavailable_panel_key = f"panel:{server_id}"
+    if (
+        panel_outage_synthetic_streams
+        and unavailable_panel_key in source_provenance
+    ):
+        server_source_provenance[unavailable_panel_key] = (
+            source_provenance[unavailable_panel_key]
+        )
     unique_schedule_keys = {
         (row.source_key, row.epg_id) for row in mapped_rows
     }
@@ -4790,7 +4874,7 @@ def build_server(
             row.epg_feed or "ALL_SOURCES1"
             for row in mapped_rows
             if row.source_key == "epgshare01"
-            and row.requested_source != "dummy"
+            and not row.uses_local_synthetic
         },
         key=lambda value: (value.casefold(), value),
     )
@@ -4820,6 +4904,9 @@ def build_server(
         "logoPolicy": LOGO_POLICY,
         "panelSourceIconsUsed": False,
         "combinedSourceDummyGuideStreams": dummy_guide_streams,
+        "nativePanelUnavailableSyntheticStreams": (
+            panel_outage_synthetic_streams
+        ),
         "syntheticGuidePolicy": (
             server_source_provenance.get("synthetic", {}).get("titlePolicy", "")
         ),
@@ -4908,6 +4995,9 @@ def build_server(
         "logoPolicy": LOGO_POLICY,
         "panelSourceIconsUsed": False,
         "combinedSourceDummyGuideStreams": dummy_guide_streams,
+        "nativePanelUnavailableSyntheticStreams": (
+            panel_outage_synthetic_streams
+        ),
         "syntheticGuidePolicy": (
             server_source_provenance.get("synthetic", {}).get("titlePolicy", "")
         ),
@@ -5566,10 +5656,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "bytes": panel_path.stat().st_size,
                 }
             else:
-                panel_path, panel_details = download_panel_xmltv(
-                    server_id,
-                    work_dir / "downloads" / f"{server_id}_panel.xmltv",
-                )
+                try:
+                    panel_path, panel_details = download_panel_xmltv(
+                        server_id,
+                        work_dir / "downloads" / f"{server_id}_panel.xmltv",
+                    )
+                except PanelSourceUnavailable as exc:
+                    fallback_rows = activate_native_panel_runtime_fallback(
+                        rows, server_id
+                    )
+                    panel_key = f"panel:{server_id}"
+                    source_provenance[panel_key] = {
+                        "inputMode": "builder-download",
+                        "status": "unavailable",
+                        "lastResult": exc.last_result,
+                        "fallback": "CHANNEL_DERIVED_LOCAL_SYNTHETIC",
+                        "fallbackStreams": fallback_rows,
+                    }
+                    print(
+                        f"WARNING: {server_id} native panel is temporarily "
+                        f"unavailable ({exc.last_result}); using truthful "
+                        "channel-derived synthetic guides for "
+                        f"{fallback_rows:,} runtime streams. The private "
+                        "Sheet mappings remain unchanged.",
+                        flush=True,
+                    )
+                    continue
             panel_key = f"panel:{server_id}"
             print(f"Parsing native panel XMLTV for {server_id}.", flush=True)
             panel_stats = ingest_xmltv_source(
@@ -5606,6 +5718,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             reference_epoch=generated_at,
         )
         if synthetic_stats.schedules:
+            unavailable_native_servers = sorted(
+                {
+                    row.server_id
+                    for row in rows
+                    if row.runtime_synthetic_reason
+                    == "nativePanelUnavailable"
+                }
+            )
             print(
                 "Generated channel-derived placeholder guides for "
                 f"{synthetic_stats.schedules:,} streams in "
@@ -5622,6 +5742,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "futureDays": int(args.synthetic_future_days),
                 "windowStart": synthetic_stats.window_start,
                 "windowEnd": synthetic_stats.window_end,
+                "nativePanelUnavailableServers": (
+                    unavailable_native_servers
+                ),
             }
 
         connection.execute(
