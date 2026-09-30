@@ -49,7 +49,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import build_epg_streaming as streaming  # noqa: E402
 import auto_match_inventory as automatch  # noqa: E402
-import ai_review_gemini as gemini_review  # noqa: E402
+import ai_grounded_search as gemini_review  # noqa: E402
 import ai_review_policy as ai_policy  # noqa: E402
 
 try:  # Optional unless the explicit native REVIEW lane is enabled.
@@ -70,11 +70,11 @@ MAX_SYNC_ALERT_BYTES = 8 * 1024 * 1024
 # The current three-server backlog is roughly 25,000 eligible rows.  Keep a
 # hard memory/CPU bound while allowing the workflow's explicit ``all`` scope
 # to analyze that backlog in one pass.
-MAX_RECHECK_CANDIDATES = 30_000
+MAX_RECHECK_CANDIDATES = 50_000
 # Existing-REVIEW writes require an explicit total run cap.  This cap is shared
 # by deterministic real matches, native matches, synthetic guides, ignored
 # headings, and strict AI approvals; no lane receives an extra allowance.
-REVIEW_APPLY_LIMIT_CHOICES = (0, 25, 100, 500, 2_500, 5_000)
+REVIEW_APPLY_LIMIT_CHOICES = (0, 25, 100, 500, 2_500, 5_000, 30_000)
 MAX_RECHECK_APPLIES_PER_RUN = max(REVIEW_APPLY_LIMIT_CHOICES)
 MAX_RECHECK_UPDATE_ROWS_PER_BATCH = 500
 MAX_AI_REVIEW_ROWS = 200
@@ -2604,10 +2604,13 @@ def select_review_recheck_rows(
         # Server 1 panel candidates are explicitly allowed only so Smart Rules
         # can replace them with EPGShare.
         epg_id = streaming.clean_identifier(row.get("epg_id", ""), 300)
-        notes = streaming.clean_text(row.get("notes", ""), 2000).casefold()
         source = streaming.clean_text(row.get("source", ""), 40).casefold()
         feed = streaming.clean_text(row.get("epg_feed", ""), 80).casefold()
-        provenance_known = "auto-map-v1" in notes or "ai-review-v1" in notes
+        # A marker substring is not provenance: an operator note can quote or
+        # reject an old suggestion. Only the complete current-build machine
+        # record is safe to reconsider automatically. Historical AI v1 notes
+        # were advisory-only and never authorize overwriting a populated ID.
+        provenance_known = automatch._target_bound_automatic_provenance(row)
         legacy_server1_panel = server_id == "server_1" and source == "panel"
         current_native_channel = current_native_channels.get(key, {})
         current_native_id = streaming.clean_identifier(
@@ -2656,6 +2659,91 @@ def select_review_recheck_rows(
             "review_recheck_excluded_manual_candidate",
         )
     )
+    return selected, stats
+
+
+def select_synthetic_upgrade_rows(
+    table: MappingTable,
+    inventories: Sequence[PanelInventory],
+    *,
+    selected_servers: Iterable[str],
+    quarantined_keys: Iterable[tuple[str, str]] = (),
+    changed_rows: Sequence[Mapping[str, str]] = (),
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Select only authenticated active coverage fallbacks for safe upgrades."""
+
+    servers = frozenset(
+        streaming.normalize_server_id(value) for value in selected_servers
+    )
+    if not servers or not servers.issubset(DEFAULT_SERVERS):
+        raise SyncError("The synthetic-upgrade server selection is invalid.")
+    present_keys = {
+        (
+            streaming.normalize_server_id(inventory.server_id),
+            streaming.clean_identifier(channel.get("stream_id", ""), 120),
+        )
+        for inventory in inventories
+        for channel in inventory.channels
+    }
+    blocked_alerts = frozenset(quarantined_keys)
+    changed_keys = {
+        (
+            streaming.normalize_server_id(row.get("server_id", "")),
+            streaming.clean_identifier(row.get("stream_id", ""), 120),
+        )
+        for row in changed_rows
+    }
+    stats = {
+        "synthetic_upgrade_candidate_rows": 0,
+        "synthetic_upgrade_eligible_rows": 0,
+        "synthetic_upgrade_excluded_invalid_provenance": 0,
+        "synthetic_upgrade_excluded_missing_provider": 0,
+        "synthetic_upgrade_excluded_open_alert": 0,
+        "synthetic_upgrade_excluded_changed_identity": 0,
+    }
+    selected: list[dict[str, str]] = []
+    for row in table.rows:
+        server_id = streaming.normalize_server_id(row.get("server_id", ""))
+        if server_id not in servers:
+            continue
+        action = streaming.clean_text(row.get("action", ""), 40).upper()
+        notes = streaming.clean_text(row.get("notes", ""), 2_000)
+        looks_like_fallback = (
+            action == "AUTO_DUMMY"
+            and notes.startswith("coverage-fallback-v1 ")
+        )
+        if not looks_like_fallback:
+            continue
+        stats["synthetic_upgrade_candidate_rows"] += 1
+        if automatch.verified_coverage_fallback_preimage(row) is None:
+            stats["synthetic_upgrade_excluded_invalid_provenance"] += 1
+            continue
+        key = (
+            server_id,
+            streaming.clean_identifier(row.get("stream_id", ""), 120),
+        )
+        if key not in present_keys:
+            stats["synthetic_upgrade_excluded_missing_provider"] += 1
+            continue
+        if key in blocked_alerts:
+            stats["synthetic_upgrade_excluded_open_alert"] += 1
+            continue
+        if key in changed_keys:
+            stats["synthetic_upgrade_excluded_changed_identity"] += 1
+            continue
+        selected.append(dict(row))
+
+    selected.sort(
+        key=lambda row: (
+            row["server_id"], streaming.stream_sort_key(row["stream_id"])
+        )
+    )
+    if len(selected) > MAX_RECHECK_CANDIDATES:
+        raise SyncError(
+            "The synthetic-upgrade candidate set exceeds its conservative "
+            f"{MAX_RECHECK_CANDIDATES:,}-row limit. Select one server at a time."
+        )
+    stats["synthetic_upgrade_eligible_rows"] = len(selected)
     return selected, stats
 
 
@@ -4524,8 +4612,12 @@ def _validate_review_update(
     if not changed or not changed.issubset(RECHECK_PATCH_COLUMNS):
         raise SyncError("A REVIEW update attempted to change unsupported columns.")
     before_action = streaming.clean_text(before.get("action", ""), 40).upper()
-    if before_action != "REVIEW":
-        raise SyncError("A REVIEW update no longer targets a REVIEW row.")
+    fallback_preimage = automatch.verified_coverage_fallback_preimage(before)
+    from_active_fallback = fallback_preimage is not None
+    if before_action != "REVIEW" and not from_active_fallback:
+        raise SyncError(
+            "A REVIEW update no longer targets REVIEW or a bound synthetic fallback."
+        )
     try:
         before_enabled = streaming.parse_bool(
             before.get("enabled", ""), default=False, field_name="mapping enabled"
@@ -4535,8 +4627,10 @@ def _validate_review_update(
         )
     except streaming.BuildError as exc:
         raise SyncError("A REVIEW update contains an invalid enabled value.") from exc
-    if before_enabled:
+    if before_enabled and not from_active_fallback:
         raise SyncError("An enabled mapping cannot enter REVIEW recheck updates.")
+    if from_active_fallback and not before_enabled:
+        raise SyncError("A bound synthetic fallback unexpectedly became disabled.")
     server_id = streaming.normalize_server_id(before.get("server_id", ""))
     after_action = streaming.clean_text(after.get("action", ""), 40).upper()
     source = streaming.clean_text(after.get("source", ""), 40).casefold()
@@ -4622,6 +4716,13 @@ def _validate_review_update(
     else:
         raise SyncError(
             "A REVIEW recheck may only approve, classify, ignore, or retain REVIEW."
+        )
+    if from_active_fallback and after_action not in {
+        "AUTO_EPGSHARE",
+        "KEEP_PANEL",
+    }:
+        raise SyncError(
+            "An active synthetic row may only upgrade to a verified real schedule."
         )
     has_exact_ai_target = (
         source == "epgshare01" and feed == "ALL_SOURCES1" and bool(epg_id)
@@ -5382,6 +5483,7 @@ def _build_verified_native_review_updates(
     review_result_rows: Sequence[Mapping[str, str]],
     inventories: Sequence[PanelInventory],
     generated_at: str,
+    definitive_miss_keys_out: set[tuple[str, str]] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Return exact Server 2/3 KEEP_PANEL updates after the native guide gate."""
 
@@ -5416,20 +5518,17 @@ def _build_verified_native_review_updates(
         result_action = streaming.clean_text(
             raw_result.get("action", ""), 40
         ).upper()
-        is_coverage_fallback = (
+        is_local_synthetic = (
             result_action == "AUTO_DUMMY"
             and streaming.clean_text(raw_result.get("source", ""), 40).casefold()
             == "dummy"
             and streaming.clean_text(raw_result.get("epg_feed", ""), 80).upper()
             == "DUMMY_CHANNELS"
-            and streaming.clean_text(raw_result.get("notes", ""), 2_000).startswith(
-                "coverage-fallback-v1 "
-            )
-            and streaming.clean_text(raw_result.get("reason", ""), 500).startswith(
-                "coverage-fallback-rollback-v1 "
-            )
+            and "auto-map-v1" in streaming.clean_text(
+                raw_result.get("notes", ""), 2_000
+            ).casefold()
         )
-        if result_action != "REVIEW" and not is_coverage_fallback:
+        if result_action != "REVIEW" and not is_local_synthetic:
             # A deterministic EPGShare approval wins and is never overwritten.
             continue
         try:
@@ -5440,10 +5539,10 @@ def _build_verified_native_review_updates(
             )
         except streaming.BuildError as exc:
             raise SyncError("A native REVIEW result has invalid enabled state.") from exc
-        if enabled and not is_coverage_fallback:
+        if enabled and not is_local_synthetic:
             raise SyncError("A native REVIEW candidate unexpectedly became enabled.")
-        if not enabled and is_coverage_fallback:
-            raise SyncError("A coverage fallback unexpectedly became disabled.")
+        if not enabled and is_local_synthetic:
+            raise SyncError("A local synthetic candidate unexpectedly became disabled.")
         channel = channels_by_key.get(key)
         if channel is None:
             continue
@@ -5463,13 +5562,15 @@ def _build_verified_native_review_updates(
         if current_id != raw_current_id:
             summary["native_review_rejected_invalid_id"] += 1
             continue
-        raw_stored_id = str(before.get("epg_id", "") or "")
+        fallback_preimage = automatch.verified_coverage_fallback_preimage(before)
+        target_before = fallback_preimage if fallback_preimage is not None else before
+        raw_stored_id = str(target_before.get("epg_id", "") or "")
         stored_id = streaming.clean_identifier(raw_stored_id, 300)
         if stored_id != raw_stored_id:
             summary["native_review_rejected_invalid_id"] += 1
             continue
-        source = streaming.clean_text(before.get("source", ""), 40).casefold()
-        feed = streaming.clean_text(before.get("epg_feed", ""), 80).casefold()
+        source = streaming.clean_text(target_before.get("source", ""), 40).casefold()
+        feed = streaming.clean_text(target_before.get("epg_feed", ""), 80).casefold()
         if stored_id and stored_id != current_id:
             summary["native_review_rejected_stored_conflict"] += 1
             continue
@@ -5546,6 +5647,8 @@ def _build_verified_native_review_updates(
             for key, (row, epg_id, provider_name) in server_candidates.items():
                 if epg_id not in validation.verified_ids:
                     summary["native_review_rejected_schedule"] += 1
+                    if definitive_miss_keys_out is not None:
+                        definitive_miss_keys_out.add(key)
                     continue
                 display_names = tuple(names_by_id.get(epg_id, ()))
                 provider_key = native_review.native_display_name_key(provider_name)
@@ -5557,6 +5660,8 @@ def _build_verified_native_review_updates(
                     or compatible_ids_by_name.get(provider_key) != {epg_id}
                 ):
                     summary["native_review_rejected_identity"] += 1
+                    if definitive_miss_keys_out is not None:
+                        definitive_miss_keys_out.add(key)
                     continue
                 marker = (
                     "native-review-v1; exact current provider EPG ID, XMLTV "
@@ -5765,6 +5870,52 @@ def _ai_policy_verification(
     )
 
 
+def _grounded_audit_note(provenance: ai_policy.ApprovalProvenance) -> str:
+    """Return bounded, credential-free source evidence for the private Sheet."""
+
+    evidence_hash = str(provenance.grounding_evidence_sha256)
+    if re.fullmatch(r"[0-9a-f]{64}", evidence_hash) is None:
+        raise SyncError("Grounded AI evidence has an invalid audit hash.")
+    authorities = tuple(dict.fromkeys(provenance.grounding_source_authorities))
+    if len(authorities) < 2 or any(
+        re.fullmatch(r"[a-z0-9.-]{1,253}", value) is None
+        for value in authorities
+    ):
+        raise SyncError("Grounded AI evidence has invalid source authorities.")
+    safe_origins: list[str] = []
+    for value in provenance.grounding_source_urls:
+        try:
+            parsed = urlparse(value)
+            if (
+                parsed.scheme.casefold() not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+            ):
+                raise ValueError
+            port = parsed.port
+        except (TypeError, ValueError):
+            raise SyncError("Grounded AI evidence has an invalid source URL.") from None
+        host = parsed.hostname.casefold()
+        default_port = (parsed.scheme.casefold() == "http" and port == 80) or (
+            parsed.scheme.casefold() == "https" and port == 443
+        )
+        netloc = host if port is None or default_port else f"{host}:{port}"
+        origin = urlunparse((parsed.scheme.casefold(), netloc, "/", "", "", ""))
+        if origin not in safe_origins:
+            safe_origins.append(origin)
+    if len(safe_origins) < 2:
+        raise SyncError("Grounded AI evidence lacks two safe source URLs.")
+    authority_text = ",".join(authorities[:8])
+    origin_text = ",".join(safe_origins[:8])
+    return streaming.clean_text(
+        "ai-grounded-evidence-v1 "
+        f"authority_count={len(authorities)}; authorities={authority_text}; "
+        f"source_origins={origin_text}; evidence_sha256={evidence_hash}",
+        1_000,
+    )
+
+
 def _gemini_review_updates(
     *,
     outcome: automatch.AutoMatchOutcome,
@@ -5818,6 +5969,7 @@ def _gemini_review_updates(
         "ai_review_error_rows": 0,
         "ai_review_batches_attempted": 0,
         "ai_review_batches_succeeded": 0,
+        "ai_review_http_attempts": 0,
         "ai_review_prompt_tokens": 0,
         "ai_review_candidate_tokens": 0,
         "ai_review_total_tokens": 0,
@@ -5934,6 +6086,7 @@ def _gemini_review_updates(
             break
         summary["ai_review_batches_attempted"] += reviewed.batches_attempted
         summary["ai_review_batches_succeeded"] += reviewed.batches_succeeded
+        summary["ai_review_http_attempts"] += reviewed.http_attempts
         summary["ai_review_prompt_tokens"] += reviewed.prompt_tokens
         summary["ai_review_candidate_tokens"] += reviewed.candidate_tokens
         summary["ai_review_total_tokens"] += reviewed.total_tokens
@@ -6049,8 +6202,9 @@ def _gemini_review_updates(
                     "epg_feed": "ALL_SOURCES1",
                     "epg_id": decision.epg_id,
                     "reason": (
-                        "Smart Rules and Gemini HIGH independently selected "
-                        "the same locally verified EPGShare schedule."
+                        "Smart Rules and grounded AI HIGH selected the same "
+                        "locally verified EPGShare schedule with two independent "
+                        "Google Search source authorities."
                     ),
                 }
             )
@@ -6068,10 +6222,18 @@ def _gemini_review_updates(
                 text_catalog_generated_token=(
                     decision.provenance.text_catalog_generated_token
                 ),
+                grounding_evidence_sha256=(
+                    decision.provenance.grounding_evidence_sha256
+                ),
             )
             prior_notes = streaming.clean_text(row.get("notes", ""), 2000)
+            evidence_marker = _grounded_audit_note(decision.provenance)
             row["notes"] = streaming.clean_text(
-                " | ".join(value for value in (marker, prior_notes) if value),
+                " | ".join(
+                    value
+                    for value in (marker, evidence_marker, prior_notes)
+                    if value
+                ),
                 2000,
             )
             _validate_review_update(
@@ -6141,7 +6303,9 @@ def _run_sync_review_mode(
         or review_apply_limit not in REVIEW_APPLY_LIMIT_CHOICES
     ):
         raise SyncError(
-            "The REVIEW apply limit must be 0, 25, 100, 500, 2500, or 5000."
+            "The REVIEW apply limit must be one of: "
+            + ", ".join(str(value) for value in REVIEW_APPLY_LIMIT_CHOICES)
+            + "."
         )
     mapping_write_requested = bool(write_to_sheet or mode == "apply")
     if mapping_write_requested and google_session is None:
@@ -6215,6 +6379,15 @@ def _run_sync_review_mode(
         quarantined_keys=match_time_quarantine_keys,
         changed_rows=changed_rows,
     )
+    synthetic_upgrade_rows, synthetic_upgrade_selection_summary = (
+        select_synthetic_upgrade_rows(
+            authoritative_table,
+            inventories,
+            selected_servers=selected_servers,
+            quarantined_keys=match_time_quarantine_keys,
+            changed_rows=changed_rows,
+        )
+    )
 
     auto_match_inputs = (
         bool(all_source_file),
@@ -6229,6 +6402,7 @@ def _run_sync_review_mode(
 
     new_rows = list(discovered_rows)
     review_results: list[dict[str, str]] = []
+    synthetic_upgrade_results: list[dict[str, str]] = []
     auto_match_summary: dict[str, Any] = {
         "auto_match_considered_rows": 0,
         "auto_match_provisional_rows": 0,
@@ -6264,6 +6438,7 @@ def _run_sync_review_mode(
                 inventories=inventories,
                 new_rows=discovered_rows,
                 review_rows=review_recheck_rows,
+                synthetic_upgrade_rows=synthetic_upgrade_rows,
                 quarantined_keys=match_time_quarantine_keys,
                 all_source_file=Path(all_source_file),
                 all_source_catalog_file=Path(all_source_catalog_file),
@@ -6272,17 +6447,26 @@ def _run_sync_review_mode(
                 enable_ai_review=bool(use_gemini_ai),
                 coverage_fallback_limit=coverage_fallback_limit,
                 include_new_coverage_fallback=bool(write_to_sheet),
+                defer_review_coverage_fallback=True,
             )
         except automatch.AutoMatchError as exc:
             raise SyncError(str(exc)) from exc
         output_by_key = {_row_identity(row): dict(row) for row in outcome.rows}
         new_keys = {_row_identity(row) for row in discovered_rows}
         review_keys = {_row_identity(row) for row in review_recheck_rows}
-        if set(output_by_key) != new_keys.union(review_keys):
+        synthetic_upgrade_keys = {
+            _row_identity(row) for row in synthetic_upgrade_rows
+        }
+        if set(output_by_key) != new_keys.union(review_keys).union(
+            synthetic_upgrade_keys
+        ):
             raise SyncError("Smart Rules did not return the exact requested identities.")
         new_rows = [output_by_key[_row_identity(row)] for row in discovered_rows]
         review_results = [
             output_by_key[_row_identity(row)] for row in review_recheck_rows
+        ]
+        synthetic_upgrade_results = [
+            output_by_key[_row_identity(row)] for row in synthetic_upgrade_rows
         ]
         learned_alias_support_rows = _learned_alias_support_rows_from_outcome(
             outcome
@@ -6310,39 +6494,107 @@ def _run_sync_review_mode(
             streaming.stream_sort_key(row["stream_id"]),
         )
     )
+    synthetic_upgrade_real_matches = [
+        row
+        for row in synthetic_upgrade_results
+        if streaming.clean_text(row.get("action", ""), 40).upper()
+        == "AUTO_EPGSHARE"
+        and streaming.parse_bool(
+            row.get("enabled", ""),
+            default=False,
+            field_name="mapping enabled",
+        )
+    ]
+    deterministic_real_candidates = [
+        row
+        for row in [*safe_review_matches, *synthetic_upgrade_real_matches]
+        if streaming.clean_text(row.get("action", ""), 40).upper()
+        == "AUTO_EPGSHARE"
+    ]
+    intrinsic_synthetic_candidates = [
+        row
+        for row in safe_review_matches
+        if streaming.clean_text(row.get("action", ""), 40).upper()
+        == "AUTO_DUMMY"
+    ]
+    ignore_candidates = [
+        row
+        for row in safe_review_matches
+        if streaming.clean_text(row.get("action", ""), 40).upper() == "IGNORE"
+    ]
     native_verified_updates: list[dict[str, str]] = []
+    definitive_native_miss_keys: set[tuple[str, str]] = set()
     native_summary = _native_review_summary_defaults()
     if validate_native_review and set(selected_servers).intersection(
         {"server_2", "server_3"}
     ):
         native_verified_updates, native_summary = (
             _build_verified_native_review_updates(
-                review_input_rows=review_recheck_rows,
-                review_result_rows=review_results,
+                review_input_rows=[
+                    *review_recheck_rows,
+                    *synthetic_upgrade_rows,
+                ],
+                review_result_rows=[
+                    *review_results,
+                    *synthetic_upgrade_results,
+                ],
                 inventories=inventories,
                 generated_at=generated_at,
+                definitive_miss_keys_out=definitive_native_miss_keys,
             )
         )
+
+    protected_native_review_keys = {
+        _row_identity(row)
+        for row in review_recheck_rows
+        if _row_identity(row)[0] in {"server_2", "server_3"}
+        and streaming.clean_text(row.get("source", ""), 40).casefold()
+        == "panel"
+        and bool(streaming.clean_identifier(row.get("epg_id", ""), 300))
+    }
+    native_verifier_input_keys = {
+        _row_identity(row)
+        for row in [*review_recheck_rows, *synthetic_upgrade_rows]
+    }
+    if not definitive_native_miss_keys.issubset(native_verifier_input_keys):
+        raise SyncError("Native definitive misses contain an unknown input identity.")
+    review_definitive_native_miss_keys = definitive_native_miss_keys.intersection(
+        protected_native_review_keys
+    )
+    intrinsic_synthetic_candidates = [
+        row
+        for row in intrinsic_synthetic_candidates
+        if _row_identity(row) not in protected_native_review_keys
+        or _row_identity(row) in review_definitive_native_miss_keys
+    ]
 
     native_verified_keys = {
         _row_identity(row) for row in native_verified_updates
     }
+    if native_verified_keys.intersection(definitive_native_miss_keys):
+        raise SyncError(
+            "Native verification returned the same identity as both verified "
+            "and definitively rejected."
+        )
     fallback_replaced_by_native = sum(
         1
-        for row in safe_review_matches
+        for row in intrinsic_synthetic_candidates
         if _row_identity(row) in native_verified_keys
-        and streaming.clean_text(row.get("notes", ""), 2_000).startswith(
-            "coverage-fallback-v1 "
-        )
     )
     if native_verified_keys:
-        # Native validation runs after the local coverage proposal. A verified
-        # current Server 2/3 native schedule wins, and the synthetic proposal
-        # for that identity must not enter the deterministic writer as a
-        # duplicate update.
-        safe_review_matches = [
+        deterministic_real_candidates = [
             row
-            for row in safe_review_matches
+            for row in deterministic_real_candidates
+            if _row_identity(row) not in native_verified_keys
+        ]
+        intrinsic_synthetic_candidates = [
+            row
+            for row in intrinsic_synthetic_candidates
+            if _row_identity(row) not in native_verified_keys
+        ]
+        ignore_candidates = [
+            row
+            for row in ignore_candidates
             if _row_identity(row) not in native_verified_keys
         ]
     auto_match_summary["coverage_fallback_replaced_by_native_rows"] = (
@@ -6353,33 +6605,15 @@ def _run_sync_review_mode(
         deterministic_epgshare_updates,
         deterministic_native_updates,
     ) = _bounded_deterministic_review_updates(
-        safe_review_matches,
+        deterministic_real_candidates,
         native_verified_updates,
         limit=review_apply_limit,
     )
     deterministic_updates = _prioritized_deterministic_review_rows(
         [*deterministic_epgshare_updates, *deterministic_native_updates]
     )
-    deferred_safe_matches = max(
-        0,
-        len(safe_review_matches)
-        + len(native_verified_updates)
-        - len(deterministic_updates),
-    )
     native_summary["native_review_deferred"] = max(
         0, len(native_verified_updates) - len(deterministic_native_updates)
-    )
-    # This count means locally verified proposals. Persistence remains zero in
-    # dry-run and is filled only after Google's authoritative post-write read.
-    auto_match_summary["review_recheck_safe_matches"] = int(
-        auto_match_summary.get("review_recheck_safe_matches", 0)
-    ) - fallback_replaced_by_native + int(
-        auto_match_summary.get("review_recheck_headings_ignored", 0)
-    ) + len(native_verified_updates)
-    auto_match_summary["review_recheck_still_review_rows"] = max(
-        0,
-        int(auto_match_summary.get("review_recheck_still_review_rows", 0))
-        - (len(native_verified_updates) - fallback_replaced_by_native),
     )
 
     ai_updates: list[dict[str, str]] = []
@@ -6483,10 +6717,181 @@ def _run_sync_review_mode(
             - len(ai_updates),
         )
 
-    if len(deterministic_updates) + len(ai_updates) > review_apply_limit:
-        raise SyncError("The selected REVIEW updates exceed the total apply limit.")
+    leading_updates = [*deterministic_updates, *ai_updates]
+    leading_keys = [_row_identity(row) for row in leading_updates]
+    if len(leading_keys) != len(set(leading_keys)):
+        raise SyncError("Real REVIEW lanes selected a duplicate identity.")
+    if len(leading_updates) > review_apply_limit:
+        raise SyncError("The selected real REVIEW updates exceed the total apply limit.")
 
-    review_updates = [*deterministic_updates, *ai_updates]
+    terminal_fallback_summary: dict[str, int] = {
+        "terminal_coverage_fallback_candidate_rows": 0,
+        "terminal_coverage_fallback_selected_rows": 0,
+        "terminal_coverage_fallback_deferred_rows": 0,
+        "terminal_coverage_fallback_protected_manual_rows": 0,
+        "terminal_coverage_fallback_native_candidate_rows": 0,
+        "terminal_coverage_fallback_native_inconclusive_rows": 0,
+    }
+    terminal_fallback_updates: list[dict[str, str]] = []
+    remaining_write_capacity = review_apply_limit - len(leading_updates)
+    inline_new_fallbacks = int(
+        auto_match_summary.get("new_channel_coverage_fallback_rows", 0)
+    )
+    remaining_fallback_capacity = max(
+        0, coverage_fallback_limit - inline_new_fallbacks
+    )
+    if outcome is not None and coverage_fallback_limit > 0:
+        terminal_excluded_keys = set(leading_keys)
+        try:
+            planned_fallbacks, terminal_fallback_summary = (
+                automatch.terminal_coverage_fallback_updates(
+                    original_rows=review_recheck_rows,
+                    matcher_rows=review_results,
+                    quarantined_keys=match_time_quarantine_keys,
+                    excluded_keys=terminal_excluded_keys,
+                    definitive_native_miss_keys=(
+                        review_definitive_native_miss_keys
+                    ),
+                    source_sha256=outcome.source_sha256,
+                    limit=min(
+                        remaining_write_capacity,
+                        remaining_fallback_capacity,
+                    ),
+                    rotation=_parse_generated_epoch(generated_at) // 86_400,
+                )
+            )
+        except automatch.AutoMatchError as exc:
+            raise SyncError(str(exc)) from exc
+        terminal_fallback_updates = list(planned_fallbacks)
+        terminal_fallback_summary[
+            "terminal_coverage_fallback_native_inconclusive_rows"
+        ] = len(
+            protected_native_review_keys
+            .difference(review_definitive_native_miss_keys)
+            .difference(terminal_excluded_keys)
+        )
+
+    post_real_candidates_by_key: dict[tuple[str, str], dict[str, str]] = {}
+    for row in [
+        *intrinsic_synthetic_candidates,
+        *terminal_fallback_updates,
+        *ignore_candidates,
+    ]:
+        key = _row_identity(row)
+        if key in set(leading_keys):
+            continue
+        if key in post_real_candidates_by_key:
+            raise SyncError("Terminal synthetic/ignore lanes contain a duplicate identity.")
+        post_real_candidates_by_key[key] = row
+    post_remaining = review_apply_limit - len(leading_updates)
+    selected_post, _unused = _bounded_deterministic_review_updates(
+        tuple(post_real_candidates_by_key.values()),
+        (),
+        limit=post_remaining,
+    )
+    selected_post = _prioritized_deterministic_review_rows(selected_post)
+    review_updates = [*leading_updates, *selected_post]
+    review_update_keys = [_row_identity(row) for row in review_updates]
+    if (
+        len(review_updates) > review_apply_limit
+        or len(review_update_keys) != len(set(review_update_keys))
+    ):
+        raise SyncError("Terminal REVIEW decisions exceed the shared safe cap.")
+
+    review_input_keys = {_row_identity(row) for row in review_recheck_rows}
+    upgrade_input_keys = {_row_identity(row) for row in synthetic_upgrade_rows}
+    selected_review_keys = set(review_update_keys).intersection(review_input_keys)
+    selected_upgrade_keys = set(review_update_keys).intersection(upgrade_input_keys)
+    if len(selected_review_keys) + len(selected_upgrade_keys) != len(review_updates):
+        raise SyncError("Existing-row update identities do not reconcile by cohort.")
+    deferred_safe_matches = len(review_input_keys.difference(selected_review_keys))
+    preserved_upgrade_rows = len(upgrade_input_keys.difference(selected_upgrade_keys))
+    terminal_lane_counts = Counter(
+        _review_apply_lane(row, ai_keys=frozenset(_row_identity(item) for item in ai_updates))
+        for row in review_updates
+        if _row_identity(row) in review_input_keys
+    )
+    terminal_metrics: dict[str, Any] = {
+        **terminal_fallback_summary,
+        "review_terminal_input_rows": len(review_input_keys),
+        "review_terminal_selected_rows": len(selected_review_keys),
+        "review_terminal_deferred_rows": deferred_safe_matches,
+        "review_terminal_real_rows": int(terminal_lane_counts.get("deterministic", 0)),
+        "review_terminal_native_rows": int(terminal_lane_counts.get("native", 0)),
+        "review_terminal_ai_real_rows": int(terminal_lane_counts.get("ai", 0)),
+        "review_terminal_synthetic_rows": int(terminal_lane_counts.get("synthetic", 0)),
+        "review_terminal_ignored_rows": int(terminal_lane_counts.get("ignore", 0)),
+        "review_terminal_quarantined_rows": int(
+            recheck_selection_summary.get("review_recheck_excluded_open_alert", 0)
+        ),
+        "synthetic_upgrade_selected_rows": len(selected_upgrade_keys),
+        "synthetic_upgrade_preserved_rows": preserved_upgrade_rows,
+        "synthetic_upgrade_persisted_rows": 0,
+        "synthetic_upgrade_write_deferred_rows": 0,
+    }
+    if len(selected_review_keys) + deferred_safe_matches != len(review_input_keys):
+        raise SyncError("Terminal REVIEW metrics do not reconcile.")
+    if sum(terminal_lane_counts.values()) != len(selected_review_keys):
+        raise SyncError("Terminal REVIEW lane metrics do not reconcile.")
+    selected_post_keys = {_row_identity(row) for row in selected_post}
+    terminal_fallback_keys = {
+        _row_identity(row) for row in terminal_fallback_updates
+    }
+    selected_terminal_fallbacks = len(
+        selected_post_keys.intersection(terminal_fallback_keys)
+    )
+    terminal_metrics["terminal_coverage_fallback_selected_rows"] = (
+        selected_terminal_fallbacks
+    )
+    terminal_metrics["terminal_coverage_fallback_deferred_rows"] = max(
+        0,
+        int(terminal_metrics["terminal_coverage_fallback_candidate_rows"])
+        - selected_terminal_fallbacks,
+    )
+    # The matcher intentionally excludes protected native candidates from its
+    # inline fallback count. Add only the exact per-key native misses admitted
+    # by the terminal verifier so aggregate candidate/applied/deferred metrics
+    # remain disjoint and reconcile.
+    auto_match_summary["coverage_fallback_candidate_rows"] = int(
+        auto_match_summary.get("coverage_fallback_candidate_rows", 0)
+    ) + int(
+        terminal_metrics["terminal_coverage_fallback_native_candidate_rows"]
+    )
+    auto_match_summary["coverage_fallback_applied_rows"] = inline_new_fallbacks + (
+        selected_terminal_fallbacks
+    )
+    auto_match_summary["review_recheck_coverage_fallback_rows"] = (
+        selected_terminal_fallbacks
+    )
+    auto_match_summary["coverage_fallback_deferred_rows"] = max(
+        0,
+        int(auto_match_summary.get("coverage_fallback_candidate_rows", 0))
+        - int(auto_match_summary["coverage_fallback_applied_rows"]),
+    )
+    safe_review_proposal_keys = {
+        _row_identity(row)
+        for row in [
+            *deterministic_real_candidates,
+            *native_verified_updates,
+            *intrinsic_synthetic_candidates,
+            *ignore_candidates,
+            *ai_updates,
+        ]
+        if _row_identity(row) in review_input_keys
+    }
+    safe_review_proposal_count = len(safe_review_proposal_keys) + int(
+        terminal_metrics["terminal_coverage_fallback_candidate_rows"]
+    )
+    safe_review_proposal_count = min(
+        len(review_input_keys), safe_review_proposal_count
+    )
+    auto_match_summary["review_recheck_safe_matches"] = safe_review_proposal_count
+    auto_match_summary["review_recheck_still_review_rows"] = max(
+        0, len(review_input_keys) - safe_review_proposal_count
+    )
+    deferred_safe_matches = max(
+        0, safe_review_proposal_count - len(selected_review_keys)
+    )
     projected_sheet_bytes = validate_projected_sheet_size(
         authoritative_table, new_rows
     )
@@ -6538,10 +6943,12 @@ def _run_sync_review_mode(
             for item in inventories
         },
         **recheck_selection_summary,
+        **synthetic_upgrade_selection_summary,
         **auto_match_summary,
         **ai_summary,
         **dict(native_hint_summary or {}),
         **native_summary,
+        **terminal_metrics,
         **_review_apply_lane_metrics(
             review_updates, state="selected", ai_rows=ai_updates
         ),
@@ -6549,11 +6956,11 @@ def _run_sync_review_mode(
     }
     status_table = authoritative_table
     status_quarantine_keys = match_time_quarantine_keys
-    native_results_by_key = {
-        _row_identity(row): row for row in native_verified_updates
+    terminal_results_by_key = {
+        _row_identity(row): row for row in review_updates
     }
     reported_review_results = [
-        native_results_by_key.get(_row_identity(row), row)
+        terminal_results_by_key.get(_row_identity(row), row)
         for row in review_results
     ]
 
@@ -6816,10 +7223,18 @@ def _run_sync_review_mode(
         )
         summary.update(revalidation_summary)
         deterministic_native_updates = revalidated_native_updates
-        deterministic_updates = _prioritized_deterministic_review_rows(
-            [*deterministic_epgshare_updates, *deterministic_native_updates]
-        )
-        review_updates = [*deterministic_updates, *ai_updates]
+        revalidated_native_by_key = {
+            _row_identity(row): row for row in deterministic_native_updates
+        }
+        review_updates = [
+            revalidated_native_by_key.get(_row_identity(row), row)
+            for row in review_updates
+            if (
+                streaming.clean_text(row.get("action", ""), 40).upper()
+                != "KEEP_PANEL"
+                or _row_identity(row) in revalidated_native_by_key
+            )
+        ]
         if len(review_updates) > review_apply_limit:
             raise SyncError(
                 "Native revalidation produced more REVIEW updates than authorized."
@@ -6836,15 +7251,75 @@ def _run_sync_review_mode(
         rejected_native_keys = attempted_native_keys.difference(
             revalidated_native_keys
         )
-        native_results_by_key = {
+        rejected_native_review_keys = rejected_native_keys.intersection(
+            review_input_keys
+        )
+        terminal_results_by_key = {
             key: row
-            for key, row in native_results_by_key.items()
+            for key, row in terminal_results_by_key.items()
             if key not in rejected_native_keys
         }
         reported_review_results = [
-            native_results_by_key.get(_row_identity(row), row)
+            terminal_results_by_key.get(_row_identity(row), row)
             for row in review_results
         ]
+        current_update_keys = {_row_identity(row) for row in review_updates}
+        selected_review_keys = current_update_keys.intersection(review_input_keys)
+        selected_upgrade_keys = current_update_keys.intersection(upgrade_input_keys)
+        if len(selected_review_keys) + len(selected_upgrade_keys) != len(
+            review_updates
+        ):
+            raise SyncError(
+                "Revalidated existing-row identities do not reconcile by cohort."
+            )
+        current_review_lane_counts = Counter(
+            _review_apply_lane(
+                row,
+                ai_keys=frozenset(_row_identity(item) for item in ai_updates),
+            )
+            for row in review_updates
+            if _row_identity(row) in review_input_keys
+        )
+        if sum(current_review_lane_counts.values()) != len(selected_review_keys):
+            raise SyncError("Revalidated terminal REVIEW lanes do not reconcile.")
+        summary["review_terminal_selected_rows"] = len(selected_review_keys)
+        summary["review_terminal_deferred_rows"] = (
+            len(review_input_keys) - len(selected_review_keys)
+        )
+        summary["synthetic_upgrade_selected_rows"] = len(selected_upgrade_keys)
+        summary["synthetic_upgrade_preserved_rows"] = (
+            len(upgrade_input_keys) - len(selected_upgrade_keys)
+        )
+        summary["review_terminal_real_rows"] = int(
+            current_review_lane_counts.get("deterministic", 0)
+        )
+        summary["review_terminal_native_rows"] = int(
+            current_review_lane_counts.get("native", 0)
+        )
+        summary["review_terminal_ai_real_rows"] = int(
+            current_review_lane_counts.get("ai", 0)
+        )
+        summary["review_terminal_synthetic_rows"] = int(
+            current_review_lane_counts.get("synthetic", 0)
+        )
+        summary["review_terminal_ignored_rows"] = int(
+            current_review_lane_counts.get("ignore", 0)
+        )
+        summary["review_recheck_safe_matches"] = max(
+            0,
+            int(summary.get("review_recheck_safe_matches", 0))
+            - len(rejected_native_review_keys),
+        )
+        summary["review_recheck_still_review_rows"] = min(
+            len(review_input_keys),
+            int(summary.get("review_recheck_still_review_rows", 0))
+            + len(rejected_native_review_keys),
+        )
+        summary["review_recheck_deferred_rows"] = max(
+            0,
+            int(summary.get("review_recheck_safe_matches", 0))
+            - len(selected_review_keys),
+        )
         # Persist the aggregate revalidation outcome before the Sheet writer;
         # no provider response values enter reports.
         persist_reports()
@@ -6944,20 +7419,38 @@ def _run_sync_review_mode(
             )
         except SheetWriteError as exc:
             committed_rows = review_updates[: max(0, exc.appended_count)]
+            committed_keys = {_row_identity(row) for row in committed_rows}
+            committed_review = len(committed_keys.intersection(review_input_keys))
+            committed_upgrades = len(committed_keys.intersection(upgrade_input_keys))
+            if committed_review + committed_upgrades != len(committed_rows):
+                raise SyncError(
+                    "Committed existing-row identities do not reconcile by cohort."
+                )
+            selected_review = len(
+                {_row_identity(row) for row in review_updates}.intersection(
+                    review_input_keys
+                )
+            )
+            selected_upgrades = len(
+                {_row_identity(row) for row in review_updates}.intersection(
+                    upgrade_input_keys
+                )
+            )
             ai_update_keys = {_row_identity(row) for row in ai_updates}
             committed_ai = sum(
                 1 for row in committed_rows if _row_identity(row) in ai_update_keys
             )
-            committed_deterministic = len(committed_rows) - committed_ai
             committed_native = sum(
                 1
                 for row in committed_rows
                 if streaming.clean_text(row.get("action", ""), 40).upper()
                 == "KEEP_PANEL"
             )
-            summary["review_recheck_rows_updated"] = len(committed_rows)
-            summary["review_recheck_safe_matches_persisted"] = (
-                len(committed_rows)
+            summary["review_recheck_rows_updated"] = committed_review
+            summary["review_recheck_safe_matches_persisted"] = committed_review
+            summary["synthetic_upgrade_persisted_rows"] = committed_upgrades
+            summary["synthetic_upgrade_write_deferred_rows"] = (
+                selected_upgrades - committed_upgrades
             )
             summary["native_review_persisted"] = committed_native
             summary["ai_review_high_suggestions_persisted"] = committed_ai
@@ -6968,9 +7461,7 @@ def _run_sync_review_mode(
             )
             summary["review_recheck_deferred_rows"] = int(
                 summary.get("review_recheck_deferred_rows", 0)
-            ) + (
-                len(deterministic_updates) - committed_deterministic
-            ) + (len(ai_updates) - committed_ai)
+            ) + (selected_review - committed_review)
             summary["native_review_deferred"] = int(
                 summary.get("native_review_deferred", 0)
             ) + len(deterministic_native_updates) - committed_native
@@ -6980,10 +7471,21 @@ def _run_sync_review_mode(
             )
             persist_reports()
             raise
-        summary["review_recheck_rows_updated"] = updated_count
-        summary["review_recheck_safe_matches_persisted"] = len(
-            deterministic_updates
-        ) + len(ai_updates)
+        if updated_count != len(review_updates):
+            raise SyncError(
+                "The REVIEW writer returned an inconsistent committed-row count."
+            )
+        persisted_keys = {_row_identity(row) for row in review_updates}
+        persisted_review = len(persisted_keys.intersection(review_input_keys))
+        persisted_upgrades = len(persisted_keys.intersection(upgrade_input_keys))
+        if persisted_review + persisted_upgrades != updated_count:
+            raise SyncError(
+                "Persisted existing-row identities do not reconcile by cohort."
+            )
+        summary["review_recheck_rows_updated"] = persisted_review
+        summary["review_recheck_safe_matches_persisted"] = persisted_review
+        summary["synthetic_upgrade_persisted_rows"] = persisted_upgrades
+        summary["synthetic_upgrade_write_deferred_rows"] = 0
         summary["native_review_persisted"] = len(
             deterministic_native_updates
         )
@@ -7120,7 +7622,9 @@ def run_sync(
         or review_apply_limit not in REVIEW_APPLY_LIMIT_CHOICES
     ):
         raise SyncError(
-            "REVIEW apply limit must be 0, 25, 100, 500, 2500, or 5000."
+            "REVIEW apply limit must be one of: "
+            + ", ".join(str(value) for value in REVIEW_APPLY_LIMIT_CHOICES)
+            + "."
         )
     if (
         isinstance(coverage_fallback_limit, bool)

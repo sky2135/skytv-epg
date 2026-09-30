@@ -90,7 +90,7 @@ SCHEDULE_EQUIVALENCES_PATH = (
     REPOSITORY_ROOT / "knowledge" / "schedule_equivalence_groups.json"
 )
 APPROVED_ALIASES_SHA256 = (
-    "354e66933fdb0adc8dfea5f9203bf914ebd1814a892fdf9d3d2e2da158043cf5"
+    "22fac64d4dd47fa804a804816d10a1148bced719d10c06a394b1bebddead6055"
 )
 SCHEDULE_EQUIVALENCES_SHA256 = (
     "a0de16a12d00d6aca96c7f7a54ed444a47467115266f467521880cc8a56b6edc"
@@ -103,7 +103,7 @@ MAX_LARGE_BATCH_APPROVALS_PER_SERVER = 2_500
 # but it still enables a Mapping row.  Keep the opt-in lane bounded to the
 # same maximum number of deterministic REVIEW updates the sync writer can
 # commit and revalidate in one run.
-MAX_COVERAGE_FALLBACK_ROWS = 5_000
+MAX_COVERAGE_FALLBACK_ROWS = 30_000
 MAX_AI_REVIEW_SHORTLISTS = 200
 MAX_AI_REVIEW_ATTEMPTED_ROWS = 1_000
 MAX_AI_REVIEW_COMPARISONS = 4_000_000
@@ -114,7 +114,7 @@ MIN_AI_REVIEW_FUZZY_SCORE = 55.0
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 _AUTOMATIC_MEMORY_ACTION = "AUTO_EPGSHARE"
 _HUMAN_MEMORY_ACTIONS = frozenset({"MANUAL", "APPROVED"})
-_AI_VERIFIED_V2_GATE = "smart+gemini-high+catalog+programme"
+_AI_VERIFIED_V2_GATE = "smart+grounded-high+catalog+programme"
 _AI_VERIFIED_METHODS = SAFE_REAL_METHODS.union({"dual_rank_consensus"})
 _AUTO_MAP_V1_PROVENANCE_RE = re.compile(
     r"\Aauto-map-v1 method=(?P<method>[a-z0-9][a-z0-9_.+\-]{0,79}); "
@@ -449,6 +449,9 @@ class AutoMatchOutcome:
     coverage_fallback_legacy_server1_applied_rows: int = 0
     coverage_fallback_protected_manual_rows: int = 0
     coverage_fallback_protected_native_rows: int = 0
+    synthetic_upgrade_considered_rows: int = 0
+    synthetic_upgrade_real_rows: int = 0
+    synthetic_upgrade_preserved_rows: int = 0
 
     def summary_fields(self) -> dict[str, Any]:
         return {
@@ -508,6 +511,13 @@ class AutoMatchOutcome:
             ),
             "coverage_fallback_protected_native_rows": (
                 self.coverage_fallback_protected_native_rows
+            ),
+            "synthetic_upgrade_considered_rows": (
+                self.synthetic_upgrade_considered_rows
+            ),
+            "synthetic_upgrade_real_rows": self.synthetic_upgrade_real_rows,
+            "synthetic_upgrade_preserved_rows": (
+                self.synthetic_upgrade_preserved_rows
             ),
             "ai_review_attempted_rows": self.ai_review_attempted_rows,
             "ai_review_fuzzy_comparisons": self.ai_review_comparisons,
@@ -1223,9 +1233,11 @@ def _validate_candidate_rows(
     *,
     new_rows: Sequence[Mapping[str, Any]],
     review_rows: Sequence[Mapping[str, Any]],
+    synthetic_upgrade_rows: Sequence[Mapping[str, Any]],
     existing_rows: Mapping[tuple[str, str], Mapping[str, Any]],
 ) -> tuple[
     dict[tuple[str, str], dict[str, str]],
+    frozenset[tuple[str, str]],
     frozenset[tuple[str, str]],
     frozenset[tuple[str, str]],
 ]:
@@ -1240,6 +1252,7 @@ def _validate_candidate_rows(
     result: dict[tuple[str, str], dict[str, str]] = {}
     new_keys: set[tuple[str, str]] = set()
     review_keys: set[tuple[str, str]] = set()
+    synthetic_upgrade_keys: set[tuple[str, str]] = set()
     for raw in new_rows:
         key = _canonical_key(raw.get("server_id", ""), raw.get("stream_id", ""))
         if key in existing_rows or key in result:
@@ -1269,7 +1282,29 @@ def _validate_candidate_rows(
             )
         result[key] = row
         review_keys.add(key)
-    return result, frozenset(new_keys), frozenset(review_keys)
+    for raw in synthetic_upgrade_rows:
+        key = _canonical_key(raw.get("server_id", ""), raw.get("stream_id", ""))
+        if key in result or key not in existing_rows:
+            raise AutoMatchError(
+                "The synthetic-upgrade set contains a new, duplicate, or unknown identity."
+            )
+        authoritative = {
+            str(column): str(value or "")
+            for column, value in existing_rows[key].items()
+        }
+        row = {str(column): str(value or "") for column, value in raw.items()}
+        if row != authoritative or verified_coverage_fallback_preimage(row) is None:
+            raise AutoMatchError(
+                "A synthetic-upgrade row lacks exact bound fallback provenance."
+            )
+        result[key] = row
+        synthetic_upgrade_keys.add(key)
+    return (
+        result,
+        frozenset(new_keys),
+        frozenset(review_keys),
+        frozenset(synthetic_upgrade_keys),
+    )
 
 
 def _enforce_approval_blast_radius(
@@ -1362,6 +1397,27 @@ def _strict_auto_map_v1_provenance(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _target_bound_automatic_provenance(row: Mapping[str, Any]) -> bool:
+    """Return whether a populated target has exact row-bound provenance.
+
+    Historical ``auto-map-v1`` records contain current build hashes but do not
+    bind the stream identity or target. They cannot distinguish a machine
+    proposal from an operator replacing that proposal later, so they are never
+    sufficient for an automatic destructive replacement.
+    """
+
+    notes = streaming.clean_text(row.get("notes", ""), 2_000)
+    candidate_markets = [
+        match.group("market")
+        for pattern in (_AUTO_MAP_V2_PROVENANCE_RE, _AI_VERIFIED_V2_PROVENANCE_RE)
+        for match in pattern.finditer(notes)
+    ]
+    return any(
+        _automatic_memory_provenance(row, expected_market=market) is not None
+        for market in candidate_markets
+    )
+
+
 def _exact_legacy_server1_migration(row: Mapping[str, Any]) -> bool:
     """Recognize only the fixed Version 1 Server 1 migration preimage."""
 
@@ -1426,6 +1482,86 @@ def _coverage_fallback_prior_target_sha256(row: Mapping[str, Any]) -> str:
     return digest.hexdigest()
 
 
+_COVERAGE_FALLBACK_PROVENANCE_RE = re.compile(
+    r"\Acoverage-fallback-v1 source=local-synthetic; "
+    r"marker=(?P<marker>Synthetic\.[A-Za-z0-9_-]{1,40}\.local); "
+    r"epg_checked_sha256=(?P<source_sha256>[0-9a-f]{64}); "
+    r"prior_target_sha256=(?P<prior_target_sha256>[0-9a-f]{64}); "
+    r"binding_sha256=(?P<binding_sha256>[0-9a-f]{64}) "
+    r"\| auto-map-v1 method=coverage_fallback(?= \| |\Z)"
+)
+
+
+def verified_coverage_fallback_preimage(
+    row: Mapping[str, Any],
+) -> dict[str, str] | None:
+    """Return the exact disabled REVIEW preimage for one bound fallback row.
+
+    Only the target triple was intentionally replaced by the fallback.  Its
+    length-prefixed rollback record plus the row/source binding prove that the
+    row was machine-produced for this exact provider identity.  The parsed
+    marker is used instead of recomputing today's family classification so a
+    valid old row remains upgradeable after classifier evolution.
+    """
+
+    try:
+        action = streaming.clean_text(row.get("action", ""), 40).upper()
+        enabled = _mapping_is_enabled(row, action)
+    except Exception:
+        return None
+    if (
+        action != "AUTO_DUMMY"
+        or not enabled
+        or streaming.clean_text(row.get("source", ""), 40).casefold() != "dummy"
+        or streaming.clean_text(row.get("epg_feed", ""), 80).upper()
+        != "DUMMY_CHANNELS"
+    ):
+        return None
+    notes = streaming.clean_text(row.get("notes", ""), 2_000)
+    if notes.count("coverage-fallback-v1") != 1:
+        return None
+    match = _COVERAGE_FALLBACK_PROVENANCE_RE.match(notes)
+    if match is None:
+        return None
+    fields = match.groupdict()
+    marker = streaming.clean_identifier(row.get("epg_id", ""), 300)
+    if marker != fields["marker"]:
+        return None
+    prior = _parse_coverage_fallback_rollback_record(row.get("reason", ""))
+    if prior is None:
+        return None
+    prior_row = dict(row)
+    for field, value in zip(("source", "epg_feed", "epg_id"), prior, strict=True):
+        prior_row[field] = value
+    prior_target_sha256 = _coverage_fallback_prior_target_sha256(prior_row)
+    if prior_target_sha256 != fields["prior_target_sha256"]:
+        return None
+    try:
+        key = _canonical_key(row.get("server_id", ""), row.get("stream_id", ""))
+        expected_binding = _coverage_fallback_binding_sha256(
+            key=key,
+            row=row,
+            marker=marker,
+            source_sha256=fields["source_sha256"],
+            prior_target_sha256=prior_target_sha256,
+        )
+    except Exception:
+        return None
+    if expected_binding != fields["binding_sha256"]:
+        return None
+    preimage = {str(column): str(value or "") for column, value in row.items()}
+    preimage.update(
+        {
+            "enabled": "FALSE",
+            "action": "REVIEW",
+            "source": prior[0],
+            "epg_feed": prior[1],
+            "epg_id": prior[2],
+        }
+    )
+    return preimage
+
+
 def _coverage_fallback_classification(
     *,
     key: tuple[str, str],
@@ -1458,11 +1594,12 @@ def _coverage_fallback_classification(
         return "blank"
     source = streaming.clean_text(original.get("source", ""), 40).casefold()
     # Rows reaching this boundary through the normal sync selector with a
-    # Server 2/3 panel source are exact current native candidates. They must
-    # remain available to the native schedule verifier and are never replaced.
+    # Server 2/3 panel source are exact current native candidates. They remain
+    # protected unless the native verifier reports a definitive miss for the
+    # exact row later in the terminal sync lane.
     if key[0] in {"server_2", "server_3"} and source == "panel":
         return "protected_native"
-    if _strict_auto_map_v1_provenance(original):
+    if _target_bound_automatic_provenance(original):
         return "machine_prefilled"
     if _exact_legacy_server1_migration(original):
         return "legacy_server1"
@@ -1477,7 +1614,12 @@ def _coverage_fallback_candidate(
     proposal: Any,
     quarantined_keys: frozenset[tuple[str, str]],
 ) -> bool:
-    """Return whether a row may receive the opt-in local synthetic guide."""
+    """Return whether a row may receive an inline local synthetic guide.
+
+    Current Server 2/3 native-panel candidates deliberately fail this generic
+    predicate. They may enter the terminal fallback lane only when the sync
+    layer supplies an exact per-key definitive native schedule/name miss.
+    """
 
     return _coverage_fallback_classification(
         key=key,
@@ -1565,6 +1707,167 @@ def _apply_coverage_fallback(
         raise AutoMatchError(
             "A coverage fallback failed to retain its exact rollback target."
         )
+
+
+def terminal_coverage_fallback_updates(
+    *,
+    original_rows: Sequence[Mapping[str, Any]],
+    matcher_rows: Sequence[Mapping[str, Any]],
+    quarantined_keys: Iterable[tuple[str, str]],
+    excluded_keys: Iterable[tuple[str, str]] = (),
+    definitive_native_miss_keys: Iterable[tuple[str, str]] = (),
+    source_sha256: str,
+    limit: int,
+    rotation: int = 0,
+) -> tuple[tuple[dict[str, str], ...], dict[str, int]]:
+    """Build the terminal local-synthetic lane after every real verifier.
+
+    The caller supplies the immutable REVIEW preimages and the matcher results.
+    Only rows which still remain disabled REVIEW are eligible.  Exact current
+    Server 2/3 panel candidates are included only when the sync layer supplies
+    their exact identities in ``definitive_native_miss_keys`` after a current
+    native XMLTV source definitively fails that row's schedule or name gate.
+    An unavailable, disabled, or inconclusive native verifier therefore cannot
+    replace an operator-visible native candidate with a synthetic schedule.
+    """
+
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 0 <= limit <= MAX_COVERAGE_FALLBACK_ROWS
+    ):
+        raise AutoMatchError(
+            "Terminal coverage fallback limit must be an integer from 0 to "
+            f"{MAX_COVERAGE_FALLBACK_ROWS:,}."
+        )
+    if (
+        isinstance(rotation, bool)
+        or not isinstance(rotation, int)
+        or rotation < 0
+    ):
+        raise AutoMatchError("Terminal coverage fallback rotation is invalid.")
+    source_hash = streaming.clean_identifier(source_sha256, 64).casefold()
+    if _SHA256_RE.fullmatch(source_hash) is None:
+        raise AutoMatchError("Terminal coverage fallback source hash is invalid.")
+    try:
+        quarantined = frozenset(
+            _canonical_key(server_id, stream_id)
+            for server_id, stream_id in quarantined_keys
+        )
+        excluded = frozenset(
+            _canonical_key(server_id, stream_id)
+            for server_id, stream_id in excluded_keys
+        )
+        definitive_native_misses = frozenset(
+            _canonical_key(server_id, stream_id)
+            for server_id, stream_id in definitive_native_miss_keys
+        )
+    except (TypeError, ValueError) as exc:
+        raise AutoMatchError(
+            "Terminal coverage fallback identity sets are invalid."
+        ) from exc
+
+    originals: dict[tuple[str, str], dict[str, str]] = {}
+    results: dict[tuple[str, str], dict[str, str]] = {}
+    for raw in original_rows:
+        key = _canonical_key(raw.get("server_id", ""), raw.get("stream_id", ""))
+        if key in originals:
+            raise AutoMatchError(
+                "Terminal coverage fallback originals contain a duplicate identity."
+            )
+        originals[key] = {
+            str(column): str(value or "") for column, value in raw.items()
+        }
+    for raw in matcher_rows:
+        key = _canonical_key(raw.get("server_id", ""), raw.get("stream_id", ""))
+        if key in results:
+            raise AutoMatchError(
+                "Terminal coverage fallback results contain a duplicate identity."
+            )
+        results[key] = {
+            str(column): str(value or "") for column, value in raw.items()
+        }
+    if set(originals) != set(results):
+        raise AutoMatchError(
+            "Terminal coverage fallback did not receive matching identity sets."
+        )
+    if not definitive_native_misses.issubset(originals):
+        raise AutoMatchError(
+            "Terminal coverage fallback native misses contain an unknown identity."
+        )
+
+    classifications = {
+        key: _coverage_fallback_classification(
+            key=key,
+            original=originals[key],
+            patched=results[key],
+            proposal=None,
+            quarantined_keys=quarantined,
+        )
+        for key in originals
+    }
+    invalid_native_misses = {
+        key
+        for key in definitive_native_misses
+        if classifications.get(key) != "protected_native"
+    }
+    if invalid_native_misses:
+        raise AutoMatchError(
+            "Terminal coverage fallback native misses are not exact protected "
+            "native candidates."
+        )
+    eligible_classes = {"blank", "machine_prefilled", "legacy_server1"}
+    candidate_keys = frozenset(
+        key
+        for key, classification in classifications.items()
+        if (
+            classification in eligible_classes
+            or (
+                classification == "protected_native"
+                and key in definitive_native_misses
+            )
+        )
+        and key not in excluded
+    )
+    ordered_keys = _rotated_round_robin_review_keys(
+        candidate_keys, rotation=rotation
+    )
+    selected_keys = ordered_keys[:limit]
+    updates: list[dict[str, str]] = []
+    for key in selected_keys:
+        row = dict(results[key])
+        _apply_coverage_fallback(
+            key=key,
+            original=originals[key],
+            patched=row,
+            source_sha256=source_hash,
+        )
+        updates.append(row)
+    summary = {
+        "terminal_coverage_fallback_candidate_rows": len(candidate_keys),
+        "terminal_coverage_fallback_selected_rows": len(updates),
+        "terminal_coverage_fallback_deferred_rows": (
+            len(candidate_keys) - len(updates)
+        ),
+        "terminal_coverage_fallback_protected_manual_rows": sum(
+            1 for value in classifications.values() if value == "protected_manual"
+        ),
+        "terminal_coverage_fallback_native_candidate_rows": sum(
+            1
+            for key, value in classifications.items()
+            if value == "protected_native"
+            and key in definitive_native_misses
+            and key not in excluded
+        ),
+        "terminal_coverage_fallback_native_inconclusive_rows": sum(
+            1
+            for key, value in classifications.items()
+            if value == "protected_native"
+            and key not in definitive_native_misses
+            and key not in excluded
+        ),
+    }
+    return tuple(updates), summary
 
 
 def _previous_ai_review_keys(
@@ -2136,6 +2439,7 @@ _AI_VERIFIED_V2_PROVENANCE_RE = re.compile(
     r"text_file_sha256=(?P<text_file_sha256>[0-9a-f]{64}); "
     r"text_fingerprint_sha256=(?P<text_fingerprint_sha256>[0-9a-f]{64}); "
     r"text_generated=(?P<text_generated>[0-9]{12}(?:[0-9]{2})?); "
+    r"(?:grounding_sha256=(?P<grounding_sha256>[0-9a-f]{64}); )?"
     r"binding_sha256=(?P<binding_sha256>[0-9a-f]{64})(?= \| |\Z)"
 )
 
@@ -2160,6 +2464,7 @@ def _ai_verified_v2_binding(
     text_catalog_file_sha256: str,
     text_catalog_fingerprint_sha256: str,
     text_catalog_generated_token: str,
+    grounding_evidence_sha256: str = "",
 ) -> str:
     """Bind a future dual-gate AI approval to one exact private Sheet row.
 
@@ -2184,6 +2489,9 @@ def _ai_verified_v2_binding(
     text_generated = streaming.clean_identifier(
         text_catalog_generated_token, 14
     )
+    grounding_hash = streaming.clean_identifier(
+        grounding_evidence_sha256, 64
+    ).casefold()
     epg_id = streaming.clean_identifier(row.get("epg_id", ""), 300)
     if (
         method not in _AI_VERIFIED_METHODS
@@ -2193,6 +2501,7 @@ def _ai_verified_v2_binding(
         or _SHA256_RE.fullmatch(text_file_hash) is None
         or _SHA256_RE.fullmatch(text_fingerprint_hash) is None
         or re.fullmatch(r"[0-9]{12}(?:[0-9]{2})?", text_generated) is None
+        or (grounding_hash and _SHA256_RE.fullmatch(grounding_hash) is None)
     ):
         raise AutoMatchError("The ai-verified-v2 provenance fields are invalid.")
     _text_catalog_generation_epoch(text_generated)
@@ -2210,6 +2519,7 @@ def _ai_verified_v2_binding(
         text_file_hash,
         text_fingerprint_hash,
         text_generated,
+        grounding_hash,
         STRICT_MATCHER_VERSION,
         STRICT_MATCHER_BUILD_ID,
         STRICT_MATCHER_SOURCE_SHA256,
@@ -2226,12 +2536,13 @@ def _ai_verified_v2_provenance_note(
     text_catalog_file_sha256: str,
     text_catalog_fingerprint_sha256: str,
     text_catalog_generated_token: str,
+    grounding_evidence_sha256: str = "",
 ) -> str:
-    """Return the exact compact note format reserved for a future v2 gate.
+    """Return the exact compact note format for the active grounded v2 record.
 
-    The future writer must call this only after the deterministic Smart-Rules
-    target and Gemini HIGH target are identical and the exact catalog,
-    programme, and market checks pass. Merely typing ``ai-verified-v2`` into a
+    The writer calls this only after the deterministic Smart-Rules target and
+    grounded-AI HIGH target are identical and the exact catalog, programme,
+    market, and evidence checks pass. Merely typing ``ai-verified-v2`` into a
     Sheet note is intentionally insufficient for learned memory.
     """
 
@@ -2247,6 +2558,9 @@ def _ai_verified_v2_provenance_note(
     text_generated = streaming.clean_identifier(
         text_catalog_generated_token, 14
     )
+    grounding_hash = streaming.clean_identifier(
+        grounding_evidence_sha256, 64
+    ).casefold()
     binding = _ai_verified_v2_binding(
         row,
         match_method=method,
@@ -2255,6 +2569,10 @@ def _ai_verified_v2_provenance_note(
         text_catalog_file_sha256=text_file_hash,
         text_catalog_fingerprint_sha256=text_fingerprint_hash,
         text_catalog_generated_token=text_generated,
+        grounding_evidence_sha256=grounding_hash,
+    )
+    grounding_segment = (
+        f"grounding_sha256={grounding_hash}; " if grounding_hash else ""
     )
     return (
         f"ai-verified-v2 gate={_AI_VERIFIED_V2_GATE}; "
@@ -2263,6 +2581,7 @@ def _ai_verified_v2_provenance_note(
         f"text_file_sha256={text_file_hash}; "
         f"text_fingerprint_sha256={text_fingerprint_hash}; "
         f"text_generated={text_generated}; "
+        f"{grounding_segment}"
         f"binding_sha256={binding}"
     )
 
@@ -2316,6 +2635,7 @@ def _automatic_memory_provenance(
         fields = ai_matches[0].groupdict()
         if (
             fields["gate"] == _AI_VERIFIED_V2_GATE
+            and bool(fields.get("grounding_sha256"))
             and fields["method"] in _AI_VERIFIED_METHODS
             and _matcher_market_code(fields["market"]) == normalized_market
             and _SHA256_RE.fullmatch(fields["source_sha256"]) is not None
@@ -2331,6 +2651,7 @@ def _automatic_memory_provenance(
                         fields["text_fingerprint_sha256"]
                     ),
                     text_catalog_generated_token=fields["text_generated"],
+                    grounding_evidence_sha256=(fields.get("grounding_sha256") or ""),
                 )
             except (AutoMatchError, streaming.BuildError, ValueError):
                 expected_binding = ""
@@ -2631,6 +2952,7 @@ def auto_match_and_spool(
     inventories: Sequence[Any],
     new_rows: Sequence[Mapping[str, Any]],
     review_rows: Sequence[Mapping[str, Any]] = (),
+    synthetic_upgrade_rows: Sequence[Mapping[str, Any]] = (),
     quarantined_keys: Iterable[tuple[str, str]] = (),
     all_source_file: Path,
     all_source_catalog_file: Path,
@@ -2640,6 +2962,7 @@ def auto_match_and_spool(
     ai_review_rotation: int | None = None,
     coverage_fallback_limit: int = 0,
     include_new_coverage_fallback: bool = True,
+    defer_review_coverage_fallback: bool = False,
     minimum_unique_channels: int = MINIMUM_CORROBORATED_CATALOG_IDS,
     runtime_factory: MatcherRuntimeFactory = prepare_matcher_runtime,
 ) -> AutoMatchOutcome:
@@ -2654,6 +2977,10 @@ def auto_match_and_spool(
     if not isinstance(include_new_coverage_fallback, bool):
         raise AutoMatchError(
             "include_new_coverage_fallback must be exactly true or false."
+        )
+    if not isinstance(defer_review_coverage_fallback, bool):
+        raise AutoMatchError(
+            "defer_review_coverage_fallback must be exactly true or false."
         )
     if (
         isinstance(coverage_fallback_limit, bool)
@@ -2733,9 +3060,15 @@ def auto_match_and_spool(
         )
     except (TypeError, ValueError) as exc:
         raise AutoMatchError("The quarantined mapping identity set is invalid.") from exc
-    rows_by_key, new_keys, review_keys = _validate_candidate_rows(
+    (
+        rows_by_key,
+        new_keys,
+        review_keys,
+        synthetic_upgrade_keys,
+    ) = _validate_candidate_rows(
         new_rows=new_rows,
         review_rows=review_rows,
+        synthetic_upgrade_rows=synthetic_upgrade_rows,
         existing_rows=existing_rows_by_key,
     )
     fixed_ids = active_combined_source_ids(mapping_rows)
@@ -3097,6 +3430,19 @@ def auto_match_and_spool(
                 patch = final.sheet_patch(existing_notes=original.get("notes", ""))
                 row = dict(original)
                 row.update(patch)
+                if key in synthetic_upgrade_keys and not (
+                    final.approved
+                    and streaming.clean_text(row.get("action", ""), 40).upper()
+                    == "AUTO_EPGSHARE"
+                    and streaming.clean_text(row.get("source", ""), 40).casefold()
+                    == "epgshare01"
+                ):
+                    # An authenticated active fallback is already a truthful
+                    # terminal state.  A failed/placeholder/heading proposal
+                    # must preserve it byte-for-byte; this lane only upgrades
+                    # to a newly reverified real EPGShare schedule.
+                    patched_rows.append(dict(original))
+                    continue
                 if final.approved:
                     action = row.get("action")
                     if action == "AUTO_EPGSHARE":
@@ -3160,7 +3506,11 @@ def auto_match_and_spool(
                     key
                     for key, classification in fallback_classifications.items()
                     if classification
-                    in {"blank", "machine_prefilled", "legacy_server1"}
+                    in {
+                        "blank",
+                        "machine_prefilled",
+                        "legacy_server1",
+                    }
                 )
                 coverage_fallback_suppressed_new_keys = (
                     frozenset()
@@ -3202,6 +3552,10 @@ def auto_match_and_spool(
                 selectable = candidate_keys.difference(
                     coverage_fallback_ai_deferred_keys
                 )
+                if defer_review_coverage_fallback:
+                    # Production sync performs the REVIEW synthetic lane only
+                    # after deterministic real, native, and grounded-AI gates.
+                    selectable = selectable.difference(review_keys)
                 rotation = now_epoch // 86400
                 ordered_fallback_keys = _interleave_coverage_fallback_lanes(
                     _rotated_round_robin_review_keys(
@@ -3506,6 +3860,18 @@ def auto_match_and_spool(
         coverage_fallback_protected_native_rows=len(
             coverage_fallback_protected_native_keys
         ),
+        synthetic_upgrade_considered_rows=len(synthetic_upgrade_keys),
+        synthetic_upgrade_real_rows=sum(
+            1
+            for key in synthetic_upgrade_keys
+            if patched_by_key[key].get("action") == "AUTO_EPGSHARE"
+            and patched_by_key[key].get("enabled") == "TRUE"
+        ),
+        synthetic_upgrade_preserved_rows=sum(
+            1
+            for key in synthetic_upgrade_keys
+            if patched_by_key[key] == rows_by_key[key]
+        ),
     )
 
 
@@ -3523,5 +3889,7 @@ __all__ = [
     "VerificationSemanticsEvidence",
     "active_combined_source_ids",
     "auto_match_and_spool",
+    "terminal_coverage_fallback_updates",
+    "verified_coverage_fallback_preimage",
     "prepare_matcher_runtime",
 ]

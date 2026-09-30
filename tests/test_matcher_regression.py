@@ -29,7 +29,11 @@ BACKLOG_ANALYZER_WORKFLOW_PATH = (
 )
 NATIVE_REVIEW_PATH = REPO_ROOT / "scripts" / "native_epg_review.py"
 AI_REVIEW_PATH = REPO_ROOT / "scripts" / "ai_review_gemini.py"
+GROUNDED_AI_REVIEW_PATH = REPO_ROOT / "scripts" / "ai_grounded_search.py"
 AI_REVIEW_POLICY_PATH = REPO_ROOT / "scripts" / "ai_review_policy.py"
+AUTONOMOUS_DECISION_BASE_PATH = (
+    REPO_ROOT / "scripts" / "build_autonomous_decision_base.py"
+)
 EPG_CATALOG_STREAM_PATH = REPO_ROOT / "scripts" / "epg_catalog_stream.py"
 EPG_SELECTION_SPOOL_PATH = REPO_ROOT / "scripts" / "epg_selection_spool.py"
 CHANNEL_INVENTORY_RUNNER_PATH = (
@@ -160,7 +164,7 @@ def catalog_for_all_self_tests(engine):
 class MatcherIntegrityTests(unittest.TestCase):
     def test_integrity_manifest_hashes(self) -> None:
         manifest = json.loads((REPO_ROOT / "MATCHER_INTEGRITY.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["schemaVersion"], 7)
+        self.assertEqual(manifest["schemaVersion"], 8)
         self.assertEqual(manifest["matcherVersion"], "8.4")
         self.assertEqual(manifest["builderVersion"], "7.1")
         self.assertEqual(manifest["streamingPipelineVersion"], "1.0")
@@ -185,6 +189,15 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertIn("previously unseen", decision_boundary)
         self.assertIn("disabled REVIEW", decision_boundary)
         self.assertIn("Gemini", decision_boundary)
+        self.assertIn("Google Search", decision_boundary)
+        self.assertIn("two independent authorities", decision_boundary)
+        self.assertIn("authenticated synthetic", decision_boundary)
+        self.assertIn("terminal local-synthetic fallback", decision_boundary)
+        self.assertIn("guideCoverage", decision_boundary)
+        self.assertIn("real and synthetic", decision_boundary)
+        self.assertIn("offline hash-bound autonomous decision ledger", decision_boundary)
+        self.assertIn("30,000", decision_boundary)
+        self.assertIn("EPG_USE_GEMINI_AI=false", decision_boundary)
         self.assertIn("two different servers", decision_boundary)
         self.assertIn("present and unchanged", decision_boundary)
         self.assertIn("provider drift", decision_boundary)
@@ -198,6 +211,9 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertIn("terminal Sheet", decision_boundary)
         self.assertIn("exact numeric-stream and exact-name M3U join", decision_boundary)
         self.assertIn("every KEEP_PANEL write", decision_boundary)
+        self.assertNotIn("scheduled cap defaults to zero", decision_boundary)
+        self.assertNotIn("Gemini is explicit opt-in", decision_boundary)
+        self.assertNotIn("every other result stays disabled as REVIEW", decision_boundary)
         self.assertNotIn("published Google Sheet CSV", decision_boundary)
         self.assertEqual(manifest["legacyEngineSha256"], hashlib.sha256(ENGINE_PATH.read_bytes()).hexdigest())
         self.assertEqual(manifest["contextualV8Sha256"], hashlib.sha256(V8_PATH.read_bytes()).hexdigest())
@@ -237,8 +253,16 @@ class MatcherIntegrityTests(unittest.TestCase):
             hashlib.sha256(AI_REVIEW_PATH.read_bytes()).hexdigest(),
         )
         self.assertEqual(
+            manifest["groundedGeminiReviewSha256"],
+            hashlib.sha256(GROUNDED_AI_REVIEW_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
             manifest["aiReviewPolicySha256"],
             hashlib.sha256(AI_REVIEW_POLICY_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["autonomousDecisionBaseSha256"],
+            hashlib.sha256(AUTONOMOUS_DECISION_BASE_PATH.read_bytes()).hexdigest(),
         )
         self.assertEqual(
             manifest["epgCatalogStreamSha256"],

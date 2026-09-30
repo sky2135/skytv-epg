@@ -2,10 +2,11 @@ name: 1 - Sync channels to Google Sheet
 run-name: "Channel sync (${{ github.event_name }} #${{ github.run_number }})"
 
 on:
-  # Analyze the REVIEW backlog before the daily 04:37 EPG build. Existing-
-  # REVIEW persistence remains separately capped and defaults to zero. The
-  # shared concurrency group prevents this job and Workflow 2 from touching
-  # the private Sheet at the same time if a run takes longer than expected.
+  # Analyze the REVIEW backlog before the daily 04:37 EPG build. Scheduled
+  # runs use bounded autonomous apply/fallback caps; manual dispatch remains
+  # separately controlled. The shared concurrency group prevents this job and
+  # Workflow 2 from touching the private Sheet at the same time if a run takes
+  # longer than expected.
   schedule:
     - cron: "17 2 * * *"
       timezone: "America/Toronto"
@@ -64,6 +65,7 @@ on:
           - "500"
           - "2500"
           - "5000"
+          - "30000"
       coverage_fallback_limit:
         description: "Maximum local synthetic proposals across new/REVIEW rows (0 = off)"
         required: true
@@ -74,6 +76,7 @@ on:
           - "500"
           - "2500"
           - "5000"
+          - "30000"
 
 # This workflow never commits or pushes. Its only optional writes are
 # verified additions or bounded REVIEW-row updates in the Mappings tab, plus
@@ -105,13 +108,13 @@ env:
   REVIEW_RECHECK_SERVER: >-
     ${{ github.event_name == 'schedule' && 'all' || inputs.recheck_server }}
   USE_GEMINI_AI: >-
-    ${{ github.event_name == 'schedule' && (vars.EPG_USE_GEMINI_AI == 'true' && 'true' || 'false') || inputs.use_gemini_ai }}
+    ${{ github.event_name == 'schedule' && (vars.EPG_USE_GEMINI_AI != 'false' && secrets.GEMINI_API_KEY != '' && 'true' || 'false') || inputs.use_gemini_ai }}
   AI_REVIEW_LIMIT: >-
     ${{ github.event_name == 'schedule' && '200' || inputs.ai_review_limit }}
   REVIEW_APPLY_LIMIT: >-
-    ${{ github.event_name == 'schedule' && (vars.EPG_REVIEW_APPLY_LIMIT || '0') || inputs.review_apply_limit }}
+    ${{ github.event_name == 'schedule' && (vars.EPG_REVIEW_APPLY_LIMIT || '30000') || inputs.review_apply_limit }}
   COVERAGE_FALLBACK_LIMIT: >-
-    ${{ github.event_name == 'schedule' && (vars.EPG_COVERAGE_FALLBACK_LIMIT || '0') || inputs.coverage_fallback_limit }}
+    ${{ github.event_name == 'schedule' && (vars.EPG_COVERAGE_FALLBACK_LIMIT || '30000') || inputs.coverage_fallback_limit }}
   EPG_ALL_SOURCE_URL: >-
     https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz
   EPG_ALL_CATALOG_URL: >-
@@ -224,9 +227,12 @@ jobs:
                   "ai_review_limit must be 10, 25, 50, 100, or 200."
               )
           review_apply_limit = required("REVIEW_APPLY_LIMIT")
-          if review_apply_limit not in {"0", "25", "100", "500", "2500", "5000"}:
+          if review_apply_limit not in {
+              "0", "25", "100", "500", "2500", "5000", "30000"
+          }:
               raise SystemExit(
-                  "review_apply_limit must be 0, 25, 100, 500, 2500, or 5000."
+                  "review_apply_limit must be 0, 25, 100, 500, 2500, 5000, "
+                  "or 30000."
               )
 
           if use_gemini == "true" and review_apply_limit != "0":
@@ -243,9 +249,10 @@ jobs:
                   )
 
           fallback_limit = required("COVERAGE_FALLBACK_LIMIT")
-          if fallback_limit not in {"0", "500", "2500", "5000"}:
+          if fallback_limit not in {"0", "500", "2500", "5000", "30000"}:
               raise SystemExit(
-                  "coverage_fallback_limit must be 0, 500, 2500, or 5000."
+                  "coverage_fallback_limit must be 0, 500, 2500, 5000, or "
+                  "30000."
               )
 
           source = urlsplit(required("EPG_ALL_SOURCE_URL"))
@@ -336,8 +343,11 @@ jobs:
             tests.test_epg_catalog_stream \
             tests.test_epg_spool_reuse \
             tests.test_ai_review_gemini \
+            tests.test_ai_grounded_search \
             tests.test_ai_review_policy \
             tests.test_native_epg_review \
+            tests.test_autonomous_decision_base \
+            tests.test_dstv_supersport_alias \
             tests.test_matcher_regression \
             -v
 

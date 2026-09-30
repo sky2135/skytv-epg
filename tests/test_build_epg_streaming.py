@@ -2253,6 +2253,39 @@ class SyntheticGuideTests(unittest.TestCase):
                     expected,
                 )
 
+    def test_generic_synthetic_title_discloses_missing_schedule(self) -> None:
+        generic = self._dummy_row(
+            stream_id="generic",
+            channel_name="DSTV Super Motorsport FHD",
+            category_name="Sports Africa",
+            epg_id="Synthetic.Channel.local",
+        )
+        self.assertEqual(
+            runner.synthetic_programme_classification(generic),
+            "scheduleUnavailable",
+        )
+        self.assertEqual(
+            runner.synthetic_programme_title(generic, reference_epoch=FIXED_NOW),
+            "Schedule unavailable — DSTV Super Motorsport",
+        )
+
+        continuous = self._dummy_row(
+            stream_id="continuous",
+            channel_name="Motorsport Archive HD",
+            category_name="Sports 24/7",
+            epg_id="24.7.Dummy.us",
+        )
+        self.assertEqual(
+            runner.synthetic_programme_classification(continuous),
+            "continuous24x7",
+        )
+        self.assertEqual(
+            runner.synthetic_programme_title(
+                continuous, reference_epoch=FIXED_NOW
+            ),
+            "Motorsport Archive",
+        )
+
     def test_event_time_formatting_is_eastern_and_dst_aware(self) -> None:
         row = self._dummy_row(
             stream_id="summer-event",
@@ -2666,6 +2699,151 @@ class SyntheticGuideTests(unittest.TestCase):
                 connection.close()
 
 
+class GuideCoverageTests(unittest.TestCase):
+    def _rows(self) -> list[runner.MappingRow]:
+        epgshare = _mapping_row(
+            server_id="server_2",
+            stream_id="epgshare",
+            channel_name="EPGShare Channel",
+            category_name="General",
+            epg_id="EPGShare.test",
+        )
+        panel = _mapping_row(
+            server_id="server_2",
+            stream_id="panel",
+            channel_name="Native Channel",
+            category_name="General",
+            epg_id="Panel.test",
+            source="panel",
+            epg_feed="server xmltv.php",
+        )
+        synthetic = _mapping_row(
+            server_id="server_2",
+            stream_id="synthetic",
+            channel_name="Generic Local Channel",
+            category_name="General",
+            epg_id="Synthetic.Channel.local",
+            source="dummy",
+            epg_feed="DUMMY_CHANNELS",
+        )
+        synthetic["action"] = "AUTO_DUMMY"
+        ignored = _mapping_row(
+            server_id="server_2",
+            stream_id="ignored",
+            channel_name="Category Heading",
+            category_name="Decoration",
+            epg_id="Ignored.test",
+        )
+        ignored.update({"action": "IGNORE", "enabled": "FALSE"})
+        quarantined = _mapping_row(
+            server_id="server_2",
+            stream_id="quarantined",
+            channel_name="Quarantined Channel",
+            category_name="General",
+            epg_id="Quarantined.test",
+        )
+        quarantined.update({"action": "REVIEW", "enabled": "FALSE"})
+        disabled_review = _mapping_row(
+            server_id="server_2",
+            stream_id="disabled-review",
+            channel_name="Disabled Review Channel",
+            category_name="General",
+            epg_id="Disabled.test",
+        )
+        disabled_review.update({"action": "REVIEW", "enabled": "FALSE"})
+        missing = _mapping_row(
+            server_id="server_2",
+            stream_id="missing",
+            channel_name="Mapped Without Programmes",
+            category_name="General",
+            epg_id="Missing.test",
+        )
+        parsed = runner.parse_mapping_csv(
+            _mapping_bytes(
+                [
+                    epgshare,
+                    panel,
+                    synthetic,
+                    ignored,
+                    quarantined,
+                    disabled_review,
+                    missing,
+                ]
+            ),
+            {"server_2"},
+        )
+        return [
+            replace(row, reason=runner.EFFECTIVE_QUARANTINE_REASON)
+            if row.stream_id == "quarantined"
+            else row
+            for row in parsed
+        ]
+
+    def test_all_loaded_rows_are_reconciled_across_three_denominators(self) -> None:
+        coverage = runner.build_guide_coverage(
+            self._rows(),
+            {"epgshare", "panel", "synthetic"},
+            scope="server_2",
+        )
+        self.assertEqual(
+            coverage["denominators"],
+            {
+                "literalLoadedMappingRows": 7,
+                "channelRowsExcludingIgnoredNonChannels": 6,
+                "actionableNonQuarantinedRows": 4,
+            },
+        )
+        self.assertEqual(
+            coverage["counts"],
+            {
+                "verifiedEpgShareReal": 1,
+                "nativePanelReal": 1,
+                "localSynthetic": 1,
+                "realGuide": 2,
+                "usefulGuide": 3,
+                "ignoredNonChannel": 1,
+                "uncovered": 3,
+                "quarantinedReview": 1,
+                "disabledReview": 1,
+                "otherUncovered": 1,
+                "actionableUncovered": 1,
+            },
+        )
+        self.assertEqual(
+            coverage["percentages"]["ofLiteralLoadedMappingRows"][
+                "usefulGuide"
+            ],
+            42.86,
+        )
+        self.assertEqual(
+            coverage["percentages"][
+                "ofChannelRowsExcludingIgnoredNonChannels"
+            ]["usefulGuide"],
+            50.0,
+        )
+        self.assertEqual(
+            coverage["percentages"]["ofActionableNonQuarantinedRows"][
+                "usefulGuide"
+            ],
+            75.0,
+        )
+        self.assertEqual(
+            coverage["localSyntheticClasses"]["scheduleUnavailable"][
+                "count"
+            ],
+            1,
+        )
+        self.assertTrue(all(coverage["reconciliation"].values()))
+
+    def test_programme_stream_absent_from_mapping_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            runner.BuildError, "programme streams absent"
+        ):
+            runner.build_guide_coverage(
+                self._rows(), {"not-loaded"}, scope="server_2"
+            )
+
+
 class StreamingBuildIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -2877,6 +3055,35 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
             server_1_manifest["sourceProvenance"]["synthetic"]["inputMode"],
             "generated",
         )
+        server_1_coverage = server_1_manifest["guideCoverage"]
+        self.assertEqual(
+            server_1_coverage["denominators"],
+            {
+                "literalLoadedMappingRows": 5,
+                "channelRowsExcludingIgnoredNonChannels": 5,
+                "actionableNonQuarantinedRows": 2,
+            },
+        )
+        self.assertEqual(
+            server_1_coverage["counts"]["verifiedEpgShareReal"], 1
+        )
+        self.assertEqual(server_1_coverage["counts"]["nativePanelReal"], 0)
+        self.assertEqual(server_1_coverage["counts"]["localSynthetic"], 1)
+        self.assertEqual(server_1_coverage["counts"]["usefulGuide"], 2)
+        self.assertEqual(server_1_coverage["counts"]["uncovered"], 3)
+        self.assertEqual(server_1_coverage["counts"]["disabledReview"], 1)
+        self.assertEqual(server_1_coverage["counts"]["otherUncovered"], 2)
+        self.assertEqual(
+            server_1_coverage["percentages"][
+                "ofLiteralLoadedMappingRows"
+            ]["usefulGuide"],
+            40.0,
+        )
+        self.assertEqual(
+            server_1_coverage["localSyntheticClasses"]["movie"]["count"],
+            1,
+        )
+        self.assertTrue(all(server_1_coverage["reconciliation"].values()))
         server_1_validation = json.loads(
             (
                 public / "reports/server_1/server_1_validation.json"
@@ -2886,6 +3093,27 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
 
         self.assertEqual(server_2_manifest["sourcePolicy"], "MAPPING_SELECTED")
         self.assertTrue(server_2_manifest["nativePanelXmltvUsed"])
+        self.assertEqual(
+            server_2_manifest["guideCoverage"]["counts"]["nativePanelReal"],
+            1,
+        )
+
+        app_manifest = json.loads(
+            (public / "EPG/server_1_epg_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(app_manifest["guideCoverage"], server_1_coverage)
+        global_index = json.loads(
+            (public / "epg/index.json").read_text(encoding="utf-8")
+        )
+        global_coverage = global_index["guideCoverage"]
+        self.assertEqual(
+            global_coverage["denominators"]["literalLoadedMappingRows"], 6
+        )
+        self.assertEqual(global_coverage["counts"]["usefulGuide"], 3)
+        self.assertEqual(global_coverage["counts"]["nativePanelReal"], 1)
+        self.assertTrue(all(global_coverage["reconciliation"].values()))
 
         with gzip.open(
             public / "epg/server_1_tivimate.xml.gz", "rt", encoding="utf-8"

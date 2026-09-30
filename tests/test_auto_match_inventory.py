@@ -192,6 +192,19 @@ def current_auto_map_v1_note(
     )
 
 
+def target_bound_auto_map_v2_note(row: dict[str, str]) -> str:
+    return integration.automatic_mapping_provenance_note(
+        server_id=row["server_id"],
+        stream_id=row["stream_id"],
+        channel_name=row["channel_name"],
+        category_name=row["category_name"],
+        epg_id=row["epg_id"],
+        match_method="canonical_identity",
+        market="US",
+        source_sha256="c" * 64,
+    )
+
+
 class FakeEngine:
     def build_inventory_profiles_v8(self, channels, category_names):
         return (
@@ -639,7 +652,7 @@ class AutoMatchInventoryTests(unittest.TestCase):
             ("server_2", "review-1"),
         )
 
-    def test_coverage_fallback_replaces_only_strict_machine_prefill_with_rollback(self) -> None:
+    def test_coverage_fallback_replaces_only_target_bound_machine_prefill_with_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             source = base / "all.xml.gz"
@@ -653,7 +666,7 @@ class AutoMatchInventoryTests(unittest.TestCase):
                 channel_name="US: Machine Candidate",
                 epg_id="Old.Provisional.us2",
             )
-            original["notes"] = current_auto_map_v1_note()
+            original["notes"] = target_bound_auto_map_v2_note(original)
             prior_target = (
                 original["source"],
                 original["epg_feed"],
@@ -698,7 +711,7 @@ class AutoMatchInventoryTests(unittest.TestCase):
             self.assertEqual(outcome.coverage_fallback_protected_manual_rows, 0)
             self.assertEqual(outcome.coverage_fallback_protected_native_rows, 0)
 
-    def test_coverage_fallback_never_overwrites_prefilled_or_quarantined_row(self) -> None:
+    def test_coverage_fallback_requires_exact_definitive_native_failure(self) -> None:
         proposal = SimpleNamespace(matcher_action="REVIEW")
         blank = mapping_row(
             server_id="server_2",
@@ -728,7 +741,9 @@ class AutoMatchInventoryTests(unittest.TestCase):
             )
         )
         machine_prefilled = dict(prefilled)
-        machine_prefilled["notes"] = current_auto_map_v1_note()
+        machine_prefilled["notes"] = target_bound_auto_map_v2_note(
+            machine_prefilled
+        )
         self.assertTrue(
             integration._coverage_fallback_candidate(
                 key=("server_2", "review-1"),
@@ -739,13 +754,39 @@ class AutoMatchInventoryTests(unittest.TestCase):
             )
         )
         forged_prefill = dict(machine_prefilled)
-        forged_prefill["notes"] = forged_prefill["notes"].replace(
-            STRICT_MATCHER_SOURCE_SHA256, "0" * 64
+        note_prefix, bound_suffix = forged_prefill["notes"].split(
+            "binding_sha256=", 1
+        )
+        _binding, marker_suffix = bound_suffix.split(" | ", 1)
+        forged_prefill["notes"] = (
+            f"{note_prefix}binding_sha256={'0' * 64} | {marker_suffix}"
         )
         self.assertFalse(
             integration._coverage_fallback_candidate(
                 key=("server_2", "review-1"),
                 original=forged_prefill,
+                patched=patched,
+                proposal=proposal,
+                quarantined_keys=frozenset(),
+            )
+        )
+        unbound_prefill = dict(prefilled)
+        unbound_prefill["notes"] = current_auto_map_v1_note()
+        self.assertFalse(
+            integration._coverage_fallback_candidate(
+                key=("server_2", "review-1"),
+                original=unbound_prefill,
+                patched=patched,
+                proposal=proposal,
+                quarantined_keys=frozenset(),
+            )
+        )
+        tampered_target = dict(machine_prefilled)
+        tampered_target["epg_id"] = "Operator.Changed.example"
+        self.assertFalse(
+            integration._coverage_fallback_candidate(
+                key=("server_2", "review-1"),
+                original=tampered_target,
                 patched=patched,
                 proposal=proposal,
                 quarantined_keys=frozenset(),
@@ -761,6 +802,49 @@ class AutoMatchInventoryTests(unittest.TestCase):
                 proposal=proposal,
                 quarantined_keys=frozenset(),
             )
+        )
+        self.assertEqual(
+            integration._coverage_fallback_classification(
+                key=("server_2", "review-1"),
+                original=native_prefill,
+                patched=patched,
+                proposal=proposal,
+                quarantined_keys=frozenset(),
+            ),
+            "protected_native",
+        )
+        held, held_summary = integration.terminal_coverage_fallback_updates(
+            original_rows=[native_prefill],
+            matcher_rows=[native_prefill],
+            quarantined_keys=(),
+            source_sha256="d" * 64,
+            limit=1,
+        )
+        self.assertEqual(held, ())
+        self.assertEqual(
+            held_summary["terminal_coverage_fallback_native_candidate_rows"], 0
+        )
+        self.assertEqual(
+            held_summary["terminal_coverage_fallback_native_inconclusive_rows"], 1
+        )
+        accepted, accepted_summary = (
+            integration.terminal_coverage_fallback_updates(
+                original_rows=[native_prefill],
+                matcher_rows=[native_prefill],
+                quarantined_keys=(),
+                definitive_native_miss_keys={("server_2", "review-1")},
+                source_sha256="d" * 64,
+                limit=1,
+            )
+        )
+        self.assertEqual([row["action"] for row in accepted], ["AUTO_DUMMY"])
+        self.assertEqual(
+            accepted_summary["terminal_coverage_fallback_native_candidate_rows"],
+            1,
+        )
+        self.assertEqual(
+            accepted_summary["terminal_coverage_fallback_native_inconclusive_rows"],
+            0,
         )
 
         legacy = dict(prefilled)

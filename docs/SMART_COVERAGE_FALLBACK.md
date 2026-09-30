@@ -1,36 +1,31 @@
 # Smart Coverage Fallback
 
-Smart Coverage Fallback is an opt-in last stage for channels that do not have
-a verified real schedule. It enables a local, per-stream synthetic guide rather
-than guessing an EPGShare channel.
+Smart Coverage Fallback is the terminal safe lane for a channel that does not
+have a verified real schedule. It enables a local, per-stream synthetic guide
+instead of guessing an EPGShare or panel channel.
 
-The decision order is:
+The production order is:
 
-1. Apply a deterministic real EPG match only after the existing catalog and
-   programme gates pass.
-2. Leave a bounded Smart/Gemini shortlist available for real-match review.
-3. For the remaining eligible rows, use a local channel-derived guide.
+1. deterministic real EPGShare match after every local gate;
+2. exact verified native schedule on Server 2 or Server 3;
+3. Google-Search-grounded Gemini verification of an already discovered real
+   candidate;
+4. truthful local synthetic guide for the safe unresolved remainder; and
+5. `IGNORE` for a decorative non-channel or quarantine for a risky identity.
+
+Server 1 can use EPGShare for an external real schedule or the local synthetic
+lane. Its provider-native XMLTV and panel IDs are forbidden.
 
 ## Safety boundary
 
-The feature is off by default. It runs only after the ordinary deterministic
-real-match and programme gates. A row must still be a disabled `REVIEW` row,
-must still exist under the same provider identity, and must not be an OPEN-alert
-or quarantined row, a decorative heading, or an explicit `IGNORE` result.
+A fallback candidate must still exist under the same current provider identity
+and must not have an `OPEN` alert, provider/Sheet drift, or an untracked manual
+target. Those rows remain disabled and protected. An explicit decorative
+heading becomes `IGNORE` and does not receive a programme grid.
 
-The original target must be one of these narrowly identifiable cases:
-
-- a blank `epg_id`;
-- a provisional target carrying the complete, current-build `auto-map-v1`
-  provenance prefix, including the exact matcher and engine hashes and matching
-  catalog/source hashes; or
-- one of the two exact legacy Server 1 migration records.
-
-An untracked or manually entered target is never replaced. Current Server 2/3
-panel candidates are reserved for native schedule validation; when a current
-native ID passes that gate, `KEEP_PANEL` wins over a synthetic proposal. Adult-
-labelled streams remain barred from guessed real schedules; if otherwise
-eligible, they receive an explicitly synthetic adult guide instead.
+The fallback also handles a safe row when real matching has no candidate, a
+candidate fails its programme or semantic gate, or grounded AI abstains, fails,
+or is unavailable. An AI error is not permission to guess a real schedule.
 
 Synthetic mappings are written as:
 
@@ -40,61 +35,69 @@ Synthetic mappings are written as:
 - `epg_id=Synthetic.<family>.local`
 - a hash-bound `coverage-fallback-v1` note
 
-Before replacement, the exact prior `source`, `epg_feed`, and `epg_id` are
-length-encoded in the bounded `reason` cell as a
-`coverage-fallback-rollback-v1` record. The notes also contain a SHA-256 of that
-prior target. This makes a machine-prefilled replacement exactly reversible,
-while the hash and fallback binding make accidental audit drift detectable.
+Before a machine-prefilled target is replaced, its exact `source`, `epg_feed`,
+and `epg_id` are length-encoded in a bounded
+`coverage-fallback-rollback-v1` record. The notes contain a SHA-256 of that
+prior target. The change is therefore reversible and detectable if its audit
+binding drifts.
 
-The builder gives each server/stream its own deterministic schedule identity,
-so two channels never share programme text merely because their marker family
-is the same. Local synthetic rows do not request EPGShare dummy programmes.
+The builder gives every server/stream pair its own deterministic schedule
+identity. It uses richer wording only when positive row evidence identifies a
+supported event, movie, artist, music, adult, or continuous-24/7 family. Every
+other fallback says:
+
+```text
+Schedule unavailable — <channel>
+```
+
+This wording avoids inventing programme details. Local synthetic rows do not
+request EPGShare dummy programmes.
+
+## Real-schedule upgrades
+
+An enabled row carrying valid `coverage-fallback-v1` provenance remains an
+automatic upgrade candidate. Each later run may replace it with a real
+EPGShare or Server 2/3 native schedule only when that real lane passes every
+current gate. Untracked manual targets remain protected, and a verified real
+mapping is never downgraded merely to improve a coverage statistic.
 
 ## Run limits
 
-`--coverage-fallback-limit COUNT` proposes fallback for at most `COUNT` rows in one run.
-Allowed production values are `0`, `500`, `2500`, and `5000`; `0` is off. New
-and existing-`REVIEW` candidates share this proposal cap fairly: the two lanes
-alternate after each has been rotated and interleaved across servers. When new
-channel appends are disabled, new rows are excluded from fallback selection so
-they cannot consume capacity that can never be written. The existing Google
-writer still revalidates provider identity and OPEN-alert state immediately
-before each bounded update batch.
+`--coverage-fallback-limit COUNT` bounds local synthetic proposals. Production
+values are `0`, `500`, `2500`, `5000`, and `30000`. Existing-row persistence is
+also bounded by `--review-apply-limit`, whose values are `0`, `25`, `100`,
+`500`, `2500`, `5000`, and `30000`. The total apply limit covers real, native,
+synthetic, `IGNORE`, and grounded-AI decisions together. Google writes remain
+split into batches of at most 500 rows and 2 MiB.
 
-This proposal cap is not authority to edit an existing row. Existing
-`REVIEW` persistence also requires `--review-apply-limit`, whose allowed values
-are `0`, `25`, `100`, `500`, `2500`, and `5000`. Its default `0` forbids every
-existing-`REVIEW` write, and its one total covers real, native, synthetic,
-`IGNORE`, and AI lanes together.
-
-For a manual pilot, run workflow **1 - Sync channels to Google Sheet**, select
-`dry-run`, and choose `500`. Inspect the aggregate workflow summary, then run
-`apply` with a `review_apply_limit` of `25` for the first canary. To enable
-recurring proposals, set repository variable `EPG_COVERAGE_FALLBACK_LIMIT` to
-an allowed value; set `EPG_REVIEW_APPLY_LIMIT` separately to authorize a
-bounded scheduled existing-row rollout. Workflow 1 reads both rollout
-variables. Workflow 2 reads `EPG_COVERAGE_FALLBACK_LIMIT` when building the
-published guide. Removing the coverage variable or setting it to `0` disables
-new synthetic approvals; removing the apply variable or setting it to `0`
-forbids scheduled existing-`REVIEW` writes and leaves no capacity for Gemini
-review.
+Scheduled Workflow 1 defaults both limits to `30000`, allowing the dated
+backlog to drain without row-by-row human matching. Either repository variable
+may override its scheduled limit, and `0` is the kill switch. Manual dispatch
+retains zero defaults and requires an explicit mode and limits.
 
 ## Metrics
 
-The private sync summary reports:
+The private sync summary retains candidate, selected, persisted, deferred,
+native-replacement, and protection counters. Public indexes and per-server
+manifests additionally expose `guideCoverage`, which keeps these outcomes
+separate:
 
-- `coverage_fallback_candidate_rows`
-- `coverage_fallback_applied_rows`
-- `coverage_fallback_deferred_rows`
-- `coverage_fallback_ai_deferred_rows`
-- `coverage_fallback_suppressed_unwritten_new_rows`
-- separate new-channel and REVIEW-backlog counts
-- machine-prefilled candidate/applied counts
-- exact legacy Server 1 candidate/applied counts
-- protected manual and protected native counts
-- `coverage_fallback_replaced_by_native_rows`
+- verified EPGShare real schedules;
+- native panel real schedules;
+- local synthetic guides, including their disclosed title class;
+- ignored non-channels;
+- quarantined and disabled review rows; and
+- other uncovered rows.
 
-This mode is intended to raise useful guide coverage, not to claim 99% real-EPG
-accuracy. A customer “wrong guide” report should quarantine the stream before a
-later real remap; it should never directly teach or write a mapping without the
-normal identity and schedule validation gates.
+It reports percentages against literal loaded rows, channel rows excluding
+`IGNORE`, and actionable non-quarantined rows. Useful coverage is real plus
+local synthetic coverage; it is never described as real-EPG accuracy.
+
+The final September 30, 2026 offline decision base has 49,759 rows and 41,801
+assigned targets (84.00%): 10,526 EPGShare real, 3,977 retained native, and
+27,298 local synthetic. It leaves 5,389 native candidates for credentialed
+per-row validation, 2,120 OPEN-alert rows quarantined, and 449 manual targets
+protected. At least 2,983 native candidates must resolve to reach 90%; all
+5,389 resolving would produce 47,190 assignments (94.84%). Assignment remains
+distinct from actual programme coverage, which only production
+`guideCoverage` may report.

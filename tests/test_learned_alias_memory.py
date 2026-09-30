@@ -309,6 +309,7 @@ class LearnedAliasMemoryTests(unittest.TestCase):
             text_catalog_file_sha256="c" * 64,
             text_catalog_fingerprint_sha256="d" * 64,
             text_catalog_generated_token="20260915120000",
+            grounding_evidence_sha256="e" * 64,
         )
         tampered = dict(valid)
         tampered["server_id"] = "server_3"
@@ -344,6 +345,7 @@ class LearnedAliasMemoryTests(unittest.TestCase):
                 text_catalog_file_sha256="d" * 64,
                 text_catalog_fingerprint_sha256="e" * 64,
                 text_catalog_generated_token="20260915120000",
+                grounding_evidence_sha256="f" * 64,
             )
         resolver = _Resolver()
         result = integration._learn_cross_server_approved_aliases(

@@ -58,6 +58,34 @@ def mapping_row(
     return row
 
 
+def current_unbound_auto_map_v1_note(
+    *, method: str = "canonical_identity", market: str = "US"
+) -> str:
+    source_sha256 = "c" * 64
+    return (
+        f"auto-map-v1 method={method}; market={market}; "
+        f"matcher={sync.automatch.STRICT_MATCHER_VERSION}; "
+        f"matcher_build={sync.automatch.STRICT_MATCHER_BUILD_ID}; "
+        f"matcher_sha256={sync.automatch.STRICT_MATCHER_SOURCE_SHA256}; "
+        f"engine_sha256={sync.automatch.STRICT_ENGINE_SOURCE_SHA256}; "
+        f"catalog_sha256={source_sha256}; source_sha256={source_sha256} | "
+        "Automatically discovered by test"
+    )
+
+
+def target_bound_auto_map_v2_note(row: dict[str, str]) -> str:
+    return sync.automatch.automatic_mapping_provenance_note(
+        server_id=row["server_id"],
+        stream_id=row["stream_id"],
+        channel_name=row["channel_name"],
+        category_name=row["category_name"],
+        epg_id=row["epg_id"],
+        match_method="canonical_identity",
+        market="US",
+        source_sha256="c" * 64,
+    )
+
+
 def table(rows: list[dict[str, str]]) -> sync.MappingTable:
     columns = list(streaming.SHEET_COLUMNS)
     return sync.MappingTable(columns, columns, rows)
@@ -3971,23 +3999,27 @@ class ReportsAndSheetsTests(unittest.TestCase):
             '- "100"',
             '- "200"',
             '- "5000"',
+            '- "30000"',
             "Maximum unresolved rows considered by Gemini",
             "Maximum TOTAL REVIEW rows selected/written",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, workflow)
         self.assertGreaterEqual(dispatch_section.count("default: false"), 2)
+        self.assertEqual(dispatch_section.count('default: "0"'), 2)
         self.assertNotIn("default: true", dispatch_section)
         for scheduled_value in (
             "github.event_name == 'schedule' && 'true' || inputs.update_google_sheet",
             "github.event_name == 'schedule' && 'apply' || inputs.recheck_existing_review",
             "github.event_name == 'schedule' && 'all' || inputs.recheck_server",
-            "github.event_name == 'schedule' && (vars.EPG_USE_GEMINI_AI == 'true' && 'true' || 'false') || inputs.use_gemini_ai",
+            "github.event_name == 'schedule' && (vars.EPG_USE_GEMINI_AI != 'false' && secrets.GEMINI_API_KEY != '' && 'true' || 'false') || inputs.use_gemini_ai",
             "github.event_name == 'schedule' && '200' || inputs.ai_review_limit",
-            "github.event_name == 'schedule' && (vars.EPG_REVIEW_APPLY_LIMIT || '0') || inputs.review_apply_limit",
+            "github.event_name == 'schedule' && (vars.EPG_REVIEW_APPLY_LIMIT || '30000') || inputs.review_apply_limit",
+            "github.event_name == 'schedule' && (vars.EPG_COVERAGE_FALLBACK_LIMIT || '30000') || inputs.coverage_fallback_limit",
         ):
             with self.subTest(scheduled_value=scheduled_value):
                 self.assertIn(scheduled_value, workflow)
+        self.assertEqual(dispatch_section.count('- "30000"'), 2)
         self.assertIn("tests.test_ai_review_policy", workflow)
         self.assertIn("New-channel mappings proposed", workflow)
         self.assertNotIn("New channels safely enabled", workflow)
@@ -4057,8 +4089,8 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         known_auto = self.disabled_review(
             "known-auto",
             epg_id="Old.Auto.us2",
-            notes="auto-map-v1 prior provisional result",
         )
+        known_auto["notes"] = target_bound_auto_map_v2_note(known_auto)
         legacy_panel = self.disabled_review(
             "legacy-panel", source="panel", epg_id="native.panel.id"
         )
@@ -4129,6 +4161,47 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 self.assertEqual(stats[field], 1)
+
+    def test_review_selector_rejects_operator_notes_quoting_machine_markers(
+        self,
+    ) -> None:
+        quoted_auto = self.disabled_review(
+            "quoted-auto",
+            epg_id="Operator.Auto.us2",
+            notes="operator rejected auto-map-v1 suggestion",
+        )
+        quoted_ai = self.disabled_review(
+            "quoted-ai",
+            epg_id="Operator.AI.us2",
+            notes="operator rejected ai-review-v1 suggestion",
+        )
+        unbound_v1 = self.disabled_review(
+            "unbound-v1",
+            epg_id="Operator.Unbound.us2",
+            notes=current_unbound_auto_map_v1_note()
+            + " | operator changed target manually",
+        )
+        provider = inventory(
+            "server_1",
+            [
+                {
+                    "stream_id": row["stream_id"],
+                    "name": row["channel_name"],
+                    "category_name": "General",
+                }
+                for row in (quoted_auto, quoted_ai, unbound_v1)
+            ],
+        )
+
+        selected, stats = sync.select_review_recheck_rows(
+            table([quoted_auto, quoted_ai, unbound_v1]),
+            [provider],
+            selected_servers={"server_1"},
+        )
+
+        self.assertEqual(selected, [])
+        self.assertEqual(stats["review_recheck_excluded_manual_candidate"], 3)
+        self.assertEqual(stats["review_recheck_skipped_rows"], 3)
 
     def test_review_selector_excludes_actual_inventory_drift_identity(self) -> None:
         review = self.disabled_review("drift")
@@ -5299,6 +5372,17 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         )
 
     @staticmethod
+    def authenticated_fallback(row: dict[str, str]) -> dict[str, str]:
+        patched = dict(row)
+        sync.automatch._apply_coverage_fallback(
+            key=(row["server_id"], row["stream_id"]),
+            original=row,
+            patched=patched,
+            source_sha256="a" * 64,
+        )
+        return patched
+
+    @staticmethod
     def gemini_batch(result) -> object:
         return sync.gemini_review.ReviewBatchResult(
             results=(result,),
@@ -5307,6 +5391,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             total_tokens=15,
             batches_attempted=1,
             batches_succeeded=1,
+            http_attempts=1,
         )
 
     def gemini_result_for(
@@ -5327,17 +5412,43 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             request = requests[0]
             candidate_key = None
             if decision is sync.gemini_review.ReviewDecision.SUGGEST:
-                candidate_key = next(
-                    candidate.candidate_key
-                    for candidate in request.candidates
-                    if candidate.epg_id == epg_id
+                selected_candidate = next(
+                    candidate for candidate in request.candidates if candidate.epg_id == epg_id
                 )
+                candidate_key = selected_candidate.candidate_key
+                identity_claim = sync.gemini_review._claim_for(
+                    sync.gemini_review._identity_subject(request.channel_name),
+                    selected_candidate.display_name,
+                    selected_candidate.epg_id,
+                )
+            else:
+                identity_claim = None
             return self.gemini_batch(
                 sync.gemini_review.ReviewResult(
                     review_id=request.review_id,
                     decision=decision,
                     candidate_key=candidate_key,
                     confidence=confidence,
+                    selected_epg_id=(
+                        epg_id
+                        if decision is sync.gemini_review.ReviewDecision.SUGGEST
+                        else None
+                    ),
+                    identity_claim=identity_claim,
+                    query=(
+                        "Candidate channel schedule"
+                        if decision is sync.gemini_review.ReviewDecision.SUGGEST
+                        else None
+                    ),
+                    source_urls=(
+                        "https://example.com/channel",
+                        "https://example.org/channel",
+                    )
+                    if decision is sync.gemini_review.ReviewDecision.SUGGEST
+                    else (),
+                    source_authorities=("example.com", "example.org")
+                    if decision is sync.gemini_review.ReviewDecision.SUGGEST
+                    else (),
                     error_code=error_code,
                 )
             )
@@ -5380,7 +5491,8 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(update["source"], "epgshare01")
         self.assertEqual(update["epg_feed"], "ALL_SOURCES1")
         self.assertEqual(update["epg_id"], "Candidate.One.us2")
-        self.assertIn("Gemini HIGH", update["reason"])
+        self.assertIn("grounded AI HIGH", update["reason"])
+        self.assertIn("ai-grounded-evidence-v1", update["notes"])
         self.assertIn("ai-verified-v2", update["notes"])
         for column in set(streaming.SHEET_COLUMNS) - set(sync.RECHECK_PATCH_COLUMNS):
             with self.subTest(column=column):
@@ -5388,7 +5500,11 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         request = call.call_args.args[0][0]
         self.assertTrue(request.review_id.startswith("cl_"))
         self.assertTrue(
-            all(candidate.candidate_key.startswith("k_") for candidate in request.candidates)
+            all(
+                candidate.candidate_key.startswith("c")
+                and len(candidate.candidate_key) == 4
+                for candidate in request.candidates
+            )
         )
         self.assertEqual(
             call.call_args.kwargs["sensitive_values"],
@@ -5524,7 +5640,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             )
 
         self.assertEqual(updates, [])
-        self.assertEqual(summary["ai_review_batches_attempted"], 1)
+        self.assertEqual(summary["ai_review_batches_attempted"], 0)
         self.assertEqual(summary["ai_review_batches_succeeded"], 0)
         transport.post.assert_not_called()
 
@@ -5749,6 +5865,104 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             matcher.call_args.kwargs["include_new_coverage_fallback"], False
         )
         self.assertFalse(effective[0].runtime_eligible)
+
+    def test_native_candidate_never_falls_back_when_verifier_is_inconclusive(self) -> None:
+        review = mapping_row(
+            "server_2",
+            "native-inconclusive",
+            "Server Two Event",
+            action="REVIEW",
+            source="panel",
+            epg_feed="panel",
+            epg_id="native.event",
+        )
+        review.update({"enabled": "FALSE", "notes": "operator native candidate"})
+        synthetic = dict(review)
+        synthetic.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_DUMMY",
+                "source": "dummy",
+                "epg_feed": "DUMMY_CHANNELS",
+                "epg_id": "Synthetic.Event.local",
+                "reason": "fixture local synthetic",
+                "notes": "auto-map-v1 method=coverage_fallback fixture",
+            }
+        )
+        provider = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": "native-inconclusive",
+                    "name": "Server Two Event",
+                    "category_name": "General",
+                    "epg_channel_id": "native.event",
+                }
+            ],
+        )
+        outcome = self.fake_recheck_outcome([synthetic])
+        unavailable = sync._native_review_summary_defaults()
+        unavailable.update(
+            {
+                "native_review_candidates": 1,
+                "native_review_source_unavailable": 1,
+            }
+        )
+
+        for mode, validate_native, native_summary in (
+            ("dry-run", False, sync._native_review_summary_defaults()),
+            ("apply", False, sync._native_review_summary_defaults()),
+            ("dry-run", True, unavailable),
+            ("apply", True, unavailable),
+        ):
+            with self.subTest(mode=mode, validate_native=validate_native), tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+                sync.automatch, "auto_match_and_spool", return_value=outcome
+            ), mock.patch.object(
+                sync,
+                "_build_verified_native_review_updates",
+                return_value=([], native_summary),
+            ), mock.patch.object(
+                sync,
+                "google_sheet_values",
+                return_value=mapping_values([review]),
+            ), mock.patch.object(
+                sync,
+                "google_sync_alert_values",
+                return_value=[list(sync.ALERT_COLUMNS)],
+            ), mock.patch.object(
+                sync, "append_sync_alert_rows", return_value=0
+            ), mock.patch.object(
+                sync, "update_google_sheet_review_rows"
+            ) as update_rows:
+                root = Path(temporary)
+                summary = sync.run_sync(
+                    table=table([review]),
+                    inventories=[provider],
+                    output_dir=root / "reports",
+                    generated_at="2026-09-16T00:00:00Z",
+                    snapshot_out=root / "effective.csv",
+                    all_source_file=root / "all.xml.gz",
+                    all_source_catalog_file=root / "all.txt",
+                    epgshare_spool_out=root / "selected.sqlite3",
+                    review_recheck_mode=mode,
+                    review_recheck_servers=("server_2",),
+                    review_apply_limit=25,
+                    coverage_fallback_limit=25,
+                    validate_native_review=validate_native,
+                    google_session=object(),
+                    sheet_id="a" * 30,
+                )
+
+            update_rows.assert_not_called()
+            self.assertEqual(summary["review_terminal_synthetic_rows"], 0)
+            self.assertEqual(summary["review_apply_selected_rows"], 0)
+            self.assertEqual(summary["review_recheck_still_review_rows"], 1)
+            self.assertEqual(
+                summary[
+                    "terminal_coverage_fallback_native_inconclusive_rows"
+                ],
+                1,
+            )
 
     def test_new_auto_enabled_row_is_provider_revalidated_before_append(self) -> None:
         provider = inventory(
@@ -6869,7 +7083,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 epgshare_spool_out=root / "selected.sqlite3",
                 review_recheck_mode="apply",
                 review_recheck_servers=("server_1",),
-                review_apply_limit=5000,
+                review_apply_limit=30000,
                 use_gemini_ai=True,
                 gemini_api_key="test-key",
             )
@@ -6885,6 +7099,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
             all(row["action"] == "AUTO_EPGSHARE" for row in captured_updates)
         )
         self.assertEqual(summary["review_recheck_deferred_rows"], 1)
+        self.assertEqual(summary["review_terminal_deferred_rows"], 2)
         self.assertEqual(
             summary["review_recheck_rows_updated"],
             sync.MAX_RECHECK_APPLIES_PER_RUN,
@@ -6901,8 +7116,12 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertTrue(
             by_stream[f"r{sync.MAX_RECHECK_APPLIES_PER_RUN - 1:04d}"].runtime_eligible
         )
-        self.assertFalse(
-            by_stream[f"r{sync.MAX_RECHECK_APPLIES_PER_RUN:04d}"].runtime_eligible
+        self.assertEqual(
+            sum(
+                not by_stream[f"r{index:04d}"].runtime_eligible
+                for index in range(total_rows - 1)
+            ),
+            1,
         )
         self.assertFalse(by_stream[f"r{total_rows - 1:04d}"].runtime_eligible)
 
@@ -6990,6 +7209,331 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 "safety_excluded": 0,
             },
         )
+
+    def test_review_and_active_fallback_upgrade_metrics_are_separate(self) -> None:
+        review = self.disabled_review("z-review")
+        fallback = self.authenticated_fallback(
+            self.disabled_review("a-upgrade")
+        )
+        approved = dict(review)
+        approved.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare01",
+                "epg_feed": "ALL_SOURCES1",
+                "epg_id": "Review.Real.us2",
+                "reason": "Smart Rules verified",
+                "notes": "auto-map-v1 verified fixture",
+            }
+        )
+        upgraded = dict(fallback)
+        upgraded.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare01",
+                "epg_feed": "ALL_SOURCES1",
+                "epg_id": "Upgrade.Real.us2",
+                "reason": "Smart Rules verified",
+            }
+        )
+        upgraded["notes"] = target_bound_auto_map_v2_note(upgraded)
+        outcome = self.fake_recheck_outcome([approved, upgraded])
+        provider = inventory(
+            "server_1",
+            [
+                {
+                    "stream_id": row["stream_id"],
+                    "name": row["channel_name"],
+                    "category_name": row["category_name"],
+                }
+                for row in (review, fallback)
+            ],
+        )
+        current_rows = [dict(review), dict(fallback)]
+
+        def read_mapping(*_args, **_kwargs):
+            return mapping_values(current_rows)
+
+        def apply_updates(
+            _session,
+            _sheet_id,
+            _tab_name,
+            base_table,
+            rows,
+            **_kwargs,
+        ):
+            replacements = {
+                (row["server_id"], row["stream_id"]): dict(row) for row in rows
+            }
+            current_rows[:] = [
+                replacements.get(
+                    (row["server_id"], row["stream_id"]), dict(row)
+                )
+                for row in base_table.rows
+            ]
+            return len(rows), table(current_rows)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            sync, "google_sheet_values", side_effect=read_mapping
+        ), mock.patch.object(
+            sync,
+            "google_sync_alert_values",
+            return_value=[list(sync.ALERT_COLUMNS)],
+        ), mock.patch.object(
+            sync, "append_sync_alert_rows", return_value=0
+        ), mock.patch.object(
+            sync.automatch, "auto_match_and_spool", return_value=outcome
+        ), mock.patch.object(
+            sync, "update_google_sheet_review_rows", side_effect=apply_updates
+        ):
+            root = Path(temporary)
+            summary = sync.run_sync(
+                table=table([]),
+                inventories=[provider],
+                output_dir=root / "reports",
+                generated_at="2026-09-16T00:00:00Z",
+                snapshot_out=root / "effective.csv",
+                google_session=object(),
+                sheet_id="a" * 30,
+                all_source_file=root / "all.xml.gz",
+                all_source_catalog_file=root / "all.txt",
+                epgshare_spool_out=root / "selected.sqlite3",
+                review_recheck_mode="apply",
+                review_recheck_servers=("server_1",),
+                review_apply_limit=25,
+            )
+
+        self.assertEqual(summary["review_recheck_rows_updated"], 1)
+        self.assertEqual(summary["review_recheck_safe_matches_persisted"], 1)
+        self.assertEqual(summary["synthetic_upgrade_persisted_rows"], 1)
+        self.assertEqual(summary["review_apply_persisted_rows"], 2)
+        self.assertEqual(summary["review_terminal_input_rows"], 1)
+        self.assertEqual(summary["review_terminal_selected_rows"], 1)
+        self.assertEqual(summary["review_terminal_real_rows"], 1)
+
+    def test_partial_write_partitions_review_and_upgrade_metrics(self) -> None:
+        review = self.disabled_review("z-review")
+        fallbacks = [
+            self.authenticated_fallback(self.disabled_review(stream_id))
+            for stream_id in ("a-upgrade", "b-upgrade")
+        ]
+        approved = dict(review)
+        approved.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare01",
+                "epg_feed": "ALL_SOURCES1",
+                "epg_id": "Review.Real.us2",
+                "reason": "Smart Rules verified",
+                "notes": "auto-map-v1 verified fixture",
+            }
+        )
+        upgrades: list[dict[str, str]] = []
+        for index, fallback in enumerate(fallbacks, start=1):
+            upgraded = dict(fallback)
+            upgraded.update(
+                {
+                    "enabled": "TRUE",
+                    "action": "AUTO_EPGSHARE",
+                    "source": "epgshare01",
+                    "epg_feed": "ALL_SOURCES1",
+                    "epg_id": f"Upgrade.Real.{index}.us2",
+                    "reason": "Smart Rules verified",
+                }
+            )
+            upgraded["notes"] = target_bound_auto_map_v2_note(upgraded)
+            upgrades.append(upgraded)
+        outcome = self.fake_recheck_outcome([approved, *upgrades])
+        originals = [review, *fallbacks]
+        provider = inventory(
+            "server_1",
+            [
+                {
+                    "stream_id": row["stream_id"],
+                    "name": row["channel_name"],
+                    "category_name": row["category_name"],
+                }
+                for row in originals
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            sync, "google_sheet_values", return_value=mapping_values(originals)
+        ), mock.patch.object(
+            sync,
+            "google_sync_alert_values",
+            return_value=[list(sync.ALERT_COLUMNS)],
+        ), mock.patch.object(
+            sync, "append_sync_alert_rows", return_value=0
+        ), mock.patch.object(
+            sync.automatch, "auto_match_and_spool", return_value=outcome
+        ), mock.patch.object(
+            sync,
+            "update_google_sheet_review_rows",
+            side_effect=sync.SheetWriteError("second batch failed", 1),
+        ):
+            root = Path(temporary)
+            with self.assertRaises(sync.SheetWriteError):
+                sync.run_sync(
+                    table=table([]),
+                    inventories=[provider],
+                    output_dir=root / "reports",
+                    generated_at="2026-09-16T00:00:00Z",
+                    snapshot_out=root / "effective.csv",
+                    google_session=object(),
+                    sheet_id="a" * 30,
+                    all_source_file=root / "all.xml.gz",
+                    all_source_catalog_file=root / "all.txt",
+                    epgshare_spool_out=root / "selected.sqlite3",
+                    review_recheck_mode="apply",
+                    review_recheck_servers=("server_1",),
+                    review_apply_limit=25,
+                )
+            summary = json.loads(
+                (root / "reports" / "summary.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(summary["review_recheck_rows_updated"], 0)
+        self.assertEqual(summary["review_recheck_safe_matches_persisted"], 0)
+        self.assertEqual(summary["review_recheck_deferred_rows"], 1)
+        self.assertEqual(summary["review_recheck_safe_matches"], 1)
+        self.assertEqual(summary["synthetic_upgrade_persisted_rows"], 1)
+        self.assertEqual(summary["synthetic_upgrade_write_deferred_rows"], 1)
+        self.assertEqual(summary["review_apply_persisted_rows"], 1)
+
+    def test_native_miss_for_active_fallback_is_preserved_not_terminally_reapplied(
+        self,
+    ) -> None:
+        review = self.disabled_review("real-review")
+        native_preimage = mapping_row(
+            "server_2",
+            "native-upgrade",
+            "Native Upgrade",
+            action="REVIEW",
+            source="panel",
+            epg_feed="panel",
+            epg_id="native.upgrade",
+        )
+        native_preimage.update({"enabled": "FALSE", "notes": "native candidate"})
+        fallback = self.authenticated_fallback(native_preimage)
+        approved = dict(review)
+        approved.update(
+            {
+                "enabled": "TRUE",
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare01",
+                "epg_feed": "ALL_SOURCES1",
+                "epg_id": "Review.Real.us2",
+                "reason": "Smart Rules verified",
+                "notes": "auto-map-v1 verified fixture",
+            }
+        )
+        outcome = self.fake_recheck_outcome([approved, fallback])
+        inventories = [
+            inventory(
+                "server_1",
+                [
+                    {
+                        "stream_id": review["stream_id"],
+                        "name": review["channel_name"],
+                        "category_name": review["category_name"],
+                    }
+                ],
+            ),
+            inventory(
+                "server_2",
+                [
+                    {
+                        "stream_id": fallback["stream_id"],
+                        "name": fallback["channel_name"],
+                        "category_name": fallback["category_name"],
+                        "epg_channel_id": "native.upgrade",
+                    }
+                ],
+            ),
+        ]
+        current_rows = [dict(review), dict(fallback)]
+
+        def native_miss(**kwargs):
+            kwargs["definitive_miss_keys_out"].add(
+                ("server_2", "native-upgrade")
+            )
+            summary = sync._native_review_summary_defaults()
+            summary.update(
+                {
+                    "native_review_candidates": 1,
+                    "native_review_rejected_schedule": 1,
+                }
+            )
+            return [], summary
+
+        def read_mapping(*_args, **_kwargs):
+            return mapping_values(current_rows)
+
+        def apply_updates(
+            _session,
+            _sheet_id,
+            _tab_name,
+            base_table,
+            rows,
+            **_kwargs,
+        ):
+            self.assertEqual([row["stream_id"] for row in rows], ["real-review"])
+            replacements = {
+                (row["server_id"], row["stream_id"]): dict(row) for row in rows
+            }
+            current_rows[:] = [
+                replacements.get(
+                    (row["server_id"], row["stream_id"]), dict(row)
+                )
+                for row in base_table.rows
+            ]
+            return len(rows), table(current_rows)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            sync, "google_sheet_values", side_effect=read_mapping
+        ), mock.patch.object(
+            sync,
+            "google_sync_alert_values",
+            return_value=[list(sync.ALERT_COLUMNS)],
+        ), mock.patch.object(
+            sync, "append_sync_alert_rows", return_value=0
+        ), mock.patch.object(
+            sync.automatch, "auto_match_and_spool", return_value=outcome
+        ), mock.patch.object(
+            sync, "_build_verified_native_review_updates", side_effect=native_miss
+        ), mock.patch.object(
+            sync, "update_google_sheet_review_rows", side_effect=apply_updates
+        ):
+            root = Path(temporary)
+            summary = sync.run_sync(
+                table=table([]),
+                inventories=inventories,
+                output_dir=root / "reports",
+                generated_at="2026-09-16T00:00:00Z",
+                snapshot_out=root / "effective.csv",
+                google_session=object(),
+                sheet_id="a" * 30,
+                all_source_file=root / "all.xml.gz",
+                all_source_catalog_file=root / "all.txt",
+                epgshare_spool_out=root / "selected.sqlite3",
+                review_recheck_mode="apply",
+                review_recheck_servers=("server_1", "server_2"),
+                review_apply_limit=25,
+                coverage_fallback_limit=25,
+                validate_native_review=True,
+            )
+
+        preserved = next(
+            row for row in current_rows if row["stream_id"] == "native-upgrade"
+        )
+        self.assertEqual(preserved["action"], "AUTO_DUMMY")
+        self.assertEqual(summary["review_recheck_rows_updated"], 1)
+        self.assertEqual(summary["synthetic_upgrade_selected_rows"], 0)
+        self.assertEqual(summary["synthetic_upgrade_preserved_rows"], 1)
 
     def test_deterministic_selection_uses_full_run_limit_then_writer_batches(self) -> None:
         rows: list[dict[str, str]] = []
@@ -7232,7 +7776,7 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 epgshare_spool_out=root / "selected.sqlite3",
                 review_recheck_mode="apply",
                 review_recheck_servers=("server_2",),
-                review_apply_limit=5000,
+                review_apply_limit=30000,
                 validate_native_review=True,
             )
             by_stream = {
@@ -7268,13 +7812,13 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(summary["native_review_verified"], 20)
         self.assertEqual(summary["native_review_persisted"], 10)
         self.assertEqual(summary["native_review_deferred"], 10)
-        self.assertEqual(summary["review_apply_limit"], 5000)
-        self.assertEqual(summary["review_apply_selected_rows"], 5000)
+        self.assertEqual(summary["review_apply_limit"], 30000)
+        self.assertEqual(summary["review_apply_selected_rows"], 30000)
         self.assertEqual(
             summary["review_apply_selected_deterministic_rows"], epgshare_count
         )
         self.assertEqual(summary["review_apply_selected_native_rows"], 10)
-        self.assertEqual(summary["review_apply_persisted_rows"], 5000)
+        self.assertEqual(summary["review_apply_persisted_rows"], 30000)
         self.assertEqual(
             summary["review_apply_persisted_deterministic_rows"], epgshare_count
         )
