@@ -42,15 +42,17 @@ from lxml import etree
 
 if __package__:
     from .epg_selection_spool import SpoolError, copy_and_open_verified_spool
+    from . import provider_event_slots
 else:
     from epg_selection_spool import SpoolError, copy_and_open_verified_spool
+    import provider_event_slots
 
 
 PIPELINE_VERSION = "1.0"
 PIPELINE_BUILD_ID = "SKYTV-EPG-V1-2026-09-15"
 APP_SCHEMA_VERSION = 1
 METADATA_SCHEMA_VERSION = 1
-LOGO_POLICY = "SHEET_OR_EXACT_CONFIG_OR_EPGSHARE_SOURCE"
+LOGO_POLICY = "SHEET_OR_EXACT_CONFIG_BRAND_OR_EPGSHARE_SOURCE"
 MAPPING_SNAPSHOT_MANIFEST_SCHEMA = "skytv-private-mapping-snapshot-v1"
 MAX_MAPPING_SNAPSHOT_MANIFEST_BYTES = 256 * 1024
 EFFECTIVE_QUARANTINE_REASON = (
@@ -81,6 +83,7 @@ TRUE_VALUES = frozenset({"1", "true", "yes", "y", "on", "enabled"})
 FALSE_VALUES = frozenset({"0", "false", "no", "n", "off", "disabled"})
 MAX_MAPPING_BYTES = 50 * 1024 * 1024
 MAX_MAPPING_ROWS = 250_000
+MAX_PROVIDER_INVENTORY_BYTES = 80 * 1024 * 1024
 MAX_SOURCE_COMPRESSED_BYTES = 1024 * 1024 * 1024
 MAX_SOURCE_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
 MAX_SOURCE_ELEMENTS = 20_000_000
@@ -1221,6 +1224,98 @@ def parse_mapping_csv(
     return rows
 
 
+def apply_provider_event_title_overrides(
+    rows: Sequence[MappingRow],
+    inventory_content: bytes,
+    selected_servers: set[str],
+) -> tuple[list[MappingRow], dict[str, Any]]:
+    """Overlay current event payloads for exact, stable provider slot IDs.
+
+    The private Sheet remains the authority for every mapping decision.  This
+    narrow presentation layer can change only ``channel_name`` and
+    ``canonical_name`` after the mapping snapshot has been hash-validated.  A
+    row qualifies only when its old and current names are the same anchored
+    numbered event slot in the same non-empty category.
+    """
+
+    if len(inventory_content) > MAX_PROVIDER_INVENTORY_BYTES:
+        raise BuildError("Provider inventory title overlay exceeds its size limit.")
+    try:
+        text = inventory_content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise BuildError("Provider inventory title overlay is not valid UTF-8.") from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    required = {"server_id", "stream_id", "channel_name", "category_name"}
+    missing = sorted(required - set(reader.fieldnames or ()))
+    if missing:
+        raise BuildError(
+            "Provider inventory title overlay is missing: " + ", ".join(missing)
+        )
+    inventory: dict[tuple[str, str], tuple[str, str]] = {}
+    for row_number, raw in enumerate(reader, start=2):
+        if row_number > MAX_MAPPING_ROWS + 1:
+            raise BuildError("Provider inventory title overlay has too many rows.")
+        server_id = normalize_server_id(raw.get("server_id", ""))
+        if server_id not in selected_servers:
+            raise BuildError(
+                "Provider inventory title overlay contains an unselected server."
+            )
+        stream_id = clean_identifier(raw.get("stream_id", ""), 120)
+        channel_name = clean_identifier(raw.get("channel_name", ""), 300)
+        category_name = clean_text(raw.get("category_name", ""), 200)
+        if not stream_id or not channel_name:
+            raise BuildError(
+                f"Provider inventory title overlay row {row_number} lacks identity."
+            )
+        key = (server_id, stream_id)
+        if key in inventory:
+            raise BuildError(
+                "Provider inventory title overlay contains a duplicate identity."
+            )
+        inventory[key] = (channel_name, category_name)
+
+    applied_by_family: Counter[str] = Counter()
+    overlaid: list[MappingRow] = []
+    for row in rows:
+        current = inventory.get((row.server_id, row.stream_id))
+        if current is None:
+            overlaid.append(row)
+            continue
+        current_name, current_category = current
+        if not provider_event_slots.is_same_event_slot(
+            row.channel_name,
+            current_name,
+            row.category_name,
+            current_category,
+        ):
+            overlaid.append(row)
+            continue
+        identity = provider_event_slots.event_slot_identity(
+            current_name, current_category
+        )
+        if identity is None:
+            raise BuildError("Provider event-slot title overlay lost its identity.")
+        if provider_event_slots.exact_text_key(row.channel_name) == (
+            provider_event_slots.exact_text_key(current_name)
+        ):
+            overlaid.append(row)
+            continue
+        applied_by_family[identity[0]] += 1
+        overlaid.append(
+            replace(
+                row,
+                channel_name=current_name,
+                canonical_name=current_name,
+            )
+        )
+    return overlaid, {
+        "inventoryRows": len(inventory),
+        "appliedRows": sum(applied_by_family.values()),
+        "families": dict(sorted(applied_by_family.items())),
+        "sha256": hashlib.sha256(inventory_content).hexdigest(),
+    }
+
+
 def validate_private_mapping_snapshots(
     authoritative_content: bytes,
     effective_content: bytes,
@@ -1754,6 +1849,16 @@ def _smart_synthetic_title(value: object) -> str:
         titled = re.sub(
             rf"(?<=\s){connector}(?=\s)", connector, titled, flags=re.I
         )
+    titled = re.sub(
+        r"\b(?P<hour>\d{1,2})(?P<minute>:\d{2})?\s*(?P<period>am|pm)\b",
+        lambda match: (
+            f"{match.group('hour')}{match.group('minute') or ''} "
+            f"{match.group('period').upper()}"
+        ),
+        titled,
+        flags=re.I,
+    )
+    titled = re.sub(r"\bVs\.(?=\s|$)", "vs.", titled)
     return clean_text(titled, 180)
 
 
@@ -1776,8 +1881,67 @@ def _clean_synthetic_channel_label(value: object) -> str:
         text,
         flags=re.I,
     )
+    text = clean_text(text, 300)
+    route = (
+        r"US|USA|UK|GB|CA|CAN|CANADA|IN|INDIA|FR|DE|ES|NL|MT|IS|"
+        r"BR|LAT|PK|AU|NZ|RS|UAE"
+    )
+    # Country/market wrappers are presentation metadata, not the unique title
+    # of a 24/7 channel or event. Require an anchored bracket or delimiter so
+    # brands such as USA Network remain intact.
+    text = re.sub(
+        rf"^\[\s*(?:{route})\s*\]\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        rf"^(?:{route})\s*(?:4K|UHD|FHD|HD|SD)?\s*(?:\||:|\s[-–—]\s)\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = clean_text(text, 300)
     text = re.sub(
         r"^(?:[A-Z]{2}\s*)?\(\s*ESPN\+\s*\d+\s*\)\s*[|:\-]*\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"^\(\s*FLSP\s+\d{1,4}\s*\)\s*[|:\-]*\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"^(?:US\s*)?\(\s*FLO\s+\d{1,4}\s*\)\s*[|:\-]*\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"^(?:NFL|NBA|WNBA|NHL|MLB|MLS|UEFA|CFL|CHL|UFC|WWE)"
+        r"\s*\|\s*\d{1,3}\s*[-–—:]\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"^(?:DAZN\+?|NETFLIX)\s+PPV\s+\d{1,3}\s*[-–—:]\s*",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"^BTN\+\s*\d{1,3}\s+(?:4K|UHD|FHD|HD|SD)\s*"
+        r"(?:\(D\))?\s*:\s*(?:B1G\+\s*\|\s*)?",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(
+        r"^FLO\s+\d{1,4}\s*:\s*",
         "",
         text,
         flags=re.I,
@@ -1790,12 +1954,6 @@ def _clean_synthetic_channel_label(value: object) -> str:
         flags=re.I,
     )
     text = re.sub(r"^24\s*[/x]\s*7\s*[|:\-]*\s*", "", text, flags=re.I)
-    text = re.sub(
-        r"^(?:US|UK|CA|IN|EN)\s*(?:4K|UHD|FHD|HD|SD)?\s*[|:]\s*",
-        "",
-        text,
-        flags=re.I,
-    )
     text = re.sub(r"[|]+", " ", text)
     text = re.sub(r"(?<=\w)[_\-](?=\w)", " ", text)
     text = re.sub(r"\s+[\-–—]\s+", " ", text)
@@ -1858,12 +2016,36 @@ def _synthetic_event_like(row: MappingRow) -> bool:
     """Return whether approved metadata identifies an event-style stream."""
 
     epg_id = row.epg_id.casefold()
+    evidence = f"{row.category_name} {row.channel_name}"
     return (
         row.metadata.genre == "events"
         or row.metadata.channel_role in {"event", "ppv"}
         or "ppv.events" in epg_id
         or "flo.events" in epg_id
+        or bool(re.search(r"\b(?:PPV|LIVE\s+EVENTS?)\b", row.category_name, re.I))
         or bool(re.search(r"\bESPN\+\s*\d+\b", row.channel_name, re.I))
+        or bool(
+            re.search(
+                r"\bBIG\s+BROTHER\s+(?:CAMERA|FEED)\s+\d+\b",
+                row.channel_name,
+                re.I,
+            )
+        )
+        or bool(
+            re.search(
+                r"(?:\(\s*FLSP\s+\d+\s*\)|\bFLO\s+\d+\s*:)",
+                evidence,
+                re.I,
+            )
+        )
+        or bool(
+            re.search(
+                r"\b(?:NFL|NBA|WNBA|NHL|MLB|MLS|UEFA|CFL|CHL|UFC|WWE)"
+                r"\s*\|\s*\d{1,3}\s*[-–—:]",
+                row.channel_name,
+                re.I,
+            )
+        )
     )
 
 
@@ -5257,6 +5439,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="Hash-bound manifest for the authoritative/effective snapshot pair.",
     )
+    parser.add_argument(
+        "--provider-inventory-file",
+        type=Path,
+        help=(
+            "Current private inventory.csv from the same workflow run. Only "
+            "the rotating payload of an exact numbered event slot may overlay "
+            "its guide title; mapping targets remain snapshot-bound."
+        ),
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--all-source-url", default=DEFAULT_ALL_SOURCE_URL)
     source.add_argument("--all-source-file", type=Path)
@@ -5484,6 +5675,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"canonical SHA-256 {mapping_sha}.",
         flush=True,
     )
+    provider_event_title_overlays: dict[str, Any] = {
+        "inventoryRows": 0,
+        "appliedRows": 0,
+        "families": {},
+        "sha256": "",
+    }
+    if args.provider_inventory_file is not None:
+        inventory_content = bounded_private_file_bytes(
+            args.provider_inventory_file,
+            label="Provider inventory title overlay",
+            maximum_bytes=MAX_PROVIDER_INVENTORY_BYTES,
+        )
+        rows, provider_event_title_overlays = apply_provider_event_title_overrides(
+            rows,
+            inventory_content,
+            selected_servers,
+        )
+        print(
+            "Applied current provider event titles to "
+            f"{provider_event_title_overlays['appliedRows']:,} exact numbered "
+            "slot(s).",
+            flush=True,
+        )
     if any(
         row.server_id == "server_1" and row.effective_source == "panel"
         for row in rows
@@ -5495,6 +5709,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     source_provenance: dict[str, Any] = {}
     source_stats: dict[str, SourceStats] = {}
     try:
+        if args.provider_inventory_file is not None:
+            source_provenance["providerEventTitles"] = {
+                "inputMode": "same-run-private-inventory",
+                **provider_event_title_overlays,
+            }
         wanted_epgshare = {
             row.epg_id
             for row in rows
