@@ -4816,6 +4816,27 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 ),
                 "validation_security",
             ),
+            (
+                None,
+                sync.native_review.NativeReviewError(
+                    "The native EPG source contains an invalid ID."
+                ),
+                "validation_source_id",
+            ),
+            (
+                None,
+                sync.native_review.NativeReviewError(
+                    "A native XMLTV source has an unsupported top-level record."
+                ),
+                "validation_structure",
+            ),
+            (
+                None,
+                sync.native_review.NativeReviewError(
+                    "A native XMLTV source declares channels after programmes."
+                ),
+                "validation_order",
+            ),
         )
         for download_error, validation_error, expected in cases:
             with self.subTest(expected=expected), mock.patch.object(

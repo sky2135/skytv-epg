@@ -1005,6 +1005,10 @@ jobs:
                       "validation_incomplete",
                       "validation_limits",
                       "validation_file",
+                      "validation_source_id",
+                      "validation_structure",
+                      "validation_order",
+                      "validation_input",
                       "validation_other",
                   }
                   if not isinstance(failure_kinds, dict) or any(
