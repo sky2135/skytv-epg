@@ -92,7 +92,8 @@ Bootstrap mode requires valid inventories from Server 1, Server 2, and Server
 3 and applies the configured minimum channel floors. Refresh mode may continue
 with the servers that are available. If one provider is unavailable during a
 refresh, its Sheet rows are preserved and Version 1 makes no missing-channel
-claim for that server.
+claim for that server. A returned inventory must still meet its configured
+floor, and refresh requires at least one valid provider inventory.
 
 ## Private Google Sheet contract
 
@@ -535,11 +536,15 @@ python -u scripts/sync_channel_inventory.py \
   --all-source-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
   --all-source-catalog-file "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt" \
   --epgshare-spool-out "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3" \
+  --minimum-server-channels \
+    server_1=4000 server_2=10500 server_3=9400 \
   --write-to-sheet
 ```
 
 Refresh mode preserves unavailable servers and produces an effective snapshot
-from the authoritative Sheet plus the active quarantine state.
+from the authoritative Sheet plus the active quarantine state. The configured
+floors still reject a suspiciously small inventory from any provider that does
+respond; a missing provider is preserved rather than treated as a small one.
 
 ### Offline diagnostic
 

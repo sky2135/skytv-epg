@@ -3929,6 +3929,82 @@ class ReportsAndSheetsTests(unittest.TestCase):
         self.assertEqual(args.review_apply_limit, 100)
         self.assertEqual(sync.parse_args([]).review_apply_limit, 0)
 
+    def test_refresh_floor_check_preserves_an_unavailable_provider(self) -> None:
+        inventories = [
+            inventory(
+                "server_1",
+                [{"stream_id": str(index)} for index in range(4)],
+            ),
+            inventory(
+                "server_3",
+                [{"stream_id": str(index)} for index in range(3)],
+            ),
+        ]
+        minimums = {"server_1": 4, "server_2": 5, "server_3": 3}
+
+        self.assertEqual(
+            sync.inventory_floor_failures(
+                inventories,
+                minimums,
+                require_all=False,
+            ),
+            [],
+        )
+        self.assertEqual(
+            sync.inventory_floor_failures(
+                inventories,
+                minimums,
+                require_all=True,
+            ),
+            ["server_2=unavailable"],
+        )
+
+    def test_refresh_floor_check_still_rejects_a_small_inventory(self) -> None:
+        inventories = [
+            inventory(
+                "server_1",
+                [{"stream_id": str(index)} for index in range(3)],
+            )
+        ]
+
+        self.assertEqual(
+            sync.inventory_floor_failures(
+                inventories,
+                {"server_1": 4, "server_2": 5},
+                require_all=False,
+            ),
+            ["server_1=3 (minimum 4)"],
+        )
+
+    def test_missing_provider_rows_are_not_reported_missing(self) -> None:
+        rows = [
+            mapping_row("server_1", "11", "Server 1 present"),
+            mapping_row("server_1", "12", "Server 1 missing"),
+            mapping_row("server_2", "21", "Server 2 unavailable"),
+        ]
+        provider = inventory(
+            "server_1",
+            [
+                {
+                    "stream_id": "11",
+                    "name": "Server 1 present",
+                    "category_id": "cat",
+                    "category_name": "General",
+                }
+            ],
+        )
+
+        _new, _changed, missing = sync.compare_inventory(
+            table(rows),
+            [provider],
+            discovered_at="2026-09-30T00:00:00Z",
+        )
+
+        self.assertEqual(
+            [(row["server_id"], row["stream_id"]) for row in missing],
+            [("server_1", "12")],
+        )
+
     def test_public_repo_workflow_uploads_summary_only(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "channel_inventory_sync.yml"
@@ -3992,6 +4068,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
         for required in (
             'cron: "17 2 * * *"',
             'timezone: "America/Toronto"',
+            "REVIEW backlog to recheck (inventory still checks all servers)",
             "default: dry-run",
             "default: all",
             'default: "200"',
@@ -4023,6 +4100,19 @@ class ReportsAndSheetsTests(unittest.TestCase):
         self.assertIn("tests.test_ai_review_policy", workflow)
         self.assertIn("New-channel mappings proposed", workflow)
         self.assertNotIn("New channels safely enabled", workflow)
+
+        command_section = workflow.split(
+            "- name: Find new, changed, and missing channels", 1
+        )[1].split("- name: Verify reports contain no passwords", 1)[0]
+        self.assertIn("--mode refresh", command_section)
+        self.assertNotIn("--mode bootstrap", command_section)
+        for floor in (
+            "server_1=4000",
+            "server_2=10500",
+            "server_3=9400",
+        ):
+            with self.subTest(floor=floor):
+                self.assertIn(floor, command_section)
 
     def test_workflow_native_review_is_automatic_and_safely_scoped(self) -> None:
         workflow = (
@@ -4062,6 +4152,204 @@ class ReportsAndSheetsTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, workflow)
 
+
+class ProviderAvailabilityMainTests(unittest.TestCase):
+    @staticmethod
+    def _channels(count: int) -> list[dict[str, str]]:
+        return [
+            {
+                "stream_id": str(index + 1),
+                "name": f"Channel {index + 1}",
+                "category_id": "cat",
+                "category_name": "General",
+            }
+            for index in range(count)
+        ]
+
+    def invoke_main(
+        self,
+        root: Path,
+        *,
+        mode: str,
+        provider_results: dict[str, sync.PanelInventory | Exception],
+    ) -> tuple[int | None, sync.SyncError | None, dict[str, object]]:
+        configs = {
+            server_id: sync.ServerConfig(
+                server_id=server_id,
+                server_label=server_id.replace("_", " ").title(),
+                base_url=f"https://{server_id}.example.test",
+                username=f"{server_id}-user",
+                password="safe-password",
+            )
+            for server_id in sync.DEFAULT_SERVERS
+        }
+
+        def load_configs(selected):
+            return [configs[server_id] for server_id in selected]
+
+        def fetch_inventory(_session, config, **_kwargs):
+            result = provider_results[config.server_id]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        session = SimpleNamespace(headers={}, close=mock.Mock())
+        google_session = SimpleNamespace(close=mock.Mock())
+        arguments = [
+            "--mode",
+            mode,
+            "--sheet-id",
+            "a" * 30,
+            "--output-dir",
+            str(root / "reports"),
+            "--snapshot-out",
+            str(root / "effective.csv"),
+            "--authoritative-snapshot-out",
+            str(root / "authoritative.csv"),
+            "--snapshot-manifest-out",
+            str(root / "manifest.json"),
+            "--all-source-file",
+            str(root / "guide.xml.gz"),
+            "--all-source-catalog-file",
+            str(root / "catalog.txt"),
+            "--epgshare-spool-out",
+            str(root / "spool.sqlite3"),
+            "--review-recheck-mode",
+            "apply",
+            "--review-recheck-servers",
+            "server_1",
+            "--review-apply-limit",
+            "30000",
+            "--coverage-fallback-limit",
+            "30000",
+            "--ai-review-limit",
+            "200",
+            "--use-gemini-ai",
+            "--write-to-sheet",
+            "--minimum-server-channels",
+            "server_1=2",
+            "server_2=2",
+            "server_3=2",
+        ]
+        summary = {
+            "inventory_rows": 4,
+            "new_rows": 0,
+            "auto_matched_rows": 0,
+            "appended_rows": 0,
+            "changed_rows": 0,
+            "missing_rows": 0,
+        }
+        with mock.patch.object(
+            sync, "authorized_google_session", return_value=google_session
+        ), mock.patch.object(
+            sync,
+            "google_sheet_values",
+            return_value=mapping_values(
+                [mapping_row("server_1", "1", "Existing")]
+            ),
+        ), mock.patch.object(
+            sync, "load_server_configs", side_effect=load_configs
+        ), mock.patch.object(
+            sync.requests, "Session", return_value=session
+        ), mock.patch.object(
+            sync, "fetch_panel_inventory", side_effect=fetch_inventory
+        ), mock.patch.object(
+            sync, "run_sync", return_value=summary
+        ) as run_sync:
+            result_code: int | None = None
+            error: sync.SyncError | None = None
+            try:
+                result_code = sync.main(arguments)
+            except sync.SyncError as exc:
+                error = exc
+            call_kwargs = dict(run_sync.call_args.kwargs)
+
+        session.close.assert_called_once_with()
+        google_session.close.assert_called_once_with()
+        return result_code, error, call_kwargs
+
+    def test_refresh_continues_when_one_provider_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result, error, kwargs = self.invoke_main(
+                Path(temporary),
+                mode="refresh",
+                provider_results={
+                    "server_1": inventory("server_1", self._channels(2)),
+                    "server_2": sync.SyncError("Server 2: HTTP 522"),
+                    "server_3": inventory("server_3", self._channels(2)),
+                },
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIsNone(error)
+        self.assertEqual(
+            [item.server_id for item in kwargs["inventories"]],
+            ["server_1", "server_3"],
+        )
+        self.assertTrue(kwargs["write_to_sheet"])
+        self.assertEqual(kwargs["review_recheck_mode"], "apply")
+        self.assertTrue(kwargs["use_gemini_ai"])
+        self.assertEqual(
+            kwargs["provider_failures"],
+            {"server_2": "Server 2: HTTP 522"},
+        )
+
+    def test_refresh_small_inventory_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result, error, kwargs = self.invoke_main(
+                Path(temporary),
+                mode="refresh",
+                provider_results={
+                    "server_1": inventory("server_1", self._channels(1)),
+                    "server_2": inventory("server_2", self._channels(2)),
+                    "server_3": inventory("server_3", self._channels(2)),
+                },
+            )
+
+        self.assertIsNone(result)
+        self.assertIsNotNone(error)
+        self.assertIn("server_1=1 (minimum 2)", str(error))
+        self.assertFalse(kwargs["write_to_sheet"])
+        self.assertEqual(kwargs["review_recheck_mode"], "dry-run")
+        self.assertFalse(kwargs["use_gemini_ai"])
+
+    def test_refresh_requires_at_least_one_available_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result, error, kwargs = self.invoke_main(
+                Path(temporary),
+                mode="refresh",
+                provider_results={
+                    server_id: sync.SyncError(f"{server_id}: unavailable")
+                    for server_id in sync.DEFAULT_SERVERS
+                },
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            str(error),
+            "Refresh requires at least one valid provider inventory.",
+        )
+        self.assertFalse(kwargs["write_to_sheet"])
+        self.assertEqual(kwargs["review_recheck_mode"], "dry-run")
+        self.assertFalse(kwargs["use_gemini_ai"])
+
+    def test_bootstrap_still_requires_every_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result, error, kwargs = self.invoke_main(
+                Path(temporary),
+                mode="bootstrap",
+                provider_results={
+                    "server_1": inventory("server_1", self._channels(2)),
+                    "server_2": sync.SyncError("Server 2: unavailable"),
+                    "server_3": inventory("server_3", self._channels(2)),
+                },
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("server_2=unavailable", str(error))
+        self.assertFalse(kwargs["write_to_sheet"])
+        self.assertEqual(kwargs["review_recheck_mode"], "dry-run")
+        self.assertFalse(kwargs["use_gemini_ai"])
 
 class ReviewRecheckBoundaryTests(unittest.TestCase):
     @staticmethod

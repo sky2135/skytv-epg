@@ -5430,6 +5430,37 @@ def parse_server_minimums(values: Sequence[str]) -> dict[str, int]:
     return result
 
 
+def inventory_floor_failures(
+    inventories: Sequence[PanelInventory],
+    minimums: Mapping[str, int],
+    *,
+    require_all: bool,
+) -> list[str]:
+    """Return safe floor failures for the current operating mode.
+
+    A returned inventory is always required to meet its configured floor.  A
+    missing inventory is fatal during the one-time bootstrap, but a normal
+    refresh preserves that provider's existing Sheet rows and continues with
+    the providers that are currently available.
+    """
+
+    counts = {
+        streaming.normalize_server_id(inventory.server_id): len(inventory.channels)
+        for inventory in inventories
+    }
+    failures = [
+        f"{server_id}={counts[server_id]:,} (minimum {minimum:,})"
+        for server_id, minimum in sorted(minimums.items())
+        if server_id in counts and counts[server_id] < minimum
+    ]
+    if require_all:
+        failures.extend(
+            f"{server_id}=unavailable"
+            for server_id in sorted(set(minimums) - set(counts))
+        )
+    return failures
+
+
 def generated_timestamp(value: str = "") -> str:
     if value:
         try:
@@ -8450,29 +8481,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         session.close()
 
-    floors_failed = [
-        f"{inventory.server_id}={len(inventory.channels):,} (minimum {minimums[inventory.server_id]:,})"
-        for inventory in inventories
-        if inventory.server_id in minimums
-        and len(inventory.channels) < minimums[inventory.server_id]
-    ]
-    missing_floor_servers = sorted(
-        set(minimums) - {inventory.server_id for inventory in inventories}
+    floors_failed = inventory_floor_failures(
+        inventories,
+        minimums,
+        require_all=args.mode == "bootstrap",
     )
-    if missing_floor_servers:
-        floors_failed.extend(f"{server_id}=unavailable" for server_id in missing_floor_servers)
-    bootstrap_error = ""
+    inventory_error = ""
     if args.mode == "bootstrap" and provider_failures:
-        bootstrap_error = "Bootstrap requires a valid inventory from all three servers."
+        inventory_error = "Bootstrap requires a valid inventory from all three servers."
+    elif args.mode == "refresh" and not inventories:
+        inventory_error = "Refresh requires at least one valid provider inventory."
     if floors_failed:
-        bootstrap_error = (
+        inventory_error = (
             "Provider inventory failed the configured channel floors: "
             + "; ".join(floors_failed)
         )
     try:
         effective_recheck_mode = (
             "dry-run"
-            if bootstrap_error and args.review_recheck_mode != "off"
+            if inventory_error and args.review_recheck_mode != "off"
             else args.review_recheck_mode
         )
         summary = run_sync(
@@ -8483,7 +8510,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             snapshot_out=snapshot_out,
             authoritative_snapshot_out=authoritative_snapshot_out,
             snapshot_manifest_out=snapshot_manifest_out,
-            write_to_sheet=args.write_to_sheet and not bootstrap_error,
+            write_to_sheet=args.write_to_sheet and not inventory_error,
             google_session=google_session,
             sheet_id=args.sheet_id,
             sheet_tab=args.sheet_tab,
@@ -8497,15 +8524,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             review_recheck_servers=args.review_recheck_servers,
             review_apply_limit=args.review_apply_limit,
             coverage_fallback_limit=args.coverage_fallback_limit,
-            use_gemini_ai=args.use_gemini_ai and not bootstrap_error,
+            use_gemini_ai=args.use_gemini_ai and not inventory_error,
             gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
             ai_review_limit=args.ai_review_limit,
             validate_native_review=args.validate_native_review,
             native_hint_summary=native_hint_summary,
             allow_insecure_http=args.allow_insecure_http,
         )
-        if bootstrap_error:
-            raise SyncError(bootstrap_error)
+        if inventory_error:
+            raise SyncError(inventory_error)
     finally:
         if google_session is not None:
             close = getattr(google_session, "close", None)
