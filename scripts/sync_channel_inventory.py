@@ -5487,6 +5487,7 @@ def _native_review_summary_defaults() -> dict[str, int]:
         "native_review_persisted": 0,
         "native_review_deferred": 0,
         "native_review_source_unavailable": 0,
+        "native_review_transient_outage_candidates": 0,
         "native_review_rejected_stored_conflict": 0,
         "native_review_rejected_invalid_id": 0,
         "native_review_rejected_provenance": 0,
@@ -5515,6 +5516,7 @@ def _build_verified_native_review_updates(
     inventories: Sequence[PanelInventory],
     generated_at: str,
     definitive_miss_keys_out: set[tuple[str, str]] | None = None,
+    transient_outage_keys_out: set[tuple[str, str]] | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Return exact Server 2/3 KEEP_PANEL updates after the native guide gate."""
 
@@ -5652,6 +5654,14 @@ def _build_verified_native_review_updates(
                     requested_ids=requested_ids,
                     now_epoch=now_epoch,
                 )
+            except streaming.PanelSourceUnavailable:
+                summary["native_review_source_unavailable"] += 1
+                summary["native_review_transient_outage_candidates"] += len(
+                    server_candidates
+                )
+                if transient_outage_keys_out is not None:
+                    transient_outage_keys_out.update(server_candidates)
+                continue
             except (native_review.NativeReviewError, streaming.BuildError):
                 summary["native_review_source_unavailable"] += 1
                 continue
@@ -6555,6 +6565,7 @@ def _run_sync_review_mode(
     ]
     native_verified_updates: list[dict[str, str]] = []
     definitive_native_miss_keys: set[tuple[str, str]] = set()
+    transient_native_outage_keys: set[tuple[str, str]] = set()
     native_summary = _native_review_summary_defaults()
     if validate_native_review and set(selected_servers).intersection(
         {"server_2", "server_3"}
@@ -6572,6 +6583,7 @@ def _run_sync_review_mode(
                 inventories=inventories,
                 generated_at=generated_at,
                 definitive_miss_keys_out=definitive_native_miss_keys,
+                transient_outage_keys_out=transient_native_outage_keys,
             )
         )
 
@@ -6589,14 +6601,26 @@ def _run_sync_review_mode(
     }
     if not definitive_native_miss_keys.issubset(native_verifier_input_keys):
         raise SyncError("Native definitive misses contain an unknown input identity.")
+    if not transient_native_outage_keys.issubset(native_verifier_input_keys):
+        raise SyncError("Native transient outages contain an unknown input identity.")
+    if definitive_native_miss_keys.intersection(transient_native_outage_keys):
+        raise SyncError("Native definitive misses and transient outages overlap.")
     review_definitive_native_miss_keys = definitive_native_miss_keys.intersection(
         protected_native_review_keys
+    )
+    review_transient_native_outage_keys = transient_native_outage_keys.intersection(
+        protected_native_review_keys
+    )
+    review_admitted_native_fallback_keys = (
+        review_definitive_native_miss_keys.union(
+            review_transient_native_outage_keys
+        )
     )
     intrinsic_synthetic_candidates = [
         row
         for row in intrinsic_synthetic_candidates
         if _row_identity(row) not in protected_native_review_keys
-        or _row_identity(row) in review_definitive_native_miss_keys
+        or _row_identity(row) in review_admitted_native_fallback_keys
     ]
 
     native_verified_keys = {
@@ -6606,6 +6630,11 @@ def _run_sync_review_mode(
         raise SyncError(
             "Native verification returned the same identity as both verified "
             "and definitively rejected."
+        )
+    if native_verified_keys.intersection(transient_native_outage_keys):
+        raise SyncError(
+            "Native verification returned the same identity as both verified "
+            "and transiently unavailable."
         )
     fallback_replaced_by_native = sum(
         1
@@ -6761,6 +6790,7 @@ def _run_sync_review_mode(
         "terminal_coverage_fallback_deferred_rows": 0,
         "terminal_coverage_fallback_protected_manual_rows": 0,
         "terminal_coverage_fallback_native_candidate_rows": 0,
+        "terminal_coverage_fallback_native_outage_rows": 0,
         "terminal_coverage_fallback_native_inconclusive_rows": 0,
     }
     terminal_fallback_updates: list[dict[str, str]] = []
@@ -6783,6 +6813,9 @@ def _run_sync_review_mode(
                     definitive_native_miss_keys=(
                         review_definitive_native_miss_keys
                     ),
+                    transient_native_outage_keys=(
+                        review_transient_native_outage_keys
+                    ),
                     source_sha256=outcome.source_sha256,
                     limit=min(
                         remaining_write_capacity,
@@ -6799,6 +6832,7 @@ def _run_sync_review_mode(
         ] = len(
             protected_native_review_keys
             .difference(review_definitive_native_miss_keys)
+            .difference(review_transient_native_outage_keys)
             .difference(terminal_excluded_keys)
         )
 
@@ -6880,9 +6914,9 @@ def _run_sync_review_mode(
         - selected_terminal_fallbacks,
     )
     # The matcher intentionally excludes protected native candidates from its
-    # inline fallback count. Add only the exact per-key native misses admitted
-    # by the terminal verifier so aggregate candidate/applied/deferred metrics
-    # remain disjoint and reconcile.
+    # inline fallback count. Add only the exact per-key native rows admitted by
+    # a definitive miss or classified transient transport outage so aggregate
+    # candidate/applied/deferred metrics remain disjoint and reconcile.
     auto_match_summary["coverage_fallback_candidate_rows"] = int(
         auto_match_summary.get("coverage_fallback_candidate_rows", 0)
     ) + int(

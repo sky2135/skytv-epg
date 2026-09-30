@@ -242,6 +242,15 @@ detected stream-ID reuse alert or provider/mapping identity mismatch. Disabled
 `APPROVED`, `MANUAL`, `IGNORE`, untracked manual targets, missing, drifted, and
 quarantined rows are protected.
 
+An exact current Server 2/3 native candidate normally requires the current
+native XMLTV schedule and name gates. When the panel download fails only with a
+classified transient transport result (timeout, connection failure,
+HTTP 408/425/429, or HTTP 5xx), the terminal synthetic lane may apply the same
+row-bound `coverage-fallback-v1` guide used elsewhere. The rollback record
+retains the exact prior panel source/feed/ID so a later healthy recheck can
+upgrade it. Authentication, TLS, redirect, malformed/empty payload, local I/O,
+disabled validation, and otherwise inconclusive failures do not qualify.
+
 Smart Rules run first against the same corroborated EPGShare catalog and
 same-snapshot programme gate used for new rows. `dry-run` does not write any
 existing `REVIEW` row. The separate new-channel append control remains
@@ -637,6 +646,7 @@ provider-total subtraction:
 | Native EPG matches persisted | `native_review_persisted` | Verified `KEEP_PANEL` updates confirmed after an apply write. This remains zero in dry-run. |
 | Native EPG matches deferred | `native_review_deferred` | Verified native rows not selected under the shared total apply cap. |
 | Native EPG sources unavailable | `native_review_source_unavailable` | Server 2/3 native XMLTV sources that could not be safely validated; safe unresolved rows continue to the grounded/synthetic lanes. |
+| Native transient-outage fallback rows | `terminal_coverage_fallback_native_outage_rows` | Exact disabled Server 2/3 native candidates moved to reversible local guides only after the downloader classified a transient transport outage. |
 | Channels considered by Gemini | `ai_review_considered_rows` | Unresolved rows included in bounded Gemini review. |
 | Rows deferred from Gemini | `ai_review_deferred_rows` | Otherwise eligible unresolved rows held because of the AI ceiling or remaining total-cap capacity; clusters are never split. |
 | Gemini HIGH responses found | `ai_review_high_suggestions_found` | Schema-valid `HIGH` responses choosing a supplied opaque candidate; this is not yet an approval count. |
