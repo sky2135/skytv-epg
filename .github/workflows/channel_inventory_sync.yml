@@ -28,7 +28,7 @@ on:
           - dry-run
           - apply
       recheck_server:
-        description: "Server backlog to recheck"
+        description: "REVIEW backlog to recheck (inventory still checks all servers)"
         required: true
         default: all
         type: choice
@@ -410,7 +410,11 @@ jobs:
 
           command=(
             python -u scripts/sync_channel_inventory.py
-              --mode bootstrap
+              # The private Sheet is already established, so every recurring
+              # run is a refresh. A temporarily unavailable provider is
+              # preserved and skipped; any inventory that is returned must
+              # still meet its configured channel floor.
+              --mode refresh
               --sheet-id "$GOOGLE_SHEET_ID"
               --sheet-tab "$GOOGLE_SHEET_TAB"
               --output-dir .build/channel-sync

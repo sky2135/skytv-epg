@@ -510,7 +510,7 @@ For any later read-only preview:
 1. Open **Actions** → **1 - Sync channels to Google Sheet** → **Run workflow**.
 2. Leave **Add missing channels to Google Sheet** turned off.
 3. Set **Recheck channels already marked REVIEW** to **dry-run**.
-4. Choose **all** under **Server backlog to recheck**.
+4. Choose **all** under **REVIEW backlog to recheck (inventory still checks all servers)**.
 5. Leave Gemini off for the first preview, then click **Run workflow**.
 6. Open the compact summary. Use the **To review** column for the current broad
    state, and use the downloaded `summary.json` for exact eligible, checked,
@@ -716,7 +716,8 @@ After the first setup, the system runs automatically:
 
 1. Every day at **02:17 Toronto time**, Workflow 1 checks all three servers,
    appends missing channels, and rechecks eligible existing `REVIEW` rows in
-   `apply` mode.
+   `apply` mode. A temporarily unavailable provider is preserved and skipped,
+   so healthy providers can still complete the run.
 2. The scheduled total apply and synthetic fallback caps each default to
    `30000`. Repository variables can reduce either cap or set it to `0`. The
    total cap covers deterministic, native, synthetic, heading, and AI decisions.
@@ -737,8 +738,10 @@ After the first setup, the system runs automatically:
    remapped, and the existing live-sports workflow continues independently.
 
 If a provider is temporarily unavailable during the daily run, Version 1 keeps
-the last trusted rows in the Sheet. It does not erase channels because a server
-failed to answer once.
+the last trusted rows in the Sheet, makes no missing-channel claim for that
+provider, and continues with the available providers. Every inventory that is
+returned must still meet its configured channel floor, and a run with no valid
+provider inventory stops without writing.
 
 EPGShare publishes its XML and text catalogs separately. During a rollover,
 Version 1 continues only when the XML set, text set, and their exact
