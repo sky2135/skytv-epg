@@ -4039,6 +4039,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
             "Native EPG matches verified",
             "Native EPG matches enabled (included in total above)",
             "Native EPG sources unavailable",
+            "Native EPG failure classes",
             "Reversible local guides used for exact native",
             "verified channels enabled",
             "Gemini unavailable or rejected",
@@ -4739,6 +4740,10 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(
             summary["native_review_transient_outage_candidates"], 1
         )
+        self.assertEqual(
+            summary["native_review_source_failure_kinds"],
+            {"server_2": "transient_transport"},
+        )
 
         generic_failure: set[tuple[str, str]] = set()
         with mock.patch.object(
@@ -4759,6 +4764,87 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(
             generic_summary["native_review_transient_outage_candidates"], 0
         )
+        self.assertEqual(
+            generic_summary["native_review_source_failure_kinds"],
+            {"server_2": "download_other"},
+        )
+
+    def test_native_review_classifies_download_and_validation_failures_safely(
+        self,
+    ) -> None:
+        before = mapping_row(
+            "server_2",
+            "101",
+            "UK | BBC One FHD",
+            action="REVIEW",
+            source="panel",
+            epg_feed="panel",
+            epg_id="bbc.one",
+        )
+        before["enabled"] = "FALSE"
+        provider = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": "101",
+                    "name": "UK | BBC One FHD",
+                    "category_name": "UK | General",
+                    "epg_channel_id": "bbc.one",
+                }
+            ],
+        )
+        cases = (
+            (
+                sync.streaming.BuildError(
+                    "server_2 panel returned a non-XML response."
+                ),
+                None,
+                "remote_non_xml",
+            ),
+            (
+                None,
+                sync.native_review.NativeReviewError(
+                    "A native XMLTV source is below its conservative "
+                    "completeness floor."
+                ),
+                "validation_incomplete",
+            ),
+            (
+                None,
+                sync.native_review.NativeReviewError(
+                    "A native XMLTV source failed its security preflight."
+                ),
+                "validation_security",
+            ),
+        )
+        for download_error, validation_error, expected in cases:
+            with self.subTest(expected=expected), mock.patch.object(
+                sync.streaming,
+                "download_panel_xmltv",
+                side_effect=(
+                    download_error
+                    if download_error is not None
+                    else None
+                ),
+                return_value=(Path("/tmp/native.xml"), {}),
+            ), mock.patch.object(
+                sync.native_review,
+                "validate_native_xmltv",
+                side_effect=validation_error,
+            ):
+                _updates, summary = sync._build_verified_native_review_updates(
+                    review_input_rows=[before],
+                    review_result_rows=[before],
+                    inventories=[provider],
+                    generated_at="2026-09-16T00:00:00Z",
+                )
+
+            self.assertEqual(summary["native_review_source_unavailable"], 1)
+            self.assertEqual(
+                summary["native_review_source_failure_kinds"],
+                {"server_2": expected},
+            )
+            self.assertIn(expected, sync.NATIVE_REVIEW_SOURCE_FAILURE_KINDS)
 
     def test_verified_native_schedule_overrides_coverage_fallback_proposal(self) -> None:
         before = mapping_row(
