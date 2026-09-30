@@ -846,6 +846,39 @@ class AutoMatchInventoryTests(unittest.TestCase):
             accepted_summary["terminal_coverage_fallback_native_inconclusive_rows"],
             0,
         )
+        outage, outage_summary = integration.terminal_coverage_fallback_updates(
+            original_rows=[native_prefill],
+            matcher_rows=[native_prefill],
+            quarantined_keys=(),
+            transient_native_outage_keys={("server_2", "review-1")},
+            source_sha256="d" * 64,
+            limit=1,
+        )
+        self.assertEqual([row["action"] for row in outage], ["AUTO_DUMMY"])
+        self.assertEqual(
+            outage_summary["terminal_coverage_fallback_native_candidate_rows"],
+            1,
+        )
+        self.assertEqual(
+            outage_summary["terminal_coverage_fallback_native_outage_rows"],
+            1,
+        )
+        self.assertEqual(
+            outage_summary["terminal_coverage_fallback_native_inconclusive_rows"],
+            0,
+        )
+        with self.assertRaisesRegex(
+            integration.AutoMatchError, "misses and outages overlap"
+        ):
+            integration.terminal_coverage_fallback_updates(
+                original_rows=[native_prefill],
+                matcher_rows=[native_prefill],
+                quarantined_keys=(),
+                definitive_native_miss_keys={("server_2", "review-1")},
+                transient_native_outage_keys={("server_2", "review-1")},
+                source_sha256="d" * 64,
+                limit=1,
+            )
 
         legacy = dict(prefilled)
         legacy.update(

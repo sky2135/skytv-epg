@@ -4039,6 +4039,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
             "Native EPG matches verified",
             "Native EPG matches enabled (included in total above)",
             "Native EPG sources unavailable",
+            "Reversible local guides used for exact native",
             "verified channels enabled",
             "Gemini unavailable or rejected",
         ):
@@ -4691,6 +4692,73 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(updates[0]["epg_id"], "bbc.one")
         self.assertEqual(summary["native_review_candidates"], 1)
         self.assertEqual(summary["native_review_verified"], 1)
+
+    def test_native_review_exposes_only_classified_transient_outage_candidates(
+        self,
+    ) -> None:
+        before = mapping_row(
+            "server_2",
+            "101",
+            "UK | BBC One FHD",
+            action="REVIEW",
+            source="panel",
+            epg_feed="panel",
+            epg_id="bbc.one",
+        )
+        before["enabled"] = "FALSE"
+        provider = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": "101",
+                    "name": "UK | BBC One FHD",
+                    "category_name": "UK | General",
+                    "epg_channel_id": "bbc.one",
+                }
+            ],
+        )
+        transient: set[tuple[str, str]] = set()
+        with mock.patch.object(
+            sync.streaming,
+            "download_panel_xmltv",
+            side_effect=sync.streaming.PanelSourceUnavailable(
+                "server_2", "HTTP 522"
+            ),
+        ):
+            updates, summary = sync._build_verified_native_review_updates(
+                review_input_rows=[before],
+                review_result_rows=[before],
+                inventories=[provider],
+                generated_at="2026-09-16T00:00:00Z",
+                transient_outage_keys_out=transient,
+            )
+
+        self.assertEqual(updates, [])
+        self.assertEqual(transient, {("server_2", "101")})
+        self.assertEqual(summary["native_review_source_unavailable"], 1)
+        self.assertEqual(
+            summary["native_review_transient_outage_candidates"], 1
+        )
+
+        generic_failure: set[tuple[str, str]] = set()
+        with mock.patch.object(
+            sync.streaming,
+            "download_panel_xmltv",
+            side_effect=sync.streaming.BuildError("malformed XMLTV"),
+        ):
+            _updates, generic_summary = sync._build_verified_native_review_updates(
+                review_input_rows=[before],
+                review_result_rows=[before],
+                inventories=[provider],
+                generated_at="2026-09-16T00:00:00Z",
+                transient_outage_keys_out=generic_failure,
+            )
+
+        self.assertEqual(generic_failure, set())
+        self.assertEqual(generic_summary["native_review_source_unavailable"], 1)
+        self.assertEqual(
+            generic_summary["native_review_transient_outage_candidates"], 0
+        )
 
     def test_verified_native_schedule_overrides_coverage_fallback_proposal(self) -> None:
         before = mapping_row(
@@ -6251,6 +6319,119 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
                 ],
                 1,
             )
+
+    def test_classified_transient_native_outage_uses_reversible_fallback(
+        self,
+    ) -> None:
+        review = mapping_row(
+            "server_2",
+            "native-outage",
+            "Server Two Event",
+            action="REVIEW",
+            source="panel",
+            epg_feed="panel",
+            epg_id="native.event",
+        )
+        review.update({"enabled": "FALSE", "notes": "operator native candidate"})
+        provider = inventory(
+            "server_2",
+            [
+                {
+                    "stream_id": "native-outage",
+                    "name": "Server Two Event",
+                    "category_name": "General",
+                    "epg_channel_id": "native.event",
+                }
+            ],
+        )
+        outcome = self.fake_recheck_outcome([dict(review)])
+        captured: list[dict[str, str]] = []
+        current_rows = [dict(review)]
+
+        def transient_outage(**kwargs):
+            kwargs["transient_outage_keys_out"].add(
+                ("server_2", "native-outage")
+            )
+            summary = sync._native_review_summary_defaults()
+            summary.update(
+                {
+                    "native_review_candidates": 1,
+                    "native_review_source_unavailable": 1,
+                    "native_review_transient_outage_candidates": 1,
+                }
+            )
+            return [], summary
+
+        def persist_updates(
+            _session,
+            _sheet_id,
+            _sheet_tab,
+            _base_table,
+            rows,
+            **_kwargs,
+        ):
+            captured.extend(dict(row) for row in rows)
+            replacements = {
+                (row["server_id"], row["stream_id"]): dict(row)
+                for row in rows
+            }
+            current_rows[:] = [
+                replacements.get(
+                    (row["server_id"], row["stream_id"]), dict(row)
+                )
+                for row in current_rows
+            ]
+            return len(rows), table(current_rows)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            sync.automatch, "auto_match_and_spool", return_value=outcome
+        ), mock.patch.object(
+            sync,
+            "_build_verified_native_review_updates",
+            side_effect=transient_outage,
+        ), mock.patch.object(
+            sync,
+            "google_sheet_values",
+            side_effect=lambda *_args, **_kwargs: mapping_values(current_rows),
+        ), mock.patch.object(
+            sync,
+            "google_sync_alert_values",
+            return_value=[list(sync.ALERT_COLUMNS)],
+        ), mock.patch.object(
+            sync, "append_sync_alert_rows", return_value=0
+        ), mock.patch.object(
+            sync, "update_google_sheet_review_rows", side_effect=persist_updates
+        ):
+            root = Path(temporary)
+            summary = sync.run_sync(
+                table=table([review]),
+                inventories=[provider],
+                output_dir=root / "reports",
+                generated_at="2026-09-16T00:00:00Z",
+                snapshot_out=root / "effective.csv",
+                all_source_file=root / "all.xml.gz",
+                all_source_catalog_file=root / "all.txt",
+                epgshare_spool_out=root / "selected.sqlite3",
+                review_recheck_mode="apply",
+                review_recheck_servers=("server_2",),
+                review_apply_limit=25,
+                coverage_fallback_limit=25,
+                validate_native_review=True,
+                google_session=object(),
+                sheet_id="a" * 30,
+            )
+
+        self.assertEqual([row["action"] for row in captured], ["AUTO_DUMMY"])
+        self.assertIsNotNone(
+            sync.automatch.verified_coverage_fallback_preimage(captured[0])
+        )
+        self.assertEqual(summary["review_terminal_synthetic_rows"], 1)
+        self.assertEqual(
+            summary["terminal_coverage_fallback_native_outage_rows"], 1
+        )
+        self.assertEqual(
+            summary["terminal_coverage_fallback_native_inconclusive_rows"], 0
+        )
 
     def test_new_auto_enabled_row_is_provider_revalidated_before_append(self) -> None:
         provider = inventory(

@@ -44,6 +44,12 @@ the production builder leaves the private Sheet mapping unchanged and uses a
 disclosed per-stream local synthetic guide for that build. Manifests count this
 separately as `nativePanelUnavailableSyntheticStreams`. Authentication, TLS,
 redirect, payload-validation, and local I/O failures remain hard failures.
+During an explicit Workflow 1 REVIEW recheck, the same narrowly classified
+transient transport outage may place an exact current native candidate on the
+reversible `coverage-fallback-v1` local guide. Its prior panel target is retained
+byte-for-byte for a later automatic real-schedule upgrade. Generic verifier,
+authentication, TLS, payload, and local-I/O failures still leave the row in
+`REVIEW`.
 
 ## Workflows
 
@@ -118,6 +124,11 @@ For Server 2 and Server 3, the same run may also recover an exact native ID
 from current API/M3U evidence, but only after whole-catalog name uniqueness,
 current programme, and immediate pre-write provider checks pass. Server 1
 has no native-real lane.
+If that native schedule check is blocked only by a classified transient
+timeout, connection error, HTTP 408/425/429, or HTTP 5xx response, an exact
+disabled native candidate may receive a truthful reversible local guide. The
+Sheet records the prior native target for restoration; all other inconclusive
+native checks remain disabled.
 Grounded Gemini verification is limited to the smaller of 200 affected rows or
 the capacity remaining under the total apply limit. It is scheduled
 automatically when `GEMINI_API_KEY` exists unless explicitly disabled with

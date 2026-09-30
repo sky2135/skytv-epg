@@ -1716,6 +1716,7 @@ def terminal_coverage_fallback_updates(
     quarantined_keys: Iterable[tuple[str, str]],
     excluded_keys: Iterable[tuple[str, str]] = (),
     definitive_native_miss_keys: Iterable[tuple[str, str]] = (),
+    transient_native_outage_keys: Iterable[tuple[str, str]] = (),
     source_sha256: str,
     limit: int,
     rotation: int = 0,
@@ -1725,10 +1726,12 @@ def terminal_coverage_fallback_updates(
     The caller supplies the immutable REVIEW preimages and the matcher results.
     Only rows which still remain disabled REVIEW are eligible.  Exact current
     Server 2/3 panel candidates are included only when the sync layer supplies
-    their exact identities in ``definitive_native_miss_keys`` after a current
-    native XMLTV source definitively fails that row's schedule or name gate.
-    An unavailable, disabled, or inconclusive native verifier therefore cannot
-    replace an operator-visible native candidate with a synthetic schedule.
+    their exact identities after either a definitive current schedule/name miss
+    or a classified transient native-panel transport outage.  The latter is
+    deliberately separate from generic verifier failure: authentication, TLS,
+    malformed XMLTV, local I/O, disabled verification, and otherwise
+    inconclusive results still cannot replace an operator-visible native
+    candidate with a synthetic schedule.
     """
 
     if (
@@ -1761,6 +1764,10 @@ def terminal_coverage_fallback_updates(
         definitive_native_misses = frozenset(
             _canonical_key(server_id, stream_id)
             for server_id, stream_id in definitive_native_miss_keys
+        )
+        transient_native_outages = frozenset(
+            _canonical_key(server_id, stream_id)
+            for server_id, stream_id in transient_native_outage_keys
         )
     except (TypeError, ValueError) as exc:
         raise AutoMatchError(
@@ -1795,6 +1802,14 @@ def terminal_coverage_fallback_updates(
         raise AutoMatchError(
             "Terminal coverage fallback native misses contain an unknown identity."
         )
+    if not transient_native_outages.issubset(originals):
+        raise AutoMatchError(
+            "Terminal coverage fallback native outages contain an unknown identity."
+        )
+    if definitive_native_misses.intersection(transient_native_outages):
+        raise AutoMatchError(
+            "Terminal coverage fallback native misses and outages overlap."
+        )
 
     classifications = {
         key: _coverage_fallback_classification(
@@ -1806,9 +1821,12 @@ def terminal_coverage_fallback_updates(
         )
         for key in originals
     }
+    admitted_native_keys = definitive_native_misses.union(
+        transient_native_outages
+    )
     invalid_native_misses = {
         key
-        for key in definitive_native_misses
+        for key in admitted_native_keys
         if classifications.get(key) != "protected_native"
     }
     if invalid_native_misses:
@@ -1824,7 +1842,7 @@ def terminal_coverage_fallback_updates(
             classification in eligible_classes
             or (
                 classification == "protected_native"
-                and key in definitive_native_misses
+                and key in admitted_native_keys
             )
         )
         and key not in excluded
@@ -1856,14 +1874,21 @@ def terminal_coverage_fallback_updates(
             1
             for key, value in classifications.items()
             if value == "protected_native"
-            and key in definitive_native_misses
+            and key in admitted_native_keys
+            and key not in excluded
+        ),
+        "terminal_coverage_fallback_native_outage_rows": sum(
+            1
+            for key, value in classifications.items()
+            if value == "protected_native"
+            and key in transient_native_outages
             and key not in excluded
         ),
         "terminal_coverage_fallback_native_inconclusive_rows": sum(
             1
             for key, value in classifications.items()
             if value == "protected_native"
-            and key not in definitive_native_misses
+            and key not in admitted_native_keys
             and key not in excluded
         ),
     }

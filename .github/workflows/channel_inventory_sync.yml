@@ -983,6 +983,16 @@ jobs:
                       "- Native EPG sources unavailable: "
                       f"**{native_unavailable:,}**\n"
                   )
+                  native_outage_fallbacks = count(
+                      payload,
+                      "terminal_coverage_fallback_native_outage_rows",
+                  )
+                  if native_outage_fallbacks:
+                      handle.write(
+                          "- Reversible local guides used for exact native "
+                          "candidates during a classified transient outage: "
+                          f"**{native_outage_fallbacks:,}**\n"
+                      )
               deferred = int(payload.get("review_recheck_deferred_rows", 0))
               if deferred:
                   handle.write(
