@@ -813,10 +813,80 @@ class MappingContractTests(unittest.TestCase):
                 with self.assertRaises(runner.BuildError) as caught:
                     runner.download_panel_xmltv("server_2", destination)
             message = str(caught.exception)
+            self.assertIsInstance(caught.exception, runner.PanelSourceUnavailable)
             self.assertIn("last result: HTTP 503", message)
             self.assertNotIn("panel.example", message)
             self.assertNotIn("fixture-user", message)
             self.assertNotIn("fixture-password", message)
+            self.assertFalse(destination.exists())
+        self.assertEqual(session.get.call_count, 3)
+        for response in responses:
+            response.close.assert_called_once()
+        session.close.assert_called_once()
+
+    def test_panel_auth_failure_cannot_enable_runtime_fallback(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "https://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+        }
+        responses = []
+        for _attempt in range(3):
+            response = mock.MagicMock()
+            response.status_code = 401
+            response.headers = {}
+            responses.append(response)
+        session = mock.MagicMock()
+        session.headers = {}
+        session.get.side_effect = responses
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests, "Session", return_value=session
+            ), mock.patch.object(runner.time, "sleep"):
+                with self.assertRaises(runner.BuildError) as caught:
+                    runner.download_panel_xmltv("server_2", destination)
+            self.assertNotIsInstance(
+                caught.exception, runner.PanelSourceUnavailable
+            )
+            self.assertIn("last result: HTTP 401", str(caught.exception))
+            self.assertFalse(destination.exists())
+        self.assertEqual(session.get.call_count, 3)
+        for response in responses:
+            response.close.assert_called_once()
+        session.close.assert_called_once()
+
+    def test_empty_panel_payload_cannot_enable_runtime_fallback(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "https://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+        }
+        responses = []
+        for _attempt in range(3):
+            response = mock.MagicMock()
+            response.status_code = 200
+            response.headers = {}
+            response.iter_content.return_value = []
+            responses.append(response)
+        session = mock.MagicMock()
+        session.headers = {}
+        session.get.side_effect = responses
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests, "Session", return_value=session
+            ), mock.patch.object(runner.time, "sleep"):
+                with self.assertRaises(runner.BuildError) as caught:
+                    runner.download_panel_xmltv("server_2", destination)
+            self.assertNotIsInstance(
+                caught.exception, runner.PanelSourceUnavailable
+            )
+            self.assertIn("last result: empty response", str(caught.exception))
             self.assertFalse(destination.exists())
         self.assertEqual(session.get.call_count, 3)
         for response in responses:
@@ -853,6 +923,110 @@ class MappingContractTests(unittest.TestCase):
             self.assertFalse(destination.exists())
         self.assertEqual(session.get.call_count, 3)
         session.close.assert_called_once()
+
+    def test_transient_panel_outage_builds_truthful_runtime_synthetic_guide(
+        self,
+    ) -> None:
+        mapping_row = _mapping_row(
+            server_id="server_2",
+            stream_id="202",
+            channel_name="Native Fixture Channel",
+            category_name="General",
+            epg_id="Native.Fixture.test",
+            source="panel",
+            epg_feed="server xmltv.php",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mapping_path = root / "mapping.csv"
+            mapping_path.write_bytes(_mapping_bytes([mapping_row]))
+            source_path = root / "all.xml.gz"
+            _write_deterministic_gzip(source_path, "<tv/>")
+            public = root / "public"
+            expected_rows = runner.parse_mapping_csv(
+                mapping_path.read_bytes(), {"server_2"}
+            )
+            expected_mapping_sha = runner.canonical_mapping_sha256(
+                expected_rows
+            )
+
+            with mock.patch.object(
+                runner,
+                "download_panel_xmltv",
+                side_effect=runner.PanelSourceUnavailable(
+                    "server_2", "HTTP 522"
+                ),
+            ):
+                result = runner.main(
+                    [
+                        "--mapping-file",
+                        str(mapping_path),
+                        "--all-source-file",
+                        str(source_path),
+                        "--public-dir",
+                        str(public),
+                        "--work-dir",
+                        str(root / "work"),
+                        "--servers",
+                        "server_2",
+                        "--minimum-coverage",
+                        "100",
+                        "--now-epoch",
+                        str(FIXED_NOW),
+                    ]
+                )
+            self.assertEqual(result, 0)
+
+            manifest = json.loads(
+                (
+                    public
+                    / "reports/server_2/server_2_tivimate_manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["mappingSha256"], expected_mapping_sha)
+            self.assertFalse(manifest["nativePanelXmltvUsed"])
+            self.assertEqual(
+                manifest["nativePanelUnavailableSyntheticStreams"], 1
+            )
+            self.assertEqual(manifest["combinedSourceDummyGuideStreams"], 0)
+            self.assertEqual(
+                manifest["sourcePolicy"],
+                "MAPPING_SELECTED_PLUS_CHANNEL_DERIVED",
+            )
+            self.assertEqual(
+                manifest["guideCoverage"]["counts"]["nativePanelReal"], 0
+            )
+            self.assertEqual(
+                manifest["guideCoverage"]["counts"]["localSynthetic"], 1
+            )
+            self.assertEqual(
+                manifest["sourceProvenance"]["panel:server_2"],
+                {
+                    "fallback": "CHANNEL_DERIVED_LOCAL_SYNTHETIC",
+                    "fallbackStreams": 1,
+                    "inputMode": "builder-download",
+                    "lastResult": "HTTP 522",
+                    "status": "unavailable",
+                },
+            )
+
+            metadata = _read_gzip_json(
+                public / "EPG/server_2_metadata.json.gz"
+            )
+            fixture = metadata["streamMetadata"]["202"]
+            self.assertEqual(fixture["guideMode"], "synthetic")
+            self.assertEqual(
+                fixture["guideFallbackReason"], "nativePanelUnavailable"
+            )
+            with gzip.open(
+                public / "epg/server_2_tivimate.xml.gz",
+                "rt",
+                encoding="utf-8",
+            ) as handle:
+                xml = handle.read()
+            self.assertIn(
+                "Schedule unavailable — Native Fixture Channel", xml
+            )
 
     def test_xmltv_timezone_rejects_invalid_hour_or_minute_fields(self) -> None:
         self.assertIsNotNone(runner.parse_xmltv_time("20270115093000 +0530"))

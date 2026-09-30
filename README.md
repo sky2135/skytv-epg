@@ -39,6 +39,12 @@ safe rows may use a local synthetic guide. Server 1 credentials are used only
 by the inventory step to discover its channel list and are not available to the
 EPG-building step.
 
+If a Server 2/3 native panel is temporarily unavailable after bounded retries,
+the production builder leaves the private Sheet mapping unchanged and uses a
+disclosed per-stream local synthetic guide for that build. Manifests count this
+separately as `nativePanelUnavailableSyntheticStreams`. Authentication, TLS,
+redirect, payload-validation, and local I/O failures remain hard failures.
+
 ## Workflows
 
 - `1 - Sync channels to Google Sheet` — runs daily at **02:17 Toronto time** and
