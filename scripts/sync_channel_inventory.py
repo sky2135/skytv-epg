@@ -5500,6 +5500,10 @@ NATIVE_REVIEW_SOURCE_FAILURE_KINDS = frozenset(
         "validation_incomplete",
         "validation_limits",
         "validation_file",
+        "validation_source_id",
+        "validation_structure",
+        "validation_order",
+        "validation_input",
         "validation_other",
     }
 )
@@ -5562,6 +5566,20 @@ def _native_review_validation_failure_kind(exc: BaseException) -> str:
     """Return one public, non-secret class for a controlled validation failure."""
 
     message = str(exc).casefold()
+    if "native epg source contains an invalid id" in message:
+        return "validation_source_id"
+    if "unsupported top-level record" in message:
+        return "validation_structure"
+    if "declares channels after programmes" in message:
+        return "validation_order"
+    if (
+        "candidate set contains an invalid id" in message
+        or "candidate set is invalid" in message
+        or "unsupported server" in message
+        or "server 1 native epg validation" in message
+        or "validation time is invalid" in message
+    ):
+        return "validation_input"
     if "security preflight" in message or "forbidden" in message:
         return "validation_security"
     if "not an xmltv document" in message:

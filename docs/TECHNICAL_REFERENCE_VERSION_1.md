@@ -646,7 +646,7 @@ provider-total subtraction:
 | Native EPG matches persisted | `native_review_persisted` | Verified `KEEP_PANEL` updates confirmed after an apply write. This remains zero in dry-run. |
 | Native EPG matches deferred | `native_review_deferred` | Verified native rows not selected under the shared total apply cap. |
 | Native EPG sources unavailable | `native_review_source_unavailable` | Server 2/3 native XMLTV sources that could not be safely validated; safe unresolved rows continue to the grounded/synthetic lanes. |
-| Native EPG failure classes | `native_review_source_failure_kinds` | Per-server allowlisted diagnostic codes such as `remote_non_xml` or `validation_incomplete`. Raw URLs, credentials, response bodies, IDs, and exception text are never included. |
+| Native EPG failure classes | `native_review_source_failure_kinds` | Per-server allowlisted diagnostic codes such as `remote_non_xml`, `validation_incomplete`, or `validation_source_id`. Raw URLs, credentials, response bodies, IDs, and exception text are never included. |
 | Native transient-outage fallback rows | `terminal_coverage_fallback_native_outage_rows` | Exact disabled Server 2/3 native candidates moved to reversible local guides only after the downloader classified a transient transport outage. |
 | Channels considered by Gemini | `ai_review_considered_rows` | Unresolved rows included in bounded Gemini review. |
 | Rows deferred from Gemini | `ai_review_deferred_rows` | Otherwise eligible unresolved rows held because of the AI ceiling or remaining total-cap capacity; clusters are never split. |
