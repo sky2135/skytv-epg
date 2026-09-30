@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Create exact, production-accurate fallback icon overrides.
 
-Only enabled mapping rows that would otherwise have no usable icon receive a
-generated category fallback.  The production builder can use source XMLTV
-icons for EPGShare rows, but it intentionally does not publish native panel
-icons and synthetic/dummy guides have no source icon.  Those two cases
-therefore need local overrides even when the same ID happens to exist in the
-EPGShare catalog.
+Only enabled mapping rows that would otherwise have no usable icon receive an
+exact reviewed brand logo or a generated category fallback. The production
+builder can use source XMLTV icons for EPGShare rows, but it intentionally does
+not publish native panel icons and synthetic/dummy guides have no source icon.
+Those cases therefore need local overrides even when the same ID happens to
+exist in the EPGShare catalog.
 
 The exact rows contain private provider identities. They are written only to a
 required ephemeral output path for the current workflow run. The small public
@@ -20,6 +20,8 @@ import argparse
 import csv
 import gzip
 import json
+import re
+import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -75,14 +77,38 @@ GENERATED_NOTE_PREFIX = "AUTO-GENERATED category fallback:"
 NAMED_FALLBACK_NOTE_PREFIX = "NAMED_FALLBACK:"
 NAMED_PORTRAIT_NOTE_PREFIX = "NAMED_PORTRAIT:"
 NAMED_SYMBOL_NOTE_PREFIX = "NAMED_SYMBOL:"
+BRAND_LOGO_NOTE_PREFIX = "BRAND_LOGO:"
 EPHEMERAL_NOTE_PREFIXES = (
     GENERATED_NOTE_PREFIX,
     NAMED_FALLBACK_NOTE_PREFIX,
     NAMED_PORTRAIT_NOTE_PREFIX,
     NAMED_SYMBOL_NOTE_PREFIX,
+    BRAND_LOGO_NOTE_PREFIX,
 )
 TRUE_VALUES = frozenset({"1", "true", "yes", "y", "on", "enabled"})
 FALSE_VALUES = frozenset({"0", "false", "no", "n", "off", "disabled"})
+BRAND_CATALOG_COLUMNS = (
+    "brand_id",
+    "icon_url",
+    "source_page_url",
+    "rights_notes",
+)
+SUPPORTED_BRAND_IDS = frozenset(
+    {
+        "abc",
+        "cbs",
+        "cw",
+        "espn",
+        "flosports",
+        "fox",
+        "mynetworktv",
+        "nbc",
+        "nfl",
+        "pbs",
+        "tsn",
+        "wgn",
+    }
+)
 
 
 def normalized(value: object) -> str:
@@ -206,6 +232,90 @@ def portrait_asset_index(
             )
 
     return portraits
+
+
+def brand_logo_index(path: Path) -> dict[str, dict[str, str]]:
+    """Load the small reviewed public brand catalog."""
+
+    headers, rows = read_csv(path)
+    if tuple(headers) != BRAND_CATALOG_COLUMNS:
+        raise ValueError("Brand-logo catalog has an unsupported schema.")
+    result: dict[str, dict[str, str]] = {}
+    for row in rows:
+        brand_id = normalized(row.get("brand_id", ""))
+        icon_url = safe_http_url(row.get("icon_url", ""))
+        source_page_url = safe_http_url(row.get("source_page_url", ""))
+        if brand_id not in SUPPORTED_BRAND_IDS:
+            raise ValueError(f"Brand-logo catalog has unknown ID: {brand_id!r}.")
+        if not icon_url or not source_page_url or not row.get("rights_notes", "").strip():
+            raise ValueError(f"Brand-logo catalog row {brand_id!r} is incomplete.")
+        if brand_id in result:
+            raise ValueError(f"Brand-logo catalog has duplicate ID: {brand_id!r}.")
+        result[brand_id] = {
+            "brand_id": brand_id,
+            "icon_url": icon_url,
+            "source_page_url": source_page_url,
+            "rights_notes": str(row.get("rights_notes", "")).strip(),
+        }
+    return result
+
+
+def exact_brand_id(row: Mapping[str, str]) -> str:
+    """Return one reviewed brand only for an anchored provider-name grammar."""
+
+    raw_name = str(row.get("channel_name", "") or "")
+    if re.search(r"[#*_]{2,}", raw_name):
+        return ""
+    name = " ".join(unicodedata.normalize("NFKC", raw_name).upper().split())
+    category = " ".join(
+        unicodedata.normalize(
+            "NFKC", str(row.get("category_name", "") or "")
+        ).upper().split()
+    )
+
+    if re.fullmatch(
+        r"(?:SP|CA)\s*-\s*(?:VIP\s+)?TSN\s+[1-5]"
+        r"(?:\s+(?:4K|UHD|FHD|HD|SD))?",
+        name,
+    ):
+        return "tsn"
+    if (
+        re.match(r"^US\s*\(\s*ESPN\+?\s*[0-9]{3}\s*\)\s*\|", name)
+        or re.match(r"^(?:SP|USA|US|LAT|BR)\s*[-:]\s*ESPN(?:\s|$)", name)
+        or re.match(r"^USA\s*-\s*ESPN\s+PLAY\s+EVENTS?\s+[0-9]+", name)
+    ):
+        return "espn"
+    if (
+        re.match(r"^NFL\s*\|\s*[0-9]{2,3}\s*-", name)
+        or re.match(r"^(?:SP|USA|US|NFL)\s*-\s*NFL(?:\s|$)", name)
+        or ("USA NFL" in category and re.match(r"^NFL\s+(?:CBS|FOX|NBC)\b", name))
+    ):
+        return "nfl"
+    if (
+        re.match(r"^\(\s*FLSP\s+[0-9]{1,4}\s*\)\s*\|", name)
+        or re.match(r"^US\s*\(\s*FLO\s+[0-9]{1,4}\s*\)\s*\|", name)
+        or re.match(r"^USA\s*-\s*FLO\s+[0-9]{1,4}\s*:", name)
+    ):
+        return "flosports"
+
+    # Network-family fallbacks are limited to the explicit North-American
+    # provider namespace. An exact station/manual/source icon still wins.
+    if not re.search(r"\bUSA\b", category):
+        return ""
+    if re.match(r"^USA\s*-\s*WGN\s*9?\b", name):
+        return "wgn"
+    for token, brand_id in (
+        ("MY", "mynetworktv"),
+        ("ABC", "abc"),
+        ("CBS", "cbs"),
+        ("CW", "cw"),
+        ("FOX", "fox"),
+        ("NBC", "nbc"),
+        ("PBS", "pbs"),
+    ):
+        if re.match(rf"^USA\s*-\s*{token}(?:\s|$)", name):
+            return brand_id
+    return ""
 
 
 def override_matches(row: Mapping[str, str], override: Mapping[str, str]) -> bool:
@@ -405,6 +515,7 @@ def generate(
     output_config: Path,
     logo_root: Path,
     asset_catalog: Path,
+    brand_catalog: Path | None = None,
     source_base_url: str = "",
     category_extension: str = "png",
 ) -> dict[str, object]:
@@ -447,6 +558,9 @@ def generate(
     portraits = portrait_asset_index(
         asset_catalog=asset_catalog,
         logo_root=logo_root,
+    )
+    brands = brand_logo_index(
+        brand_catalog or Path("config/brand_logos.csv")
     )
 
     wanted_source_ids = {
@@ -578,6 +692,28 @@ def generate(
             covered_by["source_xmltv"] += 1
             continue
 
+        brand_id = exact_brand_id(row)
+        brand = brands.get(brand_id)
+        if brand is not None:
+            ephemeral_rows.append(
+                {
+                    "enabled": "true",
+                    "server_id": server_id,
+                    "stream_id": stream_id,
+                    "epg_id": "",
+                    "channel_name": identifier(row.get("channel_name", "")),
+                    "icon_url": brand["icon_url"],
+                    "local_file": "",
+                    "priority": "300",
+                    "notes": (
+                        f"{BRAND_LOGO_NOTE_PREFIX} {brand_id}; exact anchored "
+                        f"brand family; source {brand['source_page_url']}"
+                    ),
+                }
+            )
+            covered_by["brand_logo"] += 1
+            continue
+
         asset_name, local_file = generated_asset_for(
             row,
             person_role=role,
@@ -626,6 +762,7 @@ def generate(
         "generated_fallback_rows": covered_by["generated_fallback"],
         "named_portrait_rows": covered_by["named_portrait"],
         "named_symbol_rows": covered_by["named_symbol"],
+        "brand_logo_rows": covered_by["brand_logo"],
         "named_fallback_rows": 0,
         "final_private_config_rows": len(base_rows) + len(ephemeral_rows),
         "coverage": dict(sorted(covered_by.items())),
@@ -651,6 +788,11 @@ def main() -> int:
         default=Path("assets/logos/icon_catalog.csv"),
     )
     parser.add_argument(
+        "--brand-catalog",
+        type=Path,
+        default=Path("config/brand_logos.csv"),
+    )
+    parser.add_argument(
         "--category-extension", choices=("png", "svg"), default="png"
     )
     args = parser.parse_args()
@@ -661,6 +803,7 @@ def main() -> int:
         output_config=args.output_config,
         logo_root=args.logo_root,
         asset_catalog=args.asset_catalog,
+        brand_catalog=args.brand_catalog,
         source_base_url=args.source_base_url,
         category_extension=args.category_extension,
     )

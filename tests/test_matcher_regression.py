@@ -21,6 +21,11 @@ OPT_PATH = REPO_ROOT / "src" / "skytv_epg_optimizations.py"
 ICON_PATH = REPO_ROOT / "src" / "skytv_epg_icons.py"
 RUNNER_PATH = REPO_ROOT / "scripts" / "build_all_servers.py"
 STREAMING_RUNNER_PATH = REPO_ROOT / "scripts" / "build_epg_streaming.py"
+PROVIDER_EVENT_SLOTS_PATH = REPO_ROOT / "scripts" / "provider_event_slots.py"
+ICON_OVERRIDE_GENERATOR_PATH = (
+    REPO_ROOT / "scripts" / "generate_missing_icon_overrides.py"
+)
+BRAND_LOGO_CATALOG_PATH = REPO_ROOT / "config" / "brand_logos.csv"
 AUTO_MATCH_ADAPTER_PATH = REPO_ROOT / "src" / "skytv_epg_auto_match_v1.py"
 AUTO_MATCH_INTEGRATION_PATH = REPO_ROOT / "scripts" / "auto_match_inventory.py"
 BACKLOG_ANALYZER_PATH = REPO_ROOT / "scripts" / "analyze_review_backlog.py"
@@ -229,6 +234,18 @@ class MatcherIntegrityTests(unittest.TestCase):
             hashlib.sha256(STREAMING_RUNNER_PATH.read_bytes()).hexdigest(),
         )
         self.assertEqual(
+            manifest["providerEventSlotsSha256"],
+            hashlib.sha256(PROVIDER_EVENT_SLOTS_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["iconOverrideGeneratorSha256"],
+            hashlib.sha256(ICON_OVERRIDE_GENERATOR_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
+            manifest["brandLogoCatalogSha256"],
+            hashlib.sha256(BRAND_LOGO_CATALOG_PATH.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(
             manifest["autoMatchAdapterSha256"],
             hashlib.sha256(AUTO_MATCH_ADAPTER_PATH.read_bytes()).hexdigest(),
         )
@@ -410,6 +427,34 @@ class MatcherIntegrityTests(unittest.TestCase):
         self.assertEqual(brand.core_name, "USA Network East")
         self.assertEqual(brand.route_plan, ("US",))
         self.assertEqual(brand.wrapper_tokens, ())
+
+    def test_tsn_brand_overrides_misleading_usa_sports_category(self) -> None:
+        engine = load_engine("skytv_v8_tsn_canada_route")
+        resolver = install_contextual_v8(engine)
+        candidates, dummies = catalog_for_all_self_tests(engine)
+        resolver.prepare(candidates, dummies)
+        expected = {
+            1: "TSN.1.ca2",
+            2: "TSN.2.HD.ca2",
+            3: "TSN.3.HD.ca2",
+            4: "TSN.4.HD.ca2",
+            5: "TSN.5.HD.ca2",
+        }
+        for number, epg_id in expected.items():
+            with self.subTest(number=number):
+                query, match = resolver.resolve(
+                    {
+                        "category_name": "|NA| USA SPORTS",
+                        "channel_name": f"SP - TSN {number} HD",
+                        "panel_epg_id": f"ca.TSN{number}",
+                    },
+                    panel_is_usable=True,
+                )
+                self.assertEqual(query.route_plan, ("CA",))
+                self.assertIn("numbered TSN brand", query.route_reason)
+                self.assertEqual(match["action"], "AUTO_EPGSHARE")
+                self.assertEqual(match["epg_id"], epg_id)
+                self.assertEqual(match["match_method"], "approved_knowledge")
 
     def test_country_topics_override_only_coarse_provider_namespaces(self) -> None:
         engine = load_engine("skytv_v8_country_topic_routes")

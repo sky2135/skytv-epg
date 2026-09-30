@@ -2292,6 +2292,103 @@ class MappingContractTests(unittest.TestCase):
         self.assertNotIn("3", payload["streamMetadata"])
 
 
+class ProviderEventTitleOverlayTests(unittest.TestCase):
+    def test_only_same_slot_same_category_receives_current_provider_title(self) -> None:
+        mapping_rows = [
+            _mapping_row(
+                server_id="server_3",
+                stream_id="1",
+                channel_name="(FLSP 001) | old event",
+                category_name="|NA| USA FLO PPV",
+                epg_id="Flo.Events.Dummy.us",
+            ),
+            _mapping_row(
+                server_id="server_3",
+                stream_id="2",
+                channel_name="NFL | 03 - old game",
+                category_name="|NA| USA NFL",
+                epg_id="PPV.EVENTS.Dummy.us",
+            ),
+            _mapping_row(
+                server_id="server_3",
+                stream_id="3",
+                channel_name="Ordinary Sports Channel",
+                category_name="|NA| USA SPORTS",
+                epg_id="Ordinary.Sports.test",
+            ),
+            _mapping_row(
+                server_id="server_3",
+                stream_id="4",
+                channel_name="US (ESPN+ 004) | old match",
+                category_name="|NA| USA ESPN+",
+                epg_id="ESPN+.Dummy.us",
+            ),
+        ]
+        parsed = runner.parse_mapping_csv(
+            _mapping_bytes(mapping_rows), {"server_3"}
+        )
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(
+            output,
+            fieldnames=(
+                "server_id",
+                "stream_id",
+                "channel_name",
+                "category_name",
+            ),
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerows(
+            [
+                {
+                    "server_id": "server_3",
+                    "stream_id": "1",
+                    "channel_name": "(FLSP 001) | bikes: Tour of Langkawi",
+                    "category_name": "|NA| USA FLO PPV",
+                },
+                {
+                    "server_id": "server_3",
+                    "stream_id": "2",
+                    "channel_name": "NFL | 03 - 1pm Patriots at Bills",
+                    "category_name": "|NA| USA NFL",
+                },
+                {
+                    "server_id": "server_3",
+                    "stream_id": "3",
+                    "channel_name": "Different Ordinary Sports Channel",
+                    "category_name": "|NA| USA SPORTS",
+                },
+                {
+                    "server_id": "server_3",
+                    "stream_id": "4",
+                    "channel_name": "US (ESPN+ 004) | category moved",
+                    "category_name": "|NA| USA SPORTS",
+                },
+            ]
+        )
+
+        overlaid, summary = runner.apply_provider_event_title_overrides(
+            parsed, output.getvalue().encode("utf-8"), {"server_3"}
+        )
+
+        by_stream = {row.stream_id: row for row in overlaid}
+        self.assertEqual(
+            by_stream["1"].channel_name,
+            "(FLSP 001) | bikes: Tour of Langkawi",
+        )
+        self.assertEqual(
+            by_stream["2"].channel_name,
+            "NFL | 03 - 1pm Patriots at Bills",
+        )
+        self.assertEqual(by_stream["3"].channel_name, "Ordinary Sports Channel")
+        self.assertEqual(
+            by_stream["4"].channel_name, "US (ESPN+ 004) | old match"
+        )
+        self.assertEqual(summary["appliedRows"], 2)
+        self.assertEqual(summary["families"], {"flosports": 1, "league_event": 1})
+
+
 class SyntheticGuideTests(unittest.TestCase):
     def _dummy_row(
         self,
@@ -2459,6 +2556,78 @@ class SyntheticGuideTests(unittest.TestCase):
             ),
             "Motorsport Archive",
         )
+
+    def test_server3_event_and_24x7_names_become_truthful_guide_titles(self) -> None:
+        fixtures = (
+            (
+                "USA - BIG BROTHER CAMERA 1",
+                "|NA| USA GENERAL",
+                "PPV.EVENTS.Dummy.us",
+                "event",
+                "Big Brother Camera 1",
+            ),
+            (
+                "US (ESPN+ 003) | Villanova vs Creighton",
+                "|NA| USA ESPN+",
+                "ESPN+.Dummy.us",
+                "event",
+                "Villanova vs Creighton",
+            ),
+            (
+                "NFL | 03 - 1pm Patriots at Bills",
+                "|NA| USA NFL",
+                "PPV.EVENTS.Dummy.us",
+                "event",
+                "1 PM Patriots at Bills",
+            ),
+            (
+                "(FLSP 001) | bikes: Tour of Langkawi",
+                "|NA| USA FLO PPV",
+                "Flo.Events.Dummy.us",
+                "event",
+                "Bikes: Tour of Langkawi",
+            ),
+            (
+                "UK - BLEACHERS REPORT NBA 1",
+                "|UK| PPV EVENTS",
+                "PPV.EVENTS.Dummy.us",
+                "event",
+                "Bleachers Report NBA 1",
+            ),
+            (
+                "##### [UK] 24/7 FLEX #####",
+                "|UK| 24/7 FLEX",
+                "24.7.Dummy.us",
+                "continuous24x7",
+                "Flex",
+            ),
+            (
+                "UK - WILL FERRELL MOVIES",
+                "|UK| 24/7 FLEX",
+                "24.7.Dummy.us",
+                "movie",
+                "Will Ferrell Movies",
+            ),
+        )
+        for index, (channel, category, epg_id, classification, title) in enumerate(
+            fixtures, start=1
+        ):
+            with self.subTest(channel=channel):
+                row = self._dummy_row(
+                    stream_id=f"server3-{index}",
+                    channel_name=channel,
+                    category_name=category,
+                    epg_id=epg_id,
+                )
+                self.assertEqual(
+                    runner.synthetic_programme_classification(row), classification
+                )
+                self.assertEqual(
+                    runner.synthetic_programme_title(
+                        row, reference_epoch=FIXED_NOW
+                    ),
+                    title,
+                )
 
     def test_event_time_formatting_is_eastern_and_dst_aware(self) -> None:
         row = self._dummy_row(

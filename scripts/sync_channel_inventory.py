@@ -51,6 +51,7 @@ import build_epg_streaming as streaming  # noqa: E402
 import auto_match_inventory as automatch  # noqa: E402
 import ai_grounded_search as gemini_review  # noqa: E402
 import ai_review_policy as ai_policy  # noqa: E402
+import provider_event_slots  # noqa: E402
 
 try:  # Optional unless the explicit native REVIEW lane is enabled.
     import native_epg_review as native_review  # type: ignore[import-not-found]  # noqa: E402
@@ -2298,55 +2299,15 @@ GENERIC_NUMBERED_NAME_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
-# These are provider-controlled *slot* names rather than durable channel
-# brands. The text following the matched prefix is the event currently
-# assigned to that slot and is expected to rotate. Keep the grammar narrow:
-# only banks observed with an explicit, zero-padded slot number and canonical
-# delimiter qualify. A loose ``ESPN``/``PPV`` token check would hide ordinary
-# channel renames and could publish a stale guide under a recycled stream ID.
-PROVIDER_EVENT_SLOT_PATTERNS = (
-    (
-        "us_espn_plus",
-        re.compile(
-            r"^(?P<prefix>US \(ESPN\+ [0-9]{3}\) \|)(?: .*)?$",
-            flags=re.IGNORECASE,
-        ),
-    ),
-    (
-        "ppv_event",
-        re.compile(
-            r"^(?P<prefix>PPV EVENT [0-9]{2}:)(?: .*)?$",
-            flags=re.IGNORECASE,
-        ),
-    ),
-    (
-        "live_event",
-        re.compile(
-            r"^(?P<prefix>LIVE EVENT [0-9]{2} -)(?: .*)?$",
-            flags=re.IGNORECASE,
-        ),
-    ),
-)
-
-
 def provider_event_slot_identity(value: object) -> tuple[str, str] | None:
     """Return a strict event-bank slot identity, excluding its event payload.
 
-    Matching uses the complete anchored name grammar, so brand-like names that
-    merely contain ``ESPN+`` or ``PPV`` cannot enter this exception. Unicode,
-    case, and whitespace normalization is limited to comparing the same
-    canonical prefix; the required zero padding and delimiter remain part of
-    the identity.
+    Retained as the public compatibility wrapper for tests and integrations;
+    the shared module also supports the audited NFL/league, Flo/FLSP, DAZN,
+    Netflix PPV, and BTN+ numbered banks.
     """
 
-    text = unicodedata.normalize(
-        "NFKC", streaming.clean_identifier(value, 300)
-    )
-    for family, pattern in PROVIDER_EVENT_SLOT_PATTERNS:
-        matched = pattern.fullmatch(text)
-        if matched is not None:
-            return family, exact_inventory_name_key(matched.group("prefix"))
-    return None
+    return provider_event_slots.event_slot_identity(value)
 
 
 def is_same_provider_event_slot(
@@ -2357,14 +2318,8 @@ def is_same_provider_event_slot(
 ) -> bool:
     """Whether a name change is only rotating payload on one proven slot."""
 
-    old_category_key = exact_inventory_name_key(old_category)
-    if not old_category_key or old_category_key != exact_inventory_name_key(
-        new_category
-    ):
-        return False
-    old_identity = provider_event_slot_identity(old_name)
-    return old_identity is not None and old_identity == provider_event_slot_identity(
-        new_name
+    return provider_event_slots.is_same_event_slot(
+        old_name, new_name, old_category, new_category
     )
 
 
@@ -2670,7 +2625,7 @@ def select_synthetic_upgrade_rows(
     quarantined_keys: Iterable[tuple[str, str]] = (),
     changed_rows: Sequence[Mapping[str, str]] = (),
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
-    """Select only authenticated active coverage fallbacks for safe upgrades."""
+    """Select authenticated active rows eligible only for a real-guide upgrade."""
 
     servers = frozenset(
         streaming.normalize_server_id(value) for value in selected_servers
@@ -2700,6 +2655,8 @@ def select_synthetic_upgrade_rows(
         "synthetic_upgrade_excluded_missing_provider": 0,
         "synthetic_upgrade_excluded_open_alert": 0,
         "synthetic_upgrade_excluded_changed_identity": 0,
+        "active_route_repair_candidate_rows": 0,
+        "active_route_repair_eligible_rows": 0,
     }
     selected: list[dict[str, str]] = []
     for row in table.rows:
@@ -2712,10 +2669,14 @@ def select_synthetic_upgrade_rows(
             action == "AUTO_DUMMY"
             and notes.startswith("coverage-fallback-v1 ")
         )
-        if not looks_like_fallback:
+        fallback_preimage = automatch.verified_coverage_fallback_preimage(row)
+        route_repair = automatch.verified_active_route_repair_preimage(row)
+        if not looks_like_fallback and route_repair is None:
             continue
         stats["synthetic_upgrade_candidate_rows"] += 1
-        if automatch.verified_coverage_fallback_preimage(row) is None:
+        if route_repair is not None:
+            stats["active_route_repair_candidate_rows"] += 1
+        if fallback_preimage is None and route_repair is None:
             stats["synthetic_upgrade_excluded_invalid_provenance"] += 1
             continue
         key = (
@@ -2732,6 +2693,8 @@ def select_synthetic_upgrade_rows(
             stats["synthetic_upgrade_excluded_changed_identity"] += 1
             continue
         selected.append(dict(row))
+        if route_repair is not None:
+            stats["active_route_repair_eligible_rows"] += 1
 
     selected.sort(
         key=lambda row: (
@@ -4614,9 +4577,15 @@ def _validate_review_update(
     before_action = streaming.clean_text(before.get("action", ""), 40).upper()
     fallback_preimage = automatch.verified_coverage_fallback_preimage(before)
     from_active_fallback = fallback_preimage is not None
-    if before_action != "REVIEW" and not from_active_fallback:
+    route_repair = automatch.verified_active_route_repair_preimage(before)
+    from_active_route_repair = route_repair is not None
+    if (
+        before_action != "REVIEW"
+        and not from_active_fallback
+        and not from_active_route_repair
+    ):
         raise SyncError(
-            "A REVIEW update no longer targets REVIEW or a bound synthetic fallback."
+            "A REVIEW update no longer targets REVIEW or an authenticated active upgrade."
         )
     try:
         before_enabled = streaming.parse_bool(
@@ -4627,10 +4596,12 @@ def _validate_review_update(
         )
     except streaming.BuildError as exc:
         raise SyncError("A REVIEW update contains an invalid enabled value.") from exc
-    if before_enabled and not from_active_fallback:
+    if before_enabled and not (from_active_fallback or from_active_route_repair):
         raise SyncError("An enabled mapping cannot enter REVIEW recheck updates.")
     if from_active_fallback and not before_enabled:
         raise SyncError("A bound synthetic fallback unexpectedly became disabled.")
+    if from_active_route_repair and not before_enabled:
+        raise SyncError("An authenticated route-repair row unexpectedly became disabled.")
     server_id = streaming.normalize_server_id(before.get("server_id", ""))
     after_action = streaming.clean_text(after.get("action", ""), 40).upper()
     source = streaming.clean_text(after.get("source", ""), 40).casefold()
@@ -4723,6 +4694,14 @@ def _validate_review_update(
     }:
         raise SyncError(
             "An active synthetic row may only upgrade to a verified real schedule."
+        )
+    if from_active_route_repair and (
+        after_action != "AUTO_EPGSHARE"
+        or route_repair is None
+        or epg_id != route_repair["target_epg_id"]
+    ):
+        raise SyncError(
+            "An active route repair may only move to its exact verified EPGShare target."
         )
     has_exact_ai_target = (
         source == "epgshare01" and feed == "ALL_SOURCES1" and bool(epg_id)

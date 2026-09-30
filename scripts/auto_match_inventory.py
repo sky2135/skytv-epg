@@ -1293,9 +1293,13 @@ def _validate_candidate_rows(
             for column, value in existing_rows[key].items()
         }
         row = {str(column): str(value or "") for column, value in raw.items()}
-        if row != authoritative or verified_coverage_fallback_preimage(row) is None:
+        authenticated_upgrade = (
+            verified_coverage_fallback_preimage(row) is not None
+            or verified_active_route_repair_preimage(row) is not None
+        )
+        if row != authoritative or not authenticated_upgrade:
             raise AutoMatchError(
-                "A synthetic-upgrade row lacks exact bound fallback provenance."
+                "An active-upgrade row lacks exact bound fallback or route-repair provenance."
             )
         result[key] = row
         synthetic_upgrade_keys.add(key)
@@ -1560,6 +1564,59 @@ def verified_coverage_fallback_preimage(
         }
     )
     return preimage
+
+
+_ACTIVE_ROUTE_REPAIR_PREIMAGES: Mapping[str, tuple[str, str, str, str]] = {
+    "487807": ("SP - TSN 1 HD", "|NA| USA SPORTS", "ca.TSN1", "TSN.1.ca2"),
+    "487806": ("SP - TSN 2 HD", "|NA| USA SPORTS", "ca.TSN2", "TSN.2.HD.ca2"),
+    "487805": ("SP - TSN 3 HD", "|NA| USA SPORTS", "ca.TSN3", "TSN.3.HD.ca2"),
+    "487804": ("SP - TSN 4 HD", "|NA| USA SPORTS", "ca.TSN4", "TSN.4.HD.ca2"),
+    "487803": ("SP - TSN 5 HD", "|NA| USA SPORTS", "ca.TSN5", "TSN.5.HD.ca2"),
+}
+
+
+def verified_active_route_repair_preimage(
+    row: Mapping[str, Any],
+) -> dict[str, str] | None:
+    """Authenticate one exact active Server 3 TSN legacy-panel repair.
+
+    Future TSN discoveries use the corrected Canada-first matcher normally.
+    This allowlist exists only to re-evaluate the five already-active rows that
+    predate that rule. It cannot authorize another server, stream, category,
+    provider ID, or a non-EPGShare target.
+    """
+
+    try:
+        server_id, stream_id = _canonical_key(
+            row.get("server_id", ""), row.get("stream_id", "")
+        )
+        action = streaming.clean_text(row.get("action", ""), 40).upper()
+        enabled = _mapping_is_enabled(row, action)
+    except Exception:
+        return None
+    expected = _ACTIVE_ROUTE_REPAIR_PREIMAGES.get(stream_id)
+    if server_id != "server_3" or expected is None or action != "KEEP_PANEL":
+        return None
+    channel_name, category_name, panel_epg_id, target_epg_id = expected
+    source = streaming.clean_text(row.get("source", ""), 40).casefold()
+    feed = streaming.clean_text(row.get("epg_feed", ""), 80).casefold()
+    if (
+        not enabled
+        or source != "panel"
+        or feed not in {"panel", "server xmltv.php"}
+        or streaming.clean_identifier(row.get("channel_name", ""), 300)
+        != channel_name
+        or streaming.clean_text(row.get("category_name", ""), 200)
+        != category_name
+        or streaming.clean_identifier(row.get("epg_id", ""), 300)
+        != panel_epg_id
+    ):
+        return None
+    return {
+        "server_id": server_id,
+        "stream_id": stream_id,
+        "target_epg_id": target_epg_id,
+    }
 
 
 def _coverage_fallback_classification(
@@ -3915,6 +3972,7 @@ __all__ = [
     "active_combined_source_ids",
     "auto_match_and_spool",
     "terminal_coverage_fallback_updates",
+    "verified_active_route_repair_preimage",
     "verified_coverage_fallback_preimage",
     "prepare_matcher_runtime",
 ]

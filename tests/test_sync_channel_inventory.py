@@ -1202,6 +1202,26 @@ class MappingAndComparisonTests(unittest.TestCase):
                 "LIVE EVENT 06 - NO EVENT",
                 "LIVE | PPV Events",
             ),
+            (
+                "(FLSP 001) | bikes: Tour of Langkawi",
+                "(FLSP 001) | live: West Indies vs India",
+                "|NA| USA FLO PPV",
+            ),
+            (
+                "NFL | 03 - 1pm Patriots at Bills",
+                "NFL | 03 - 4pm Jets at Bears",
+                "|NA| USA NFL",
+            ),
+            (
+                "US: DAZN+ PPV 2 - Boxing Night",
+                "US: DAZN+ PPV 2 - Championship Fight",
+                "|NA| USA DAZN PPV",
+            ),
+            (
+                "BTN+ 12 HD (D): B1G+ | Michigan vs Purdue",
+                "BTN+ 12 HD (D): B1G+ | Iowa vs Wisconsin",
+                "|NA| USA LIVE EVENTS",
+            ),
         )
         for old_name, new_name, category in examples:
             with self.subTest(old_name=old_name, new_name=new_name):
@@ -1283,6 +1303,20 @@ class MappingAndComparisonTests(unittest.TestCase):
             (
                 "ESPN+ 001 | Baseball Championship",
                 "ESPN+ 001 | Soccer Championship",
+                "Sports",
+                "Sports",
+            ),
+            # A supported bank still cannot cross numbered slots.
+            (
+                "(FLSP 001) | Cycling",
+                "(FLSP 002) | Cycling",
+                "|NA| USA FLO PPV",
+                "|NA| USA FLO PPV",
+            ),
+            # Commercial PPV shapes require explicit event/PPV category proof.
+            (
+                "US: DAZN PPV 2 - Boxing Night",
+                "US: DAZN PPV 2 - Championship Fight",
                 "Sports",
                 "Sports",
             ),
@@ -4373,6 +4407,80 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         row["enabled"] = "FALSE"
         row["notes"] = notes
         return row
+
+    @staticmethod
+    def server3_tsn_route_repair() -> dict[str, str]:
+        return mapping_row(
+            "server_3",
+            "487807",
+            "SP - TSN 1 HD",
+            category_name="|NA| USA SPORTS",
+            action="KEEP_PANEL",
+            source="panel",
+            epg_feed="server xmltv.php",
+            epg_id="ca.TSN1",
+        )
+
+    def test_exact_server3_tsn_preimage_is_selected_for_real_guide_repair(self) -> None:
+        row = self.server3_tsn_route_repair()
+        self.assertEqual(
+            sync.automatch.verified_active_route_repair_preimage(row),
+            {
+                "server_id": "server_3",
+                "stream_id": "487807",
+                "target_epg_id": "TSN.1.ca2",
+            },
+        )
+        provider = inventory(
+            "server_3",
+            [
+                {
+                    "stream_id": "487807",
+                    "name": "SP - TSN 1 HD",
+                    "category_name": "|NA| USA SPORTS",
+                }
+            ],
+        )
+        selected, stats = sync.select_synthetic_upgrade_rows(
+            table([row]), [provider], selected_servers={"server_3"}
+        )
+        self.assertEqual(selected, [row])
+        self.assertEqual(stats["active_route_repair_candidate_rows"], 1)
+        self.assertEqual(stats["active_route_repair_eligible_rows"], 1)
+
+    def test_server3_tsn_route_repair_is_exact_and_target_bound(self) -> None:
+        row = self.server3_tsn_route_repair()
+        for field, value in (
+            ("server_id", "server_2"),
+            ("stream_id", "487808"),
+            ("channel_name", "SP - TSN 2 HD"),
+            ("category_name", "|NA| CANADA SPORTS"),
+            ("epg_id", "ca.TSN2"),
+        ):
+            with self.subTest(field=field):
+                changed = dict(row)
+                changed[field] = value
+                self.assertIsNone(
+                    sync.automatch.verified_active_route_repair_preimage(changed)
+                )
+
+        approved = dict(row)
+        approved.update(
+            {
+                "action": "AUTO_EPGSHARE",
+                "source": "epgshare01",
+                "epg_feed": "ALL_SOURCES1",
+                "epg_id": "TSN.1.ca2",
+                "reason": "Exact Canadian TSN schedule",
+                "notes": current_unbound_auto_map_v1_note(market="CA"),
+            }
+        )
+        sync._validate_review_update(row, approved)
+
+        wrong_target = dict(approved)
+        wrong_target["epg_id"] = "TSN.2.HD.ca2"
+        with self.assertRaisesRegex(sync.SyncError, "exact verified EPGShare target"):
+            sync._validate_review_update(row, wrong_target)
 
     def test_review_selector_applies_every_eligibility_exclusion(self) -> None:
         eligible = self.disabled_review("eligible")

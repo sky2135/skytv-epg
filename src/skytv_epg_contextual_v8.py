@@ -447,6 +447,36 @@ CONTENT_GROUPS_V8 = {
 
 DEFAULT_APPROVED_ALIASES_V8: tuple[dict[str, Any], ...] = (
     {
+        "alias": "tsn 1", "regions": ("CA",),
+        "epg_ids": ("TSN.1.ca2",),
+        "relationship": "verified_numbered_network_identity",
+        "note": "TSN is Canadian even when the provider stores it in a USA Sports folder.",
+    },
+    {
+        "alias": "tsn 2", "regions": ("CA",),
+        "epg_ids": ("TSN.2.HD.ca2", "TSN.2.ca2"),
+        "relationship": "verified_numbered_network_identity",
+        "note": "TSN is Canadian even when the provider stores it in a USA Sports folder.",
+    },
+    {
+        "alias": "tsn 3", "regions": ("CA",),
+        "epg_ids": ("TSN.3.HD.ca2", "TSN.3.ca2"),
+        "relationship": "verified_numbered_network_identity",
+        "note": "TSN is Canadian even when the provider stores it in a USA Sports folder.",
+    },
+    {
+        "alias": "tsn 4", "regions": ("CA",),
+        "epg_ids": ("TSN.4.HD.ca2", "TSN.4.ca2"),
+        "relationship": "verified_numbered_network_identity",
+        "note": "TSN is Canadian even when the provider stores it in a USA Sports folder.",
+    },
+    {
+        "alias": "tsn 5", "regions": ("CA",),
+        "epg_ids": ("TSN.5.HD.ca2", "TSN.5.ca2"),
+        "relationship": "verified_numbered_network_identity",
+        "note": "TSN is Canadian even when the provider stores it in a USA Sports folder.",
+    },
+    {
         "alias": "ptc chak de", "regions": ("IN",),
         "epg_ids": ("PTC.CHAK.DE.in", "PTC.Chak.De.in", "PTC.NEWS.in", "PTC.News.in"),
         "relationship": "verified_identity_with_news_fallback",
@@ -1535,6 +1565,21 @@ def _choose_route_v8(
     south_asian = bool(languages & SOUTH_ASIAN_LANGUAGES_V8) or any(
         market == "NA_DIASPORA" for market, _strength, _reason in market_evidence
     )
+    # TSN 1-5 are Canadian network identities even when a provider stores them
+    # in a coarse USA Sports folder. The exact numbered brand is stronger than
+    # that taxonomy placement; no unnumbered or similarly named channel enters
+    # this exception.
+    if re.fullmatch(
+        r"tsn [1-5](?: (?:4k|uhd|fhd|hd|sd))?",
+        _normalize_key_v8(core_name),
+    ):
+        return (
+            "CA",
+            ("CA",),
+            "numbered TSN brand selects Canadian schedules",
+            True,
+            south_asian,
+        )
     category_market, category_strength, category_reason = _category_route_v8(category_name, languages)
 
     # Explicit market evidence wins only when it is stronger than the category.

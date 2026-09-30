@@ -44,6 +44,7 @@ class MissingIconOverrideTests(unittest.TestCase):
         self.assertIn(
             "--output-config .build/channel-sync/channel_icons.csv", workflow
         )
+        self.assertIn("--brand-catalog config/brand_logos.csv", workflow)
         self.assertIn("--icon-config .build/channel-sync/channel_icons.csv", workflow)
         self.assertNotIn("--icon-config config/channel_icons.csv", workflow)
 
@@ -54,6 +55,115 @@ class MissingIconOverrideTests(unittest.TestCase):
         self.assertEqual(production.valid_http_url(clean), clean)
         self.assertEqual(generator.safe_http_url(query_icon), "")
         self.assertEqual(production.valid_http_url(query_icon), "")
+
+    def test_exact_brand_catalog_precedes_generic_category_fallback(self) -> None:
+        self.assertEqual(
+            generator.exact_brand_id(
+                {
+                    "channel_name": "SP - TSN 1 HD",
+                    "category_name": "|NA| USA SPORTS",
+                }
+            ),
+            "tsn",
+        )
+        self.assertEqual(
+            generator.exact_brand_id(
+                {
+                    "channel_name": "USA - CW 53 (WWHO) COLUMBUS",
+                    "category_name": "|NA| USA CW & MY",
+                }
+            ),
+            "cw",
+        )
+        self.assertEqual(
+            generator.exact_brand_id(
+                {
+                    "channel_name": "(FLSP 001) | live: West Indies vs India",
+                    "category_name": "|NA| USA FLO PPV",
+                }
+            ),
+            "flosports",
+        )
+        self.assertEqual(
+            generator.exact_brand_id(
+                {
+                    "channel_name": "##### USA CW #####",
+                    "category_name": "|NA| USA CW & MY",
+                }
+            ),
+            "",
+        )
+        self.assertEqual(
+            generator.exact_brand_id(
+                {
+                    "channel_name": "UK - CBS JUSTICE",
+                    "category_name": "|UK| ENTERTAINMENT",
+                }
+            ),
+            "",
+        )
+
+        row = {
+            "server_id": "server_3",
+            "stream_id": "487807",
+            "enabled": "TRUE",
+            "channel_name": "SP - TSN 1 HD",
+            "category_name": "|NA| USA SPORTS",
+            "genre": "sports",
+            "action": "KEEP_PANEL",
+            "source": "panel",
+            "epg_feed": "panel",
+            "epg_id": "ca.TSN1",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mapping = root / "mapping.csv"
+            base_config = root / "base.csv"
+            output_config = root / "private.csv"
+            source = root / "source.xml"
+            logos = root / "logos"
+            catalog = root / "catalog.csv"
+            logos.mkdir()
+            with mapping.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MAPPING_COLUMNS)
+                writer.writeheader()
+                writer.writerow(row)
+            with base_config.open("w", encoding="utf-8", newline="") as handle:
+                csv.DictWriter(
+                    handle, fieldnames=generator.CONFIG_COLUMNS
+                ).writeheader()
+            with catalog.open("w", encoding="utf-8", newline="") as handle:
+                csv.DictWriter(
+                    handle,
+                    fieldnames=(
+                        "asset_id",
+                        "subject_type",
+                        "subject_name",
+                        "local_file",
+                        "asset_kind",
+                        "license_id",
+                        "review_status",
+                    ),
+                ).writeheader()
+            source.write_text("<tv/>", encoding="utf-8")
+
+            summary = generator.generate(
+                mapping_csv=mapping,
+                source_xmltv=source,
+                base_config=base_config,
+                output_config=output_config,
+                logo_root=logos,
+                asset_catalog=catalog,
+                brand_catalog=REPO_ROOT / "config" / "brand_logos.csv",
+            )
+            with output_config.open("r", encoding="utf-8", newline="") as handle:
+                configured = list(csv.DictReader(handle))
+
+        self.assertEqual(summary["brand_logo_rows"], 1)
+        self.assertEqual(summary["generated_fallback_rows"], 0)
+        self.assertEqual(len(configured), 1)
+        self.assertIn("TSN_Logo", configured[0]["icon_url"])
+        self.assertTrue(configured[0]["notes"].startswith("BRAND_LOGO: tsn"))
 
     def test_production_coverage_and_repeat_run_are_exact(self) -> None:
         rows = [
@@ -290,6 +400,7 @@ class MissingIconOverrideTests(unittest.TestCase):
         self.assertEqual(by_stream["5"]["priority"], "400")
         self.assertEqual(by_stream["8"]["priority"], "200")
         self.assertEqual(summary["named_symbol_rows"], 1)
+        self.assertEqual(summary["brand_logo_rows"], 0)
         self.assertEqual(summary["named_fallback_rows"], 0)
         self.assertNotIn("3", by_stream)
         self.assertNotIn("7", by_stream)
