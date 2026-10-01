@@ -693,9 +693,11 @@ The generated file stays under ignored `.build/` storage and is never uploaded.
 Icon selection prefers the Mapping `logo_url`, a reviewed exact override, the
 mapped EPGShare channel icon, a unique exact normalized EPGShare display-name
 icon, and then a reviewed anchored brand logo. Generic category artwork is
-created only for explicit local synthetic/dummy channels. A real linear channel
-with no exact result receives no generated override, so a sports/news/television
-symbol cannot replace its identity.
+created only for explicit non-linear synthetic roles such as event, PPV, radio,
+or virtual streams. `AUTO_DUMMY` identifies a local schedule source, not a
+channel identity. A real linear channel with no exact result receives no
+generated override, so a sports/news/television symbol cannot replace its
+identity.
 The workflow then runs the equivalent of:
 
 ```bash

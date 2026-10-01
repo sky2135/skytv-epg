@@ -1318,12 +1318,15 @@ def apply_provider_event_title_overrides(
         # A rotating event slot does not need an uncertain external schedule:
         # the current provider label is already the useful guide title.  Make
         # a build-only per-stream projection for unresolved review-queue rows.
-        # Explicit IGNORE/SKIP/REJECTED decisions and OPEN-alert quarantines
-        # remain excluded.
+        # Explicit IGNORE/SKIP/REJECTED decisions remain excluded.  An OPEN
+        # possible-reuse quarantine may be bypassed only here, after the
+        # authoritative/effective snapshot pair has already been validated,
+        # because an exact unchanged-category numbered slot proves that the
+        # provider changed only the event payload rather than the stream
+        # identity.  The exception is build-only and never edits the Sheet.
         if (
             not current_row.runtime_eligible
             and current_row.action.upper() in PROVIDER_EVENT_REVIEW_ACTIONS
-            and current_row.reason != EFFECTIVE_QUARANTINE_REASON
             and current_row.metadata.genre != "adult"
             and current_row.metadata.content_rating != "adult"
         ):
@@ -1336,6 +1339,11 @@ def apply_provider_event_title_overrides(
                 epg_id=(
                     "provider.event."
                     f"{current_row.synthetic_identity}.local"
+                ),
+                reason=(
+                    PROVIDER_EVENT_RUNTIME_REASON
+                    if current_row.reason == EFFECTIVE_QUARANTINE_REASON
+                    else current_row.reason
                 ),
                 runtime_synthetic_reason=PROVIDER_EVENT_RUNTIME_REASON,
                 metadata=replace(
@@ -2364,7 +2372,19 @@ def synthetic_programme_title(
         prefix = "Upcoming: " if event.start_epoch and event.start_epoch > int(reference_epoch) else ""
         return clean_text(f"{prefix}{event.name} — {event.time_label}", 180)
 
-    title = _clean_synthetic_channel_label(row.channel_name)
+    channel_label = row.channel_name
+    if programme_class == "continuous24x7":
+        # Provider market wrappers are not programme information.  Restrict
+        # the broad two/three-letter cleanup to positively classified 24/7
+        # streams so a real brand such as USA Network remains untouched.
+        channel_label = re.sub(
+            r"^[#*_\s]*(?:\[\s*[A-Z]{2,3}\s*\]|[A-Z]{2,3})"
+            r"\s*(?:\||:|[-–—])\s*",
+            "",
+            channel_label,
+            flags=re.I,
+        )
+    title = _clean_synthetic_channel_label(channel_label)
     if programme_class == "artist":
         language_pattern = "|".join(_SYNTHETIC_LANGUAGE_NAMES)
         artist = re.sub(

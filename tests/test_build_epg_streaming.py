@@ -2426,12 +2426,22 @@ class ProviderEventTitleOverlayTests(unittest.TestCase):
         quarantined.update({"enabled": "FALSE", "action": "REVIEW"})
         fixture_rows.append(quarantined)
 
+        quarantined_linear = _mapping_row(
+            server_id="server_3",
+            stream_id="quarantined-linear",
+            channel_name="USA - ORDINARY NEWS HD",
+            category_name="|NA| USA NEWS",
+            epg_id="",
+        )
+        quarantined_linear.update({"enabled": "FALSE", "action": "REVIEW"})
+        fixture_rows.append(quarantined_linear)
+
         rows = runner.parse_mapping_csv(
             _mapping_bytes(fixture_rows), {"server_3"}, require_enabled_servers=False
         )
         rows = [
             replace(row, reason=runner.EFFECTIVE_QUARANTINE_REASON)
-            if row.stream_id == "quarantined"
+            if row.stream_id in {"quarantined", "quarantined-linear"}
             else row
             for row in rows
         ]
@@ -2444,6 +2454,7 @@ class ProviderEventTitleOverlayTests(unittest.TestCase):
             "dazn": "US: DAZN PPV 01 - Championship Fight",
             "ignored": "NHL | 99 - ignored",
             "quarantined": "MLB 99: quarantined",
+            "quarantined-linear": "USA - ORDINARY NEWS HD",
         }
         output = io.StringIO(newline="")
         writer = csv.DictWriter(
@@ -2466,17 +2477,24 @@ class ProviderEventTitleOverlayTests(unittest.TestCase):
             rows, output.getvalue().encode("utf-8"), {"server_3"}
         )
         by_stream = {row.stream_id: row for row in projected}
-        self.assertEqual(summary["runtimeSyntheticRows"], 5)
+        self.assertEqual(summary["runtimeSyntheticRows"], 6)
         self.assertEqual(
             summary["runtimeSyntheticFamilies"],
             {
                 "dazn_ppv": 1,
                 "flosports": 1,
-                "league_event": 2,
+                "league_event": 3,
                 "us_espn_plus": 1,
             },
         )
-        for stream_id in ("espn", "nhl", "mlb", "flo", "dazn"):
+        for stream_id in (
+            "espn",
+            "nhl",
+            "mlb",
+            "flo",
+            "dazn",
+            "quarantined",
+        ):
             with self.subTest(stream_id=stream_id):
                 row = by_stream[stream_id]
                 self.assertTrue(row.runtime_eligible)
@@ -2487,7 +2505,11 @@ class ProviderEventTitleOverlayTests(unittest.TestCase):
                 )
                 self.assertEqual(row.channel_name, current_names[stream_id])
         self.assertFalse(by_stream["ignored"].runtime_eligible)
-        self.assertFalse(by_stream["quarantined"].runtime_eligible)
+        self.assertFalse(by_stream["quarantined-linear"].runtime_eligible)
+        self.assertEqual(
+            by_stream["quarantined"].reason,
+            runner.PROVIDER_EVENT_RUNTIME_REASON,
+        )
 
         with tempfile.TemporaryDirectory() as temporary:
             connection = runner.create_database(Path(temporary) / "events.sqlite3")
@@ -2507,7 +2529,7 @@ class ProviderEventTitleOverlayTests(unittest.TestCase):
                 }
             finally:
                 connection.close()
-        self.assertEqual(stats.schedules, 5)
+        self.assertEqual(stats.schedules, 6)
         self.assertTrue(any("Football: Good Morning" in title for title in programme_titles))
         self.assertTrue(
             any("phillies x braves" in title.casefold() for title in programme_titles)
@@ -2744,6 +2766,13 @@ class SyntheticGuideTests(unittest.TestCase):
                 "24.7.Dummy.us",
                 "continuous24x7",
                 "Flex",
+            ),
+            (
+                "ENG - 24/7 THE CAROL BURNETT SHOW",
+                "|NA| 24/7 ENGLISH",
+                "24.7.Dummy.us",
+                "continuous24x7",
+                "The Carol Burnett Show",
             ),
             (
                 "UK - WILL FERRELL MOVIES",

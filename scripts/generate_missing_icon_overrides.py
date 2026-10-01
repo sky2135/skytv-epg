@@ -3,11 +3,11 @@
 
 Only enabled mapping rows that would otherwise have no usable icon receive an
 exact source-catalog or reviewed brand logo. Generated category artwork is
-limited to explicit synthetic/dummy channels; it is never allowed to replace a
-real linear channel's missing logo. The production builder can use source XMLTV
-icons for EPGShare rows, but it intentionally does not publish native panel
-icons, so real panel rows use a unique exact display-name catalog match or are
-left untouched.
+limited to explicit non-linear synthetic roles; an ``AUTO_DUMMY`` schedule
+decision alone never lets generic artwork replace a real linear channel's
+identity. The production builder can use source XMLTV icons for EPGShare rows,
+but it intentionally does not publish native panel icons, so real panel rows
+use a unique exact display-name catalog match or are left untouched.
 
 The exact rows contain private provider identities. They are written only to a
 required ephemeral output path for the current workflow run. The small public
@@ -112,6 +112,7 @@ SUPPORTED_BRAND_IDS = frozenset(
         "wgn",
     }
 )
+GENERATED_FALLBACK_ROLES = frozenset({"event", "ppv", "radio", "virtual"})
 
 
 def normalized(value: object) -> str:
@@ -507,6 +508,19 @@ def category_for(row: Mapping[str, str]) -> str:
     return genre if genre in CATEGORY_NAMES else "general"
 
 
+def generated_category_fallback_allowed(row: Mapping[str, str]) -> bool:
+    """Whether generic artwork truthfully describes a non-linear stream.
+
+    ``AUTO_DUMMY`` describes the schedule source, not the channel's identity.
+    Many ordinary linear broadcasters legitimately use a local channel-name
+    guide while awaiting an exact schedule match, so that action must never be
+    treated as permission to label them with a generic television/category
+    symbol.
+    """
+
+    return normalized(row.get("channel_role", "")) in GENERATED_FALLBACK_ROLES
+
+
 def generated_asset_for(
     row: Mapping[str, str],
     *,
@@ -824,9 +838,10 @@ def generate(
             covered_by["brand_logo"] += 1
             continue
 
-        if requested_source(row) != "dummy" and normalized(
-            row.get("action", "")
-        ) != "auto_dummy":
+        if (
+            requested_source(row) != "dummy"
+            and normalized(row.get("action", "")) != "auto_dummy"
+        ) or not generated_category_fallback_allowed(row):
             # A blank icon is preferable to falsely labelling a real channel
             # with a generic news/sports/television symbol.  The provider icon
             # remains available through ``logo_url`` when one exists, and a

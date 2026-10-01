@@ -243,7 +243,10 @@ inventory. When an unresolved REVIEW/UNMATCHED/NO_EPG/UNRESOLVED row retains
 the identical numbered slot and unchanged category, the build creates a
 per-stream local guide from the current provider event label. It does not write
 to the Sheet or assign an external EPG ID. Explicit IGNORE/SKIP/REJECTED rows
-and every effective OPEN-alert quarantine remain excluded.
+remain excluded. A stale possible-reuse OPEN alert may be bypassed for that
+build only when the same-run inventory proves the identical numbered slot and
+unchanged category; every ordinary renamed channel and every other alert stays
+quarantined.
 
 ## Customer feedback contract
 
