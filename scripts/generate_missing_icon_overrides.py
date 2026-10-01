@@ -2,11 +2,12 @@
 """Create exact, production-accurate fallback icon overrides.
 
 Only enabled mapping rows that would otherwise have no usable icon receive an
-exact reviewed brand logo or a generated category fallback. The production
-builder can use source XMLTV icons for EPGShare rows, but it intentionally does
-not publish native panel icons and synthetic/dummy guides have no source icon.
-Those cases therefore need local overrides even when the same ID happens to
-exist in the EPGShare catalog.
+exact source-catalog or reviewed brand logo. Generated category artwork is
+limited to explicit synthetic/dummy channels; it is never allowed to replace a
+real linear channel's missing logo. The production builder can use source XMLTV
+icons for EPGShare rows, but it intentionally does not publish native panel
+icons, so real panel rows use a unique exact display-name catalog match or are
+left untouched.
 
 The exact rows contain private provider identities. They are written only to a
 required ephemeral output path for the current workflow run. The small public
@@ -78,12 +79,14 @@ NAMED_FALLBACK_NOTE_PREFIX = "NAMED_FALLBACK:"
 NAMED_PORTRAIT_NOTE_PREFIX = "NAMED_PORTRAIT:"
 NAMED_SYMBOL_NOTE_PREFIX = "NAMED_SYMBOL:"
 BRAND_LOGO_NOTE_PREFIX = "BRAND_LOGO:"
+SOURCE_NAME_LOGO_NOTE_PREFIX = "SOURCE_NAME_LOGO:"
 EPHEMERAL_NOTE_PREFIXES = (
     GENERATED_NOTE_PREFIX,
     NAMED_FALLBACK_NOTE_PREFIX,
     NAMED_PORTRAIT_NOTE_PREFIX,
     NAMED_SYMBOL_NOTE_PREFIX,
     BRAND_LOGO_NOTE_PREFIX,
+    SOURCE_NAME_LOGO_NOTE_PREFIX,
 )
 TRUE_VALUES = frozenset({"1", "true", "yes", "y", "on", "enabled"})
 FALSE_VALUES = frozenset({"0", "false", "no", "n", "off", "disabled"})
@@ -128,6 +131,38 @@ def identifier(value: object) -> str:
 
 def folded_identifier(value: object) -> str:
     return identifier(value).casefold()
+
+
+_MARKET_PREFIX_RE = re.compile(
+    r"^(?:US|USA|UK|CA|CAN|SP|LAT|BR|AU|NZ|IE|FR|DE|ES|IT|PT|NL|BE|"
+    r"SE|NO|DK|FI|IN|ZA|AF|AR|MX)\s*[-:|]\s*",
+    re.IGNORECASE,
+)
+_QUALITY_SUFFIX_RE = re.compile(
+    r"(?:\s+|\s*[-:|]\s*)(?:SD|HD|FHD|UHD|4K|8K|HEVC|H\.?(?:264|265)|"
+    r"1080P|720P)\s*$",
+    re.IGNORECASE,
+)
+
+
+def exact_logo_name_key(value: object) -> str:
+    """Return a conservative provider/display-name equality key.
+
+    This is not fuzzy matching: the same deterministic cleanup is applied to
+    both names, and a catalog key is usable only when every matching channel
+    agrees on one icon URL. Provider market wrappers and display-quality
+    suffixes are presentation metadata rather than channel identity.
+    """
+
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = re.sub(r"^[#*_\s]+|[#*_\s]+$", "", text)
+    text = re.sub(r"^\[\s*[A-Z]{2,3}\s*\]\s*", "", text, flags=re.IGNORECASE)
+    text = _MARKET_PREFIX_RE.sub("", text.strip())
+    previous = ""
+    while text != previous:
+        previous = text
+        text = _QUALITY_SUFFIX_RE.sub("", text).strip()
+    return " ".join(text.casefold().split())
 
 
 def is_enabled(value: object) -> bool:
@@ -350,9 +385,13 @@ def local_name(tag: object) -> str:
     return text.rsplit("}", 1)[-1] if "}" in text else text
 
 
-def extract_source_icons(
-    path: Path, wanted_ids: Iterable[str], *, base_url: str = ""
-) -> tuple[dict[str, str], dict[str, set[str]]]:
+def extract_source_icon_catalog(
+    path: Path,
+    wanted_ids: Iterable[str],
+    wanted_names: Iterable[str],
+    *,
+    base_url: str = "",
+) -> tuple[dict[str, str], dict[str, set[str]], dict[str, str]]:
     """Read exact channel icons without retaining the large schedule in RAM.
 
     Some aggregate XMLTV catalogs interleave each upstream feed's channels and
@@ -362,10 +401,16 @@ def extract_source_icons(
     wanted_folds = {
         folded_identifier(value) for value in wanted_ids if folded_identifier(value)
     }
+    wanted_name_keys = {
+        exact_logo_name_key(value)
+        for value in wanted_names
+        if exact_logo_name_key(value)
+    }
     icons: dict[str, str] = {}
     variants_by_fold: dict[str, set[str]] = defaultdict(set)
-    if not wanted_folds:
-        return icons, variants_by_fold
+    icon_candidates_by_name: dict[str, set[str]] = defaultdict(set)
+    if not wanted_folds and not wanted_name_keys:
+        return icons, variants_by_fold, {}
 
     with open_maybe_gzip(path) as source:
         context = etree.iterparse(
@@ -387,24 +432,48 @@ def extract_source_icons(
                 if name == "channel":
                     source_id = identifier(element.get("id") or "")
                     folded = folded_identifier(source_id)
-                    if source_id and folded in wanted_folds:
-                        variants_by_fold[folded].add(source_id)
-                        for child in element:
-                            if local_name(child.tag) != "icon":
-                                continue
-                            icon_url = safe_http_url(
+                    source_icon = ""
+                    display_names: list[str] = []
+                    for child in element:
+                        child_name = local_name(child.tag)
+                        if child_name == "display-name" and child.text:
+                            display_names.append(str(child.text))
+                        elif child_name == "icon" and not source_icon:
+                            source_icon = safe_http_url(
                                 child.get("src") or "", base_url=base_url
                             )
-                            if icon_url:
-                                icons.setdefault(source_id, icon_url)
-                                break
+                    if source_id and folded in wanted_folds:
+                        variants_by_fold[folded].add(source_id)
+                        if source_icon:
+                            icons.setdefault(source_id, source_icon)
+                    if source_icon:
+                        for display_name in display_names:
+                            key = exact_logo_name_key(display_name)
+                            if key and key in wanted_name_keys:
+                                icon_candidates_by_name[key].add(source_icon)
                 element.clear()
                 parent = element.getparent()
                 while parent is not None and element.getprevious() is not None:
                     del parent[0]
         finally:
             del context
-    return icons, variants_by_fold
+    unique_name_icons = {
+        key: next(iter(values))
+        for key, values in icon_candidates_by_name.items()
+        if len(values) == 1
+    }
+    return icons, variants_by_fold, unique_name_icons
+
+
+def extract_source_icons(
+    path: Path, wanted_ids: Iterable[str], *, base_url: str = ""
+) -> tuple[dict[str, str], dict[str, set[str]]]:
+    """Compatibility wrapper for exact-ID callers."""
+
+    icons, variants, _name_icons = extract_source_icon_catalog(
+        path, wanted_ids, (), base_url=base_url
+    )
+    return icons, variants
 
 
 def usable_source_icon(
@@ -418,6 +487,17 @@ def usable_source_icon(
     if len(variants) != 1:
         return ""
     return icons.get(next(iter(variants)), "")
+
+
+def usable_exact_name_icon(
+    row: Mapping[str, str], name_icons: Mapping[str, str]
+) -> str:
+    candidates = {
+        name_icons[key]
+        for value in (row.get("channel_name", ""), row.get("canonical_name", ""))
+        if (key := exact_logo_name_key(value)) and key in name_icons
+    }
+    return next(iter(candidates)) if len(candidates) == 1 else ""
 
 
 def category_for(row: Mapping[str, str]) -> str:
@@ -569,8 +649,17 @@ def generate(
         if requested_source(row) == "epgshare01"
         and identifier(row.get("epg_id", ""))
     }
-    source_icons, source_variants = extract_source_icons(
-        source_xmltv, wanted_source_ids, base_url=source_base_url
+    wanted_source_names = {
+        value
+        for row in enabled_rows
+        for value in (row.get("channel_name", ""), row.get("canonical_name", ""))
+        if exact_logo_name_key(value)
+    }
+    source_icons, source_variants, source_name_icons = extract_source_icon_catalog(
+        source_xmltv,
+        wanted_source_ids,
+        wanted_source_names,
+        base_url=source_base_url,
     )
 
     manual_matches: set[tuple[str, str]] = set()
@@ -692,6 +781,27 @@ def generate(
             covered_by["source_xmltv"] += 1
             continue
 
+        source_name_icon = usable_exact_name_icon(row, source_name_icons)
+        if source_name_icon:
+            ephemeral_rows.append(
+                {
+                    "enabled": "true",
+                    "server_id": server_id,
+                    "stream_id": stream_id,
+                    "epg_id": "",
+                    "channel_name": identifier(row.get("channel_name", "")),
+                    "icon_url": source_name_icon,
+                    "local_file": "",
+                    "priority": "350",
+                    "notes": (
+                        f"{SOURCE_NAME_LOGO_NOTE_PREFIX} unique exact "
+                        "EPGShare display-name match"
+                    ),
+                }
+            )
+            covered_by["source_name_xmltv"] += 1
+            continue
+
         brand_id = exact_brand_id(row)
         brand = brands.get(brand_id)
         if brand is not None:
@@ -712,6 +822,16 @@ def generate(
                 }
             )
             covered_by["brand_logo"] += 1
+            continue
+
+        if requested_source(row) != "dummy" and normalized(
+            row.get("action", "")
+        ) != "auto_dummy":
+            # A blank icon is preferable to falsely labelling a real channel
+            # with a generic news/sports/television symbol.  The provider icon
+            # remains available through ``logo_url`` when one exists, and a
+            # future exact catalog or reviewed brand match can fill the gap.
+            covered_by["real_channel_no_override"] += 1
             continue
 
         asset_name, local_file = generated_asset_for(

@@ -364,31 +364,23 @@ class MissingIconOverrideTests(unittest.TestCase):
 
         self.assertEqual(summary, repeated)
         self.assertEqual(summary["enabled_mapping_rows"], 8)
-        self.assertEqual(summary["generated_fallback_rows"], 4)
+        self.assertEqual(summary["generated_fallback_rows"], 1)
         self.assertEqual(
             summary["coverage"],
             {
-                "generated_fallback": 4,
+                "generated_fallback": 1,
                 "mapping_logo": 1,
                 "named_portrait": 1,
                 "named_symbol": 1,
+                "real_channel_no_override": 3,
                 "source_xmltv": 1,
             },
         )
-        self.assertEqual(len(configured), 6)
+        self.assertEqual(len(configured), 3)
         by_stream = {row["stream_id"]: row for row in configured}
         self.assertRegex(
             by_stream["1"]["local_file"],
             r"^generated/category-music-.+-v3\.png$",
-        )
-        self.assertEqual(
-            by_stream["2"]["local_file"], "generated/category-radio-v3.png"
-        )
-        self.assertEqual(
-            by_stream["4"]["local_file"], "generated/category-general-v3.png"
-        )
-        self.assertEqual(
-            by_stream["6"]["local_file"], "generated/category-sports-v3.png"
         )
         self.assertEqual(
             by_stream["5"]["local_file"], "people/lata-cutout-v2.png"
@@ -402,8 +394,125 @@ class MissingIconOverrideTests(unittest.TestCase):
         self.assertEqual(summary["named_symbol_rows"], 1)
         self.assertEqual(summary["brand_logo_rows"], 0)
         self.assertEqual(summary["named_fallback_rows"], 0)
+        self.assertNotIn("2", by_stream)
         self.assertNotIn("3", by_stream)
+        self.assertNotIn("4", by_stream)
+        self.assertNotIn("6", by_stream)
         self.assertNotIn("7", by_stream)
+
+    def test_real_channels_use_only_unique_exact_catalog_logos(self) -> None:
+        rows = [
+            {
+                "server_id": "server_3",
+                "stream_id": "bbc",
+                "enabled": "TRUE",
+                "channel_name": "USA - BBC AMERICA HD",
+                "category_name": "|NA| USA NEWS",
+                "genre": "news",
+                "channel_role": "linear",
+                "action": "KEEP_PANEL",
+                "source": "panel",
+                "epg_feed": "panel",
+                "epg_id": "panel.bbc",
+            },
+            {
+                "server_id": "server_3",
+                "stream_id": "ambiguous",
+                "enabled": "TRUE",
+                "channel_name": "USA - SHARED NEWS HD",
+                "category_name": "|NA| USA NEWS",
+                "genre": "news",
+                "channel_role": "linear",
+                "action": "KEEP_PANEL",
+                "source": "panel",
+                "epg_feed": "panel",
+                "epg_id": "panel.shared",
+            },
+            {
+                "server_id": "server_3",
+                "stream_id": "missing",
+                "enabled": "TRUE",
+                "channel_name": "USA - REAL CHANNEL WITHOUT LOGO HD",
+                "category_name": "|NA| USA GENERAL",
+                "genre": "general",
+                "channel_role": "linear",
+                "action": "KEEP_PANEL",
+                "source": "panel",
+                "epg_feed": "panel",
+                "epg_id": "panel.missing",
+            },
+        ]
+        xml = '''<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="BBC.America.test">
+    <display-name>BBC America</display-name>
+    <icon src="https://logos.test/bbc-america.png"/>
+  </channel>
+  <channel id="Shared.News.one">
+    <display-name>Shared News</display-name>
+    <icon src="https://logos.test/shared-one.png"/>
+  </channel>
+  <channel id="Shared.News.two">
+    <display-name>Shared News HD</display-name>
+    <icon src="https://logos.test/shared-two.png"/>
+  </channel>
+</tv>
+'''
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mapping = root / "mapping.csv"
+            base_config = root / "base.csv"
+            output_config = root / "private.csv"
+            source = root / "source.xml"
+            logos = root / "logos"
+            catalog = root / "catalog.csv"
+            logos.mkdir()
+            with mapping.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MAPPING_COLUMNS)
+                writer.writeheader()
+                writer.writerows(rows)
+            with base_config.open("w", encoding="utf-8", newline="") as handle:
+                csv.DictWriter(
+                    handle, fieldnames=generator.CONFIG_COLUMNS
+                ).writeheader()
+            with catalog.open("w", encoding="utf-8", newline="") as handle:
+                csv.DictWriter(
+                    handle,
+                    fieldnames=(
+                        "asset_id",
+                        "subject_type",
+                        "subject_name",
+                        "local_file",
+                        "asset_kind",
+                        "license_id",
+                        "review_status",
+                    ),
+                ).writeheader()
+            source.write_text(xml, encoding="utf-8")
+
+            summary = generator.generate(
+                mapping_csv=mapping,
+                source_xmltv=source,
+                base_config=base_config,
+                output_config=output_config,
+                logo_root=logos,
+                asset_catalog=catalog,
+                brand_catalog=REPO_ROOT / "config" / "brand_logos.csv",
+            )
+            with output_config.open("r", encoding="utf-8", newline="") as handle:
+                configured = list(csv.DictReader(handle))
+
+        self.assertEqual(summary["generated_fallback_rows"], 0)
+        self.assertEqual(summary["coverage"]["source_name_xmltv"], 1)
+        self.assertEqual(summary["coverage"]["real_channel_no_override"], 2)
+        self.assertEqual(len(configured), 1)
+        self.assertEqual(configured[0]["stream_id"], "bbc")
+        self.assertEqual(
+            configured[0]["icon_url"], "https://logos.test/bbc-america.png"
+        )
+        self.assertTrue(
+            configured[0]["notes"].startswith("SOURCE_NAME_LOGO:")
+        )
 
 
 if __name__ == "__main__":

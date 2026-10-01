@@ -79,7 +79,8 @@ _EVENT_SLOT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "league_event",
         re.compile(
             r"^(?P<brand>NFL|NBA|WNBA|NHL|MLB|MLS|UEFA|CFL|CHL|UFC|WWE)"
-            r"\s*\|\s*(?P<slot>[0-9]{2,3})\s*-(?:\s*.*)?$",
+            r"(?:\s*\|\s*|\s+)(?P<slot>[0-9]{2,3})"
+            r"\s*[-–—:](?:\s*.*)?$",
             re.IGNORECASE,
         ),
     ),
@@ -130,6 +131,16 @@ def event_slot_identity(
             _EVENT_CATEGORY_RE.search(str(category or ""))
         ):
             return None
+        if family == "league_event":
+            # The compact provider form (for example ``MLB 01: ...``) is
+            # accepted only in the matching league folder.  This keeps an
+            # ordinary numbered linear channel from becoming a rotating event
+            # slot merely because its name has a number and a colon.
+            brand = matched.groupdict().get("brand", "")
+            if not re.search(
+                rf"\b{re.escape(brand)}\b", str(category or ""), re.IGNORECASE
+            ):
+                return None
         qualifiers = [
             matched.groupdict().get("market", ""),
             matched.groupdict().get("brand", ""),

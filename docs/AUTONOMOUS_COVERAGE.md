@@ -23,10 +23,9 @@ terminal outcome that passes its gates:
    apply.
 4. **Truthful local synthetic guide.** A safe unresolved row receives a unique
    per-stream schedule. AI abstention, invalid output, quota failure, or outage
-   also reaches this lane. A generic channel is titled
-   `Schedule unavailable — <channel>`; richer programme wording is used only
-   when the row positively identifies a supported event, movie, artist, music,
-   adult, or continuous-24/7 family.
+   also reaches this lane. A generic channel uses its cleaned channel name;
+   richer programme wording is used only when the row positively identifies a
+   supported event, movie, artist, music, adult, or continuous-24/7 family.
 5. **Ignore or quarantine.** Decorative non-channels become `IGNORE`. An `OPEN`
    identity alert, provider/Sheet drift, or an untracked manual target remains
    disabled and protected rather than being overwritten.

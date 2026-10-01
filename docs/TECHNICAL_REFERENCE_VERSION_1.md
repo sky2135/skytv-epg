@@ -223,7 +223,7 @@ Two explicitly non-real outcomes are separate from that approval path. A safe
 unresolved channel may be enabled as `AUTO_DUMMY` with a per-stream local guide,
 and a decorative heading may be disabled as `IGNORE`. Neither is reported as a
 real EPG match. A generic synthetic programme is titled
-`Schedule unavailable — <channel>`; richer wording requires positive supported
+with its cleaned channel name only; richer wording requires positive supported
 family evidence. A catalog-wide contradiction stops the run before any new row
 is written; it is not converted into one particular channel result.
 Server 1 panel identifiers are stripped before matching and can never be
@@ -690,6 +690,12 @@ python scripts/generate_missing_icon_overrides.py \
 ```
 
 The generated file stays under ignored `.build/` storage and is never uploaded.
+Icon selection prefers the Mapping `logo_url`, a reviewed exact override, the
+mapped EPGShare channel icon, a unique exact normalized EPGShare display-name
+icon, and then a reviewed anchored brand logo. Generic category artwork is
+created only for explicit local synthetic/dummy channels. A real linear channel
+with no exact result receives no generated override, so a sports/news/television
+symbol cannot replace its identity.
 The workflow then runs the equivalent of:
 
 ```bash
