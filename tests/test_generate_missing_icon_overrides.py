@@ -173,6 +173,7 @@ class MissingIconOverrideTests(unittest.TestCase):
                 "enabled": "TRUE",
                 "channel_name": "Synthetic Music",
                 "genre": "music",
+                "channel_role": "virtual",
                 "action": "AUTO_DUMMY",
                 "source": "dummy",
                 "epg_feed": "DUMMY_CHANNELS",
@@ -441,6 +442,19 @@ class MissingIconOverrideTests(unittest.TestCase):
                 "epg_feed": "panel",
                 "epg_id": "panel.missing",
             },
+            {
+                "server_id": "server_3",
+                "stream_id": "dummy-linear",
+                "enabled": "TRUE",
+                "channel_name": "MA - REAL LINEAR CHANNEL UHD",
+                "category_name": "|AR| MOROCCO",
+                "genre": "general",
+                "channel_role": "linear",
+                "action": "AUTO_DUMMY",
+                "source": "dummy",
+                "epg_feed": "DUMMY_CHANNELS",
+                "epg_id": "Real.Linear.Channel.local",
+            },
         ]
         xml = '''<?xml version="1.0" encoding="UTF-8"?>
 <tv>
@@ -504,7 +518,7 @@ class MissingIconOverrideTests(unittest.TestCase):
 
         self.assertEqual(summary["generated_fallback_rows"], 0)
         self.assertEqual(summary["coverage"]["source_name_xmltv"], 1)
-        self.assertEqual(summary["coverage"]["real_channel_no_override"], 2)
+        self.assertEqual(summary["coverage"]["real_channel_no_override"], 3)
         self.assertEqual(len(configured), 1)
         self.assertEqual(configured[0]["stream_id"], "bbc")
         self.assertEqual(
