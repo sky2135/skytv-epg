@@ -562,7 +562,7 @@ the private Sheet and are rebuilt into Smart Rule memory each run.
 Normal operation does not require anyone to work through unmatched channels or
 search for EPG IDs. Automation selects a verified real schedule when it can;
 otherwise a safe row receives a local `AUTO_DUMMY` guide. A generic guide says
-`Schedule unavailable — <channel>` rather than inventing programme details.
+the cleaned channel name only, without inventing programme details.
 
 Earlier `coverage-fallback-v1` synthetics remain automatic real-schedule
 upgrade candidates on later runs. Do not replace them by hand. The only rows

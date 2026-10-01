@@ -70,7 +70,7 @@ POLICY = {
     "server_1_panel_allowed": False,
     "verified_real_gate": "MATCHING_LAB_AUTO_ELIGIBLE",
     "unresolved_safe_fallback": "LOCAL_SYNTHETIC",
-    "uncertain_synthetic_title": "Schedule unavailable",
+    "uncertain_synthetic_title": "Cleaned channel name",
     "manual_prefill_policy": "QUARANTINE_NO_OVERWRITE",
     "open_alert_policy": "QUARANTINE_UNCOVERED",
 }
@@ -218,7 +218,7 @@ def _synthetic_details(row: Mapping[str, str]) -> dict[str, object]:
         # marker family is routing metadata, not a claim that a real event or
         # movie schedule exists.
         "projected_programme_class": "DEFER_TO_PRODUCTION_BUILDER",
-        "unclassified_display_policy": "SCHEDULE_UNAVAILABLE",
+        "unclassified_display_policy": "CLEANED_CHANNEL_NAME",
         "claims_real_programme_facts": False,
     }
 

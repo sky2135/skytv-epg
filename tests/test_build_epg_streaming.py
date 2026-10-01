@@ -1024,9 +1024,8 @@ class MappingContractTests(unittest.TestCase):
                 encoding="utf-8",
             ) as handle:
                 xml = handle.read()
-            self.assertIn(
-                "Schedule unavailable — Native Fixture Channel", xml
-            )
+            self.assertIn("Native Fixture Channel", xml)
+            self.assertNotIn("Schedule unavailable", xml)
 
     def test_xmltv_timezone_rejects_invalid_hour_or_minute_fields(self) -> None:
         self.assertIsNotNone(runner.parse_xmltv_time("20270115093000 +0530"))
@@ -2388,6 +2387,133 @@ class ProviderEventTitleOverlayTests(unittest.TestCase):
         self.assertEqual(summary["appliedRows"], 2)
         self.assertEqual(summary["families"], {"flosports": 1, "league_event": 1})
 
+    def test_review_event_slots_receive_build_only_per_stream_guides(self) -> None:
+        fixture_rows = []
+        for stream_id, channel_name, category_name in (
+            ("espn", "US (ESPN+ 001) | old event", "|NA| USA ESPN+"),
+            ("nhl", "NHL | 01 - old game", "|NA| USA NHL"),
+            ("mlb", "MLB 01: old game", "|NA| USA MLB"),
+            ("flo", "(FLSP 001) | old event", "|NA| USA FLO PPV"),
+            ("dazn", "US: DAZN PPV 01 - old fight", "|NA| USA DAZN PPV"),
+        ):
+            item = _mapping_row(
+                server_id="server_3",
+                stream_id=stream_id,
+                channel_name=channel_name,
+                category_name=category_name,
+                epg_id="",
+            )
+            item.update({"enabled": "FALSE", "action": "REVIEW"})
+            fixture_rows.append(item)
+
+        ignored = _mapping_row(
+            server_id="server_3",
+            stream_id="ignored",
+            channel_name="NHL | 99 - ignored",
+            category_name="|NA| USA NHL",
+            epg_id="",
+        )
+        ignored.update({"enabled": "FALSE", "action": "IGNORE"})
+        fixture_rows.append(ignored)
+
+        quarantined = _mapping_row(
+            server_id="server_3",
+            stream_id="quarantined",
+            channel_name="MLB 99: quarantined",
+            category_name="|NA| USA MLB",
+            epg_id="",
+        )
+        quarantined.update({"enabled": "FALSE", "action": "REVIEW"})
+        fixture_rows.append(quarantined)
+
+        rows = runner.parse_mapping_csv(
+            _mapping_bytes(fixture_rows), {"server_3"}, require_enabled_servers=False
+        )
+        rows = [
+            replace(row, reason=runner.EFFECTIVE_QUARANTINE_REASON)
+            if row.stream_id == "quarantined"
+            else row
+            for row in rows
+        ]
+
+        current_names = {
+            "espn": "US (ESPN+ 001) | Football: Good Morning",
+            "nhl": "NHL | 01 - 7:30pm Penguins at Flyers",
+            "mlb": "MLB 01: Phillies x Braves",
+            "flo": "(FLSP 001) | bikes: Tour of Langkawi",
+            "dazn": "US: DAZN PPV 01 - Championship Fight",
+            "ignored": "NHL | 99 - ignored",
+            "quarantined": "MLB 99: quarantined",
+        }
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(
+            output,
+            fieldnames=("server_id", "stream_id", "channel_name", "category_name"),
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerows(
+            {
+                "server_id": "server_3",
+                "stream_id": row.stream_id,
+                "channel_name": current_names[row.stream_id],
+                "category_name": row.category_name,
+            }
+            for row in rows
+        )
+
+        projected, summary = runner.apply_provider_event_title_overrides(
+            rows, output.getvalue().encode("utf-8"), {"server_3"}
+        )
+        by_stream = {row.stream_id: row for row in projected}
+        self.assertEqual(summary["runtimeSyntheticRows"], 5)
+        self.assertEqual(
+            summary["runtimeSyntheticFamilies"],
+            {
+                "dazn_ppv": 1,
+                "flosports": 1,
+                "league_event": 2,
+                "us_espn_plus": 1,
+            },
+        )
+        for stream_id in ("espn", "nhl", "mlb", "flo", "dazn"):
+            with self.subTest(stream_id=stream_id):
+                row = by_stream[stream_id]
+                self.assertTrue(row.runtime_eligible)
+                self.assertTrue(row.uses_local_synthetic)
+                self.assertEqual(
+                    row.runtime_synthetic_reason,
+                    runner.PROVIDER_EVENT_RUNTIME_REASON,
+                )
+                self.assertEqual(row.channel_name, current_names[stream_id])
+        self.assertFalse(by_stream["ignored"].runtime_eligible)
+        self.assertFalse(by_stream["quarantined"].runtime_eligible)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            connection = runner.create_database(Path(temporary) / "events.sqlite3")
+            try:
+                stats = runner.insert_synthetic_guides(
+                    connection=connection,
+                    rows=projected,
+                    window_start=FIXED_NOW,
+                    window_end=FIXED_NOW + 86400,
+                    reference_epoch=FIXED_NOW,
+                )
+                programme_titles = {
+                    title
+                    for (title,) in connection.execute(
+                        "SELECT title FROM programmes"
+                    )
+                }
+            finally:
+                connection.close()
+        self.assertEqual(stats.schedules, 5)
+        self.assertTrue(any("Football: Good Morning" in title for title in programme_titles))
+        self.assertTrue(
+            any("phillies x braves" in title.casefold() for title in programme_titles)
+        )
+        self.assertFalse(any("Schedule unavailable" in title for title in programme_titles))
+
 
 class SyntheticGuideTests(unittest.TestCase):
     def _dummy_row(
@@ -2524,7 +2650,7 @@ class SyntheticGuideTests(unittest.TestCase):
                     expected,
                 )
 
-    def test_generic_synthetic_title_discloses_missing_schedule(self) -> None:
+    def test_generic_synthetic_title_uses_only_cleaned_channel_name(self) -> None:
         generic = self._dummy_row(
             stream_id="generic",
             channel_name="DSTV Super Motorsport FHD",
@@ -2533,11 +2659,11 @@ class SyntheticGuideTests(unittest.TestCase):
         )
         self.assertEqual(
             runner.synthetic_programme_classification(generic),
-            "scheduleUnavailable",
+            "channelName",
         )
         self.assertEqual(
             runner.synthetic_programme_title(generic, reference_epoch=FIXED_NOW),
-            "Schedule unavailable — DSTV Super Motorsport",
+            "DSTV Super Motorsport",
         )
 
         continuous = self._dummy_row(
@@ -2555,6 +2681,24 @@ class SyntheticGuideTests(unittest.TestCase):
                 continuous, reference_epoch=FIXED_NOW
             ),
             "Motorsport Archive",
+        )
+
+    def test_retired_unavailable_title_is_cleaned_at_public_output_boundary(self) -> None:
+        self.assertEqual(
+            runner.output_programme_title(
+                "Schedule unavailable — USA - NEWS HD", "Fallback Channel"
+            ),
+            "News",
+        )
+        self.assertEqual(
+            runner.output_programme_title(
+                "Schedule unavailable", "USA - BBC AMERICA HD"
+            ),
+            "BBC America",
+        )
+        self.assertEqual(
+            runner.output_programme_title("Real Programme", "Fallback Channel"),
+            "Real Programme",
         )
 
     def test_server3_event_and_24x7_names_become_truthful_guide_titles(self) -> None:
@@ -3171,7 +3315,7 @@ class GuideCoverageTests(unittest.TestCase):
             75.0,
         )
         self.assertEqual(
-            coverage["localSyntheticClasses"]["scheduleUnavailable"][
+            coverage["localSyntheticClasses"]["channelName"][
                 "count"
             ],
             1,

@@ -200,7 +200,7 @@ The existing 12,879 active dummy mappings show the scale and main templates:
 | Continuous 24x7 | 1,673 | Clean channel-derived title with `24/7` subtitle |
 | Flo events | 866 | Parsed event or `No event currently scheduled` |
 | ESPN+ | 586 | Parsed event and Eastern Time; every audited name contained a date/time |
-| Blank/general fallback | 573 | `Schedule unavailable — <channel>` |
+| Blank/general fallback | 573 | Cleaned channel name only |
 | Adult | 344 | Bounded neutral adult-programming label |
 | Music Choice | 132 | Genre or station name plus `Music 24/7` |
 | Triller | 37 | Parsed event or upcoming-event placeholder |
@@ -237,6 +237,13 @@ name as versioned event payload used by the synthetic guide. Deduplicate OPEN
 alerts by stable key and current identity revision. This exception must be
 restricted to positively classified event banks; a renamed ordinary linear
 channel remains a possible stream-ID-reuse alert and stays quarantined.
+
+The production builder applies this narrowly from the same-run private
+inventory. When an unresolved REVIEW/UNMATCHED/NO_EPG/UNRESOLVED row retains
+the identical numbered slot and unchanged category, the build creates a
+per-stream local guide from the current provider event label. It does not write
+to the Sheet or assign an external EPG ID. Explicit IGNORE/SKIP/REJECTED rows
+and every effective OPEN-alert quarantine remain excluded.
 
 ## Customer feedback contract
 

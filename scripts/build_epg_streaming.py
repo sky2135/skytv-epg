@@ -52,12 +52,16 @@ PIPELINE_VERSION = "1.0"
 PIPELINE_BUILD_ID = "SKYTV-EPG-V1-2026-09-15"
 APP_SCHEMA_VERSION = 1
 METADATA_SCHEMA_VERSION = 1
-LOGO_POLICY = "SHEET_OR_EXACT_CONFIG_BRAND_OR_EPGSHARE_SOURCE"
+LOGO_POLICY = "SHEET_OR_EXACT_CONFIG_SOURCE_NAME_BRAND_OR_EPGSHARE_SOURCE"
 MAPPING_SNAPSHOT_MANIFEST_SCHEMA = "skytv-private-mapping-snapshot-v1"
 MAX_MAPPING_SNAPSHOT_MANIFEST_BYTES = 256 * 1024
 EFFECTIVE_QUARANTINE_REASON = (
     "Effective snapshot quarantine: OPEN Sync Alerts stream-ID reuse "
     "review; the Google Sheet Mappings row was not changed."
+)
+PROVIDER_EVENT_RUNTIME_REASON = "providerEventInventory"
+PROVIDER_EVENT_REVIEW_ACTIONS = frozenset(
+    {"REVIEW", "UNMATCHED", "NO_EPG", "UNRESOLVED"}
 )
 DEFAULT_ALL_SOURCE_URL = (
     "https://epgshare01.online/epgshare01/"
@@ -304,9 +308,8 @@ class MappingRow:
 
     @property
     def uses_local_synthetic(self) -> bool:
-        return (
-            self.requested_source == "dummy"
-            or self.runtime_synthetic_reason == "nativePanelUnavailable"
+        return self.requested_source == "dummy" or bool(
+            self.runtime_synthetic_reason
         )
 
     @property
@@ -344,7 +347,11 @@ class MappingRow:
         as an automatic match can attach an unrelated schedule.  A reviewer
         enables the row by selecting an EPGShare ID and changing its source.
         """
-        return self.server_id == "server_1" and self.requested_source == "panel"
+        return (
+            not self.uses_local_synthetic
+            and self.server_id == "server_1"
+            and self.requested_source == "panel"
+        )
 
     @property
     def runtime_eligible(self) -> bool:
@@ -1231,10 +1238,11 @@ def apply_provider_event_title_overrides(
 ) -> tuple[list[MappingRow], dict[str, Any]]:
     """Overlay current event payloads for exact, stable provider slot IDs.
 
-    The private Sheet remains the authority for every mapping decision.  This
-    narrow presentation layer can change only ``channel_name`` and
-    ``canonical_name`` after the mapping snapshot has been hash-validated.  A
-    row qualifies only when its old and current names are the same anchored
+    The private Sheet remains the authority for every external EPG mapping.
+    This narrow runtime layer can update the title of a proven rotating slot
+    and can give an unresolved slot its own local synthetic schedule.  It
+    never assigns a third-party EPG ID or writes back to the Sheet.  A row
+    qualifies only when its old and current names are the same anchored
     numbered event slot in the same non-empty category.
     """
 
@@ -1275,6 +1283,7 @@ def apply_provider_event_title_overrides(
         inventory[key] = (channel_name, category_name)
 
     applied_by_family: Counter[str] = Counter()
+    runtime_synthetic_by_family: Counter[str] = Counter()
     overlaid: list[MappingRow] = []
     for row in rows:
         current = inventory.get((row.server_id, row.stream_id))
@@ -1295,23 +1304,55 @@ def apply_provider_event_title_overrides(
         )
         if identity is None:
             raise BuildError("Provider event-slot title overlay lost its identity.")
-        if provider_event_slots.exact_text_key(row.channel_name) == (
+        current_row = row
+        if provider_event_slots.exact_text_key(row.channel_name) != (
             provider_event_slots.exact_text_key(current_name)
         ):
-            overlaid.append(row)
-            continue
-        applied_by_family[identity[0]] += 1
-        overlaid.append(
-            replace(
-                row,
+            applied_by_family[identity[0]] += 1
+            current_row = replace(
+                current_row,
                 channel_name=current_name,
                 canonical_name=current_name,
             )
-        )
+
+        # A rotating event slot does not need an uncertain external schedule:
+        # the current provider label is already the useful guide title.  Make
+        # a build-only per-stream projection for unresolved review-queue rows.
+        # Explicit IGNORE/SKIP/REJECTED decisions and OPEN-alert quarantines
+        # remain excluded.
+        if (
+            not current_row.runtime_eligible
+            and current_row.action.upper() in PROVIDER_EVENT_REVIEW_ACTIONS
+            and current_row.reason != EFFECTIVE_QUARANTINE_REASON
+            and current_row.metadata.genre != "adult"
+            and current_row.metadata.content_rating != "adult"
+        ):
+            runtime_synthetic_by_family[identity[0]] += 1
+            current_row = replace(
+                current_row,
+                enabled=True,
+                action="AUTO_DUMMY",
+                epg_feed="DUMMY_CHANNELS",
+                epg_id=(
+                    "provider.event."
+                    f"{current_row.synthetic_identity}.local"
+                ),
+                runtime_synthetic_reason=PROVIDER_EVENT_RUNTIME_REASON,
+                metadata=replace(
+                    current_row.metadata,
+                    genre="events",
+                    channel_role="event",
+                ),
+            )
+        overlaid.append(current_row)
     return overlaid, {
         "inventoryRows": len(inventory),
         "appliedRows": sum(applied_by_family.values()),
         "families": dict(sorted(applied_by_family.items())),
+        "runtimeSyntheticRows": sum(runtime_synthetic_by_family.values()),
+        "runtimeSyntheticFamilies": dict(
+            sorted(runtime_synthetic_by_family.items())
+        ),
         "sha256": hashlib.sha256(inventory_content).hexdigest(),
     }
 
@@ -2001,7 +2042,7 @@ _SYNTHETIC_PROGRAMME_CLASSES = (
     "event",
     "movie",
     "musicChoice",
-    "scheduleUnavailable",
+    "channelName",
 )
 
 
@@ -2018,7 +2059,12 @@ def _synthetic_event_like(row: MappingRow) -> bool:
     epg_id = row.epg_id.casefold()
     evidence = f"{row.category_name} {row.channel_name}"
     return (
-        row.metadata.genre == "events"
+        row.runtime_synthetic_reason == PROVIDER_EVENT_RUNTIME_REASON
+        or provider_event_slots.event_slot_identity(
+            row.channel_name, row.category_name
+        )
+        is not None
+        or row.metadata.genre == "events"
         or row.metadata.channel_role in {"event", "ppv"}
         or "ppv.events" in epg_id
         or "flo.events" in epg_id
@@ -2052,9 +2098,9 @@ def _synthetic_event_like(row: MappingRow) -> bool:
 def synthetic_programme_classification(row: MappingRow) -> str:
     """Classify what a generated guide title can truthfully claim.
 
-    A channel name alone is not programme information.  Only explicit
-    continuous/event/movie/artist/adult families are presented as programming;
-    every other generated schedule is labelled as schedule unavailable.
+    Generated schedules never invent programme details.  Explicit
+    continuous/event/movie/artist/adult families retain their specialized
+    treatment; every other local guide displays only the cleaned channel name.
     """
 
     if row.metadata.genre == "adult" or row.metadata.content_rating == "adult":
@@ -2089,7 +2135,7 @@ def synthetic_programme_classification(row: MappingRow) -> str:
         )
     ):
         return "continuous24x7"
-    return "scheduleUnavailable"
+    return "channelName"
 
 
 def _plausible_event_datetime(
@@ -2363,13 +2409,6 @@ def synthetic_programme_title(
         )
 
     rendered = _smart_synthetic_title(title)
-    if programme_class == "scheduleUnavailable":
-        return clean_text(
-            f"Schedule unavailable — {rendered}"
-            if rendered
-            else "Schedule unavailable",
-            180,
-        )
     if rendered:
         return rendered
     genre_label = _SYNTHETIC_GENRE_LABELS.get(row.metadata.genre, "")
@@ -3972,6 +4011,32 @@ def iter_schedule_rows(
         )
 
 
+_UNAVAILABLE_OUTPUT_TITLE_RE = re.compile(
+    r"^\s*schedule\s+unavailable(?:\s*[—–:\-]\s*(?P<label>.+))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def output_programme_title(title: object, fallback_channel_name: object) -> str:
+    """Keep the retired unavailable label out of every public output.
+
+    New local guides no longer create this wording, but this final boundary
+    also cleans a stale spool or an upstream source that supplies the exact
+    retired placeholder.  Any channel label already present after the dash is
+    retained; otherwise the current channel name is used.
+    """
+
+    cleaned = clean_text(title, 180)
+    matched = _UNAVAILABLE_OUTPUT_TITLE_RE.fullmatch(cleaned)
+    if matched is None:
+        return cleaned
+    replacement = matched.group("label") or str(fallback_channel_name or "")
+    rendered = _smart_synthetic_title(
+        _clean_synthetic_channel_label(replacement)
+    )
+    return clean_text(rendered or "Channel", 180)
+
+
 def xml_escape_text(value: object) -> str:
     return html.escape(clean_text(value, 10_000), quote=False)
 
@@ -4040,6 +4105,10 @@ def write_tivimate_xmltv(
 
         for channel_id in sorted(entries, key=lambda value: (value.casefold(), value)):
             entry = entries[channel_id]
+            fallback_name = min(
+                entry.display_names or {entry.channel_id},
+                key=lambda value: (len(value), value.casefold(), value),
+            )
             for start, stop, title, subtitle, description, categories_json in iter_schedule_rows(
                 connection,
                 entry.source_key,
@@ -4047,6 +4116,7 @@ def write_tivimate_xmltv(
                 window_start=window_start,
                 window_end=None,
             ):
+                title = output_programme_title(title, fallback_name)
                 output.write(
                     f'  <programme start="{xmltv_timestamp(start)}" '
                     f'stop="{xmltv_timestamp(stop)}" '
@@ -4123,8 +4193,10 @@ def write_app_epg(
         key=lambda item: stream_sort_key(item.stream_id),
     )
     schedules: dict[str, tuple[str, str]] = {}
+    schedule_names: dict[str, str] = {}
     for row in runtime_rows:
         schedules.setdefault(row.schedule_key, (row.source_key, row.epg_id))
+        schedule_names.setdefault(row.schedule_key, row.channel_name)
 
     temporary, raw, compressed, output = deterministic_gzip_text(destination)
     programme_count = 0
@@ -4179,7 +4251,17 @@ def write_app_epg(
             for row_index, item in enumerate(chain((first_row,), iterator)):
                 if row_index:
                     output.write(",")
-                output.write(json_compact([item[0], item[1], item[2]]))
+                output.write(
+                    json_compact(
+                        [
+                            item[0],
+                            item[1],
+                            output_programme_title(
+                                item[2], schedule_names.get(schedule_key, "")
+                            ),
+                        ]
+                    )
+                )
                 programme_count += 1
             output.write("]")
         output.write("}")
@@ -4671,7 +4753,8 @@ def _guide_coverage_payload(
             ),
             "localSynthetic": (
                 "Eligible local generated guide with at least one retained row; "
-                "scheduleUnavailable is disclosed in localSyntheticClasses."
+                "the cleaned channel-name class is disclosed in "
+                "localSyntheticClasses."
             ),
             "ignoredNonChannel": "Mapping row explicitly marked IGNORE.",
             "uncovered": (
@@ -5003,8 +5086,15 @@ def build_server(
         for row in mapped_rows
         if row.runtime_synthetic_reason == "nativePanelUnavailable"
     )
+    provider_event_synthetic_streams = sum(
+        1
+        for row in mapped_rows
+        if row.runtime_synthetic_reason == PROVIDER_EVENT_RUNTIME_REASON
+    )
     synthetic_guide_streams = (
-        dummy_guide_streams + panel_outage_synthetic_streams
+        dummy_guide_streams
+        + panel_outage_synthetic_streams
+        + provider_event_synthetic_streams
     )
     source_policy = (
         (
@@ -5088,6 +5178,9 @@ def build_server(
         "combinedSourceDummyGuideStreams": dummy_guide_streams,
         "nativePanelUnavailableSyntheticStreams": (
             panel_outage_synthetic_streams
+        ),
+        "providerEventInventorySyntheticStreams": (
+            provider_event_synthetic_streams
         ),
         "syntheticGuidePolicy": (
             server_source_provenance.get("synthetic", {}).get("titlePolicy", "")
@@ -5179,6 +5272,9 @@ def build_server(
         "combinedSourceDummyGuideStreams": dummy_guide_streams,
         "nativePanelUnavailableSyntheticStreams": (
             panel_outage_synthetic_streams
+        ),
+        "providerEventInventorySyntheticStreams": (
+            provider_event_synthetic_streams
         ),
         "syntheticGuidePolicy": (
             server_source_provenance.get("synthetic", {}).get("titlePolicy", "")
@@ -5679,6 +5775,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "inventoryRows": 0,
         "appliedRows": 0,
         "families": {},
+        "runtimeSyntheticRows": 0,
+        "runtimeSyntheticFamilies": {},
         "sha256": "",
     }
     if args.provider_inventory_file is not None:
@@ -5695,7 +5793,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             "Applied current provider event titles to "
             f"{provider_event_title_overlays['appliedRows']:,} exact numbered "
-            "slot(s).",
+            "slot(s); activated per-stream local guides for "
+            f"{provider_event_title_overlays['runtimeSyntheticRows']:,} "
+            "unresolved slot(s).",
             flush=True,
         )
     if any(
@@ -5955,7 +6055,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_provenance["synthetic"] = {
                 "inputMode": "generated",
                 "titlePolicy": "CHANNEL_DERIVED_NO_INVENTED_PROGRAMME_DETAILS",
-                "genericTitlePolicy": "SCHEDULE_UNAVAILABLE_PREFIX",
+                "genericTitlePolicy": "CLEANED_CHANNEL_NAME",
                 "blockHours": synthetic_stats.block_hours,
                 "eventWindowHours": synthetic_stats.event_window_hours,
                 "futureDays": int(args.synthetic_future_days),
@@ -5963,6 +6063,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "windowEnd": synthetic_stats.window_end,
                 "nativePanelUnavailableServers": (
                     unavailable_native_servers
+                ),
+                "providerEventInventoryStreams": sum(
+                    1
+                    for row in rows
+                    if row.runtime_synthetic_reason
+                    == PROVIDER_EVENT_RUNTIME_REASON
                 ),
             }
 

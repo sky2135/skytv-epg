@@ -44,13 +44,13 @@ binding drifts.
 The builder gives every server/stream pair its own deterministic schedule
 identity. It uses richer wording only when positive row evidence identifies a
 supported event, movie, artist, music, adult, or continuous-24/7 family. Every
-other fallback says:
+other fallback displays only the cleaned channel name, for example:
 
 ```text
-Schedule unavailable — <channel>
+<channel>
 ```
 
-This wording avoids inventing programme details. Local synthetic rows do not
+This policy avoids inventing programme details. Local synthetic rows do not
 request EPGShare dummy programmes.
 
 ## Real-schedule upgrades
