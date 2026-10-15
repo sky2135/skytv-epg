@@ -263,6 +263,8 @@ class MatcherIntegrityTests(unittest.TestCase):
             hashlib.sha256(CHANNEL_INVENTORY_REQUIREMENTS_PATH.read_bytes()).hexdigest(),
         )
         for key, relative_path in (
+            ("providerEventGuideSha256", "scripts/provider_event_guide.py"),
+            ("providerPresentationSha256", "scripts/provider_presentation.py"),
             ("automationConfigSha256", "scripts/automation_config.py"),
             ("freshnessCheckerSha256", "scripts/check_epg_freshness.py"),
             ("freshnessWorkflowSha256", ".github/workflows/epg-health.yml"),

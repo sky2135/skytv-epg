@@ -35,17 +35,18 @@ from itertools import chain
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import quote, urljoin, urlparse
-from zoneinfo import ZoneInfo
 
 import requests
 from lxml import etree
 
 if __package__:
     from .epg_selection_spool import SpoolError, copy_and_open_verified_spool
-    from . import provider_event_slots
+    from . import provider_event_guide, provider_event_slots, provider_presentation
 else:
     from epg_selection_spool import SpoolError, copy_and_open_verified_spool
+    import provider_event_guide
     import provider_event_slots
+    import provider_presentation
 
 
 PIPELINE_VERSION = "1.0"
@@ -60,6 +61,7 @@ EFFECTIVE_QUARANTINE_REASON = (
     "review; the Google Sheet Mappings row was not changed."
 )
 PROVIDER_EVENT_RUNTIME_REASON = "providerEventInventory"
+GROUP_HEADER_RUNTIME_REASON = "providerGroupHeader"
 PROVIDER_EVENT_REVIEW_ACTIONS = frozenset(
     {"REVIEW", "UNMATCHED", "NO_EPG", "UNRESOLVED"}
 )
@@ -305,6 +307,7 @@ class MappingRow:
     notes: str
     metadata: ChannelMetadata
     runtime_synthetic_reason: str = ""
+    provider_name_aliases: tuple[str, ...] = ()
 
     @property
     def uses_local_synthetic(self) -> bool:
@@ -1284,6 +1287,7 @@ def apply_provider_event_title_overrides(
 
     applied_by_family: Counter[str] = Counter()
     runtime_synthetic_by_family: Counter[str] = Counter()
+    group_header_rows = 0
     overlaid: list[MappingRow] = []
     for row in rows:
         current = inventory.get((row.server_id, row.stream_id))
@@ -1291,6 +1295,43 @@ def apply_provider_event_title_overrides(
             overlaid.append(row)
             continue
         current_name, current_category = current
+        header_evidence = {
+            "enabled": row.enabled,
+            "action": row.action,
+            "source": row.requested_source,
+            "epg_feed": row.epg_feed,
+            "epg_id": row.epg_id,
+            "channel_name": row.channel_name,
+            "category_name": row.category_name,
+            "reason": row.reason,
+            "notes": row.notes,
+            "genre": row.metadata.genre,
+            "content_rating": row.metadata.content_rating,
+        }
+        if (
+            row.reason != EFFECTIVE_QUARANTINE_REASON
+            and provider_presentation.is_machine_group_heading(header_evidence)
+            and provider_presentation.is_same_group_heading(
+                row.channel_name, current_name, row.category_name, current_category,
+                require_category_corroboration=False,
+            )
+        ):
+            group_header_rows += 1
+            overlaid.append(replace(
+                row,
+                enabled=True,
+                action="AUTO_DUMMY",
+                requested_source="dummy",
+                effective_source="dummy",
+                epg_feed="DUMMY_CHANNELS",
+                epg_id=f"provider.heading.{row.synthetic_identity}.local",
+                channel_name=current_name,
+                canonical_name=current_name,
+                provider_name_aliases=(row.channel_name,),
+                runtime_synthetic_reason=GROUP_HEADER_RUNTIME_REASON,
+                metadata=replace(row.metadata, genre="general", channel_role="virtual"),
+            ))
+            continue
         if not provider_event_slots.is_same_event_slot(
             row.channel_name,
             current_name,
@@ -1313,6 +1354,9 @@ def apply_provider_event_title_overrides(
                 current_row,
                 channel_name=current_name,
                 canonical_name=current_name,
+                provider_name_aliases=tuple(sorted(
+                    set(current_row.provider_name_aliases) | {row.channel_name}
+                )),
             )
 
         # A rotating event slot does not need an uncertain external schedule:
@@ -1361,6 +1405,7 @@ def apply_provider_event_title_overrides(
         "runtimeSyntheticFamilies": dict(
             sorted(runtime_synthetic_by_family.items())
         ),
+        "groupHeaderRows": group_header_rows,
         "sha256": hashlib.sha256(inventory_content).hexdigest(),
     }
 
@@ -2016,35 +2061,9 @@ def _clean_synthetic_channel_label(value: object) -> str:
     return clean_text(text.strip(" |:-–—"), 180)
 
 
-_EASTERN_TIME = ZoneInfo("America/New_York")
-_ISO_EVENT_TIME_RE = re.compile(
-    r"\(\s*(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})"
-    r"[ T](?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?"
-    r"\s*(?P<zone>ET|EST|EDT)?\s*\)",
-    re.I,
-)
-_SHORT_EVENT_TIME_RE = re.compile(
-    r"\(\s*(?P<month>\d{1,2})[./](?P<day>\d{1,2})\s+"
-    r"(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<meridiem>AM|PM)"
-    r"\s*(?P<zone>ET|EST|EDT)?\s*\)",
-    re.I,
-)
-_BLANK_EVENT_LABELS = frozenset(
-    {
-        "",
-        "event",
-        "event tba",
-        "coming soon",
-        "live event",
-        "ppv",
-        "ppv event",
-        "tba",
-        "to be announced",
-    }
-)
-
 _SYNTHETIC_PROGRAMME_CLASSES = (
     "adult",
+    "groupHeader",
     "artist",
     "continuous24x7",
     "event",
@@ -2054,11 +2073,7 @@ _SYNTHETIC_PROGRAMME_CLASSES = (
 )
 
 
-@dataclass(frozen=True)
-class SyntheticEventTitle:
-    name: str
-    start_epoch: int | None
-    time_label: str
+SyntheticEventTitle = provider_event_guide.ProviderEventGuide
 
 
 def _synthetic_event_like(row: MappingRow) -> bool:
@@ -2113,6 +2128,8 @@ def synthetic_programme_classification(row: MappingRow) -> str:
 
     if row.metadata.genre == "adult" or row.metadata.content_rating == "adult":
         return "adult"
+    if row.runtime_synthetic_reason == GROUP_HEADER_RUNTIME_REASON:
+        return "groupHeader"
     if _synthetic_event_like(row):
         return "event"
 
@@ -2146,201 +2163,63 @@ def synthetic_programme_classification(row: MappingRow) -> str:
     return "channelName"
 
 
-def _plausible_event_datetime(
-    *,
-    year: int,
-    month: int,
-    day: int,
-    hour: int,
-    minute: int,
-    second: int = 0,
-    reference_epoch: int,
-    zone_hint: str = "",
-) -> datetime | None:
-    try:
-        naive = datetime(
-            int(year),
-            int(month),
-            int(day),
-            int(hour),
-            int(minute),
-            int(second),
-        )
-    except ValueError:
-        return None
-    candidates: list[datetime] = []
-    for fold in (0, 1):
-        candidate = naive.replace(tzinfo=_EASTERN_TIME, fold=fold)
-        if (
-            candidate.astimezone(timezone.utc)
-            .astimezone(_EASTERN_TIME)
-            .replace(tzinfo=None)
-            == naive
-            and all(
-                existing.utcoffset() != candidate.utcoffset()
-                for existing in candidates
-            )
-        ):
-            candidates.append(candidate)
-    if not candidates:
-        # Reject nonexistent wall-clock times during the spring DST jump.
-        return None
-    hint = str(zone_hint or "").upper()
-    if hint in {"EST", "EDT"}:
-        candidates = [value for value in candidates if value.tzname() == hint]
-        if not candidates:
-            return None
-    elif len(candidates) > 1:
-        # Generic "ET" cannot disambiguate the repeated fall-back hour.
-        return None
-    event = candidates[0]
-    reference = datetime.fromtimestamp(int(reference_epoch), tz=timezone.utc)
-    # Provider placeholder slots commonly carry dates such as 2098-01-01.
-    # A PPV name can remain useful, but that implausible time must never be
-    # presented to a customer as a real scheduled event.
-    if abs(event.astimezone(timezone.utc) - reference) > timedelta(days=550):
-        return None
-    return event
-
-
-def _event_time_label(value: datetime) -> str:
-    return (
-        f"{value.strftime('%b')} {value.day}, "
-        f"{value.strftime('%I').lstrip('0')}:{value.strftime('%M %p %Z')}"
-    )
-
-
 def decode_synthetic_event_title(
     row: MappingRow,
     *,
     reference_epoch: int,
 ) -> SyntheticEventTitle | None:
-    """Decode an event name/time only when the approved row supplies them."""
-
     if not _synthetic_event_like(row):
         return None
-
-    raw_text = unicodedata.normalize("NFKC", clean_text(row.channel_name, 300))
-    match = _ISO_EVENT_TIME_RE.search(raw_text)
-    event_time: datetime | None = None
-    supplied_time_label = ""
-    if match:
-        event_time = _plausible_event_datetime(
-            year=int(match.group("year")),
-            month=int(match.group("month")),
-            day=int(match.group("day")),
-            hour=int(match.group("hour")),
-            minute=int(match.group("minute")),
-            second=int(match.group("second") or 0),
-            reference_epoch=reference_epoch,
-            zone_hint=match.group("zone") or "",
-        )
-        raw_text = raw_text[: match.start()] + " " + raw_text[match.end() :]
-    else:
-        match = _SHORT_EVENT_TIME_RE.search(raw_text)
-        if match:
-            hour = int(match.group("hour"))
-            month = int(match.group("month"))
-            day = int(match.group("day"))
-            minute = int(match.group("minute"))
-            try:
-                # A yearless provider label cannot truthfully be assigned an
-                # instant or called "upcoming". Validate its calendar shape,
-                # then retain generic ET (or its explicit abbreviation).
-                datetime(2000, month, day, hour, minute)
-            except ValueError:
-                supplied_time_label = ""
-            else:
-                if 1 <= hour <= 12:
-                    supplied_time_label = (
-                        f"{datetime(2000, month, day).strftime('%b')} {day}, "
-                        f"{hour}:{minute:02d} {match.group('meridiem').upper()} "
-                        f"{(match.group('zone') or 'ET').upper()}"
-                    )
-                    eastern_reference = datetime.fromtimestamp(
-                        int(reference_epoch), tz=timezone.utc
-                    ).astimezone(_EASTERN_TIME)
-                    local_hour = hour % 12
-                    if match.group("meridiem").casefold() == "pm":
-                        local_hour += 12
-                    candidates = [
-                        candidate
-                        for year in (
-                            eastern_reference.year - 1,
-                            eastern_reference.year,
-                            eastern_reference.year + 1,
-                        )
-                        if (
-                            candidate := _plausible_event_datetime(
-                                year=year,
-                                month=month,
-                                day=day,
-                                hour=local_hour,
-                                minute=minute,
-                                reference_epoch=reference_epoch,
-                                zone_hint=match.group("zone") or "ET",
-                            )
-                        )
-                        is not None
-                    ]
-                    if candidates:
-                        nearest = min(
-                            candidates,
-                            key=lambda value: (
-                                abs(
-                                    value.astimezone(timezone.utc).timestamp()
-                                    - int(reference_epoch)
-                                ),
-                                0
-                                if value.astimezone(timezone.utc).timestamp()
-                                >= int(reference_epoch)
-                                else 1,
-                            ),
-                        )
-                        if abs(
-                            nearest.astimezone(timezone.utc).timestamp()
-                            - int(reference_epoch)
-                        ) <= 183 * 86400:
-                            event_time = nearest
-            raw_text = raw_text[: match.start()] + " " + raw_text[match.end() :]
-
-    text = _clean_synthetic_channel_label(raw_text)
-    text = re.sub(
-        r"^(?:CFL|CHL|MLB|MLS|NBA|NFL|NHL|PPV|UFC|WWE)\s*\d+\s*:\s*",
-        "",
-        text,
-        flags=re.I,
+    identity = provider_event_slots.event_slot_identity(
+        row.channel_name, row.category_name
     )
-    normalized_name = _security_normalize_text(text)
-    if re.search(r"\b(?:no event|no scheduled event|no event scheduled)\b", normalized_name):
-        text = "No Event Scheduled"
-        event_time = None
-        supplied_time_label = ""
-    elif re.search(r"\boff air\b", normalized_name):
-        text = "Off Air"
-        event_time = None
-        supplied_time_label = ""
-    elif re.search(r"\b(?:coming soon|tba)\b", normalized_name):
-        text = ""
-    elif raw_text.rstrip().endswith((":", "|")) and re.fullmatch(
-        r"(?:CFL|CHL|MLB|MLS|NBA|NFL|NHL|PPV|UFC|WWE)\s*\d+",
-        text,
-        flags=re.I,
-    ):
-        text = ""
-    name = _smart_synthetic_title(clean_text(text.strip(" |:-–—"), 160))
-    if _security_normalize_text(name) in _BLANK_EVENT_LABELS:
-        name = "Event To Be Announced"
-    if event_time is None:
-        return SyntheticEventTitle(
-            name=name,
-            start_epoch=None,
-            time_label=supplied_time_label,
+    decoded = provider_event_guide.parse_provider_event(
+        row.channel_name,
+        reference_epoch=reference_epoch,
+        family=identity[0] if identity else "",
+        category=row.category_name,
+    )
+    return (
+        decoded if decoded.timing_status in {"no_event", "off_air", "tba"}
+        else replace(decoded, name=_smart_synthetic_title(decoded.name))
+    )
+
+
+def _event_programme_details(
+    event: SyntheticEventTitle,
+    *,
+    start_epoch: int,
+    event_window_hours: int = DEFAULT_SYNTHETIC_EVENT_WINDOW_HOURS,
+) -> tuple[str, str]:
+    if event.start_epoch is None:
+        description = (
+            "Provider event information. A reliable date and time have not been supplied."
+            if event.timing_status not in {"no_event", "off_air", "tba"}
+            else "Check this channel again for the next announced event."
         )
-    return SyntheticEventTitle(
-        name=name,
-        start_epoch=int(event_time.timestamp()),
-        time_label=_event_time_label(event_time),
+        return event.name, description
+    announced = f"{event.name} on {event.time_label}"
+    event_end = event.explicit_end_epoch or (
+        event.start_epoch + event_window_hours * 3600
+    )
+    if start_epoch < event.start_epoch:
+        kind = "game" if re.search(
+            r"\b(?:vs\.?|versus|at)\s+", event.name, re.I
+        ) else "event"
+        return clean_text(f"Next {kind}: {announced}", 240), (
+            f"Provider-announced event: {announced}. Times are shown with their time zone."
+        )
+    if start_epoch < event_end:
+        description = f"Provider-announced start: {event.time_label}. "
+        if event.explicit_end_epoch is None:
+            description += (
+                f"The provider did not supply an end time; this listing uses a bounded "
+                f"{event_window_hours}-hour scheduled window. "
+            )
+        description += "Live status is based on the announced schedule, not a verified stream signal."
+        return clean_text(f"Live (scheduled): {event.name}", 240), description
+    return "No upcoming event announced", (
+        f"Last announced event: {announced}. Check this channel again for the next event."
     )
 
 
@@ -2361,16 +2240,17 @@ def synthetic_programme_title(
 
     if programme_class == "adult":
         return "Adult Programming"
+    if programme_class == "groupHeader":
+        return provider_presentation.BRAND_TITLE
 
     event = decode_synthetic_event_title(
         row,
         reference_epoch=int(reference_epoch or 0),
     ) if reference_epoch is not None else None
     if event is not None:
-        if not event.time_label:
-            return event.name
-        prefix = "Upcoming: " if event.start_epoch and event.start_epoch > int(reference_epoch) else ""
-        return clean_text(f"{prefix}{event.name} — {event.time_label}", 180)
+        return _event_programme_details(
+            event, start_epoch=int(reference_epoch)
+        )[0]
 
     channel_label = row.channel_name
     if programme_class == "continuous24x7":
@@ -2525,7 +2405,7 @@ def insert_synthetic_guides(
         "INSERT INTO programmes "
         "(source_key, channel_key, start_epoch, stop_epoch, title, subtitle, "
         "description, categories_json, quality) "
-        "VALUES (?, ?, ?, ?, ?, '', '', ?, 1000)"
+        "VALUES (?, ?, ?, ?, ?, '', ?, ?, 1000)"
     )
     for row in synthetic_rows:
         categories_json = json_compact(synthetic_programme_categories(row))
@@ -2548,7 +2428,7 @@ def insert_synthetic_guides(
             regular_title = event.name
         if event is not None and event.start_epoch is not None:
             event_start = event.start_epoch
-            event_end = event_start + event_hours * 3600
+            event_end = event.explicit_end_epoch or (event_start + event_hours * 3600)
         for base_start in range(aligned_start, final_end, block_seconds):
             base_stop = base_start + block_seconds
             split_points = [base_start]
@@ -2560,20 +2440,19 @@ def insert_synthetic_guides(
             split_points.append(base_stop)
             split_points.sort()
             for start, stop in zip(split_points, split_points[1:]):
-                if event is not None and event.start_epoch is not None:
-                    event_label = clean_text(
-                        f"{event.name} — {event.time_label}", 180
+                if event is not None:
+                    title, description = _event_programme_details(
+                        event, start_epoch=start, event_window_hours=event_hours
                     )
-                    if stop <= event_start:
-                        title = clean_text(f"Upcoming: {event_label}", 180)
-                    elif start < event_end and stop > event_start:
-                        title = event_label
-                    else:
-                        title = clean_text(
-                            f"Event Information: {event_label}", 180
-                        )
+                    if event.start_epoch is None and event.timing_status not in {"no_event", "off_air", "tba"}:
+                        description += f" Provider listing: {row.channel_name}"
                 else:
                     title = regular_title
+                    description = (
+                        "WhatsApp: +12368462036 — https://wa.me/12368462036"
+                        if row.runtime_synthetic_reason == GROUP_HEADER_RUNTIME_REASON
+                        else ""
+                    )
                 programme_batch.append(
                     (
                         row.source_key,
@@ -2581,6 +2460,7 @@ def insert_synthetic_guides(
                         start,
                         stop,
                         title,
+                        description,
                         categories_json,
                     )
                 )
@@ -3998,6 +3878,15 @@ def build_xml_entries(
             icon_url,
             "channel_name",
         )
+        for previous_name in row.provider_name_aliases:
+            if previous_name != row.channel_name:
+                register(
+                    previous_name,
+                    [previous_name, row.channel_name],
+                    row,
+                    icon_url,
+                    "provider_name_alias",
+                )
         if row.uses_local_synthetic and channel_name_counts[
             clean_identifier(row.channel_name, 300)
         ] > 1:
@@ -4348,11 +4237,20 @@ def write_app_epg(
     streams_with_programmes = sum(
         1 for row in runtime_rows if row.schedule_key in available_schedule_keys
     )
+    coverage_rows = [row for row in runtime_rows
+                     if row.runtime_synthetic_reason != GROUP_HEADER_RUNTIME_REASON]
+    coverage_streams = sum(
+        1 for row in coverage_rows if row.schedule_key in available_schedule_keys
+    )
     return {
         "mappedStreams": len(runtime_rows),
         "streamsWithProgrammes": streams_with_programmes,
+        "groupHeaderStreams": len(runtime_rows) - len(coverage_rows),
+        "coverageEligibleStreams": len(coverage_rows),
+        "coverageStreamsWithProgrammes": coverage_streams,
+        "coverageBasis": "CHANNELS_EXCLUDING_GROUP_HEADERS",
         "coveragePercent": round(
-            streams_with_programmes * 100.0 / max(1, len(runtime_rows)), 2
+            coverage_streams * 100.0 / max(1, len(coverage_rows)), 2
         ),
         "uniqueMappedSchedules": len(schedules),
         "uniqueSchedulesWithProgrammes": schedules_with_programmes,
@@ -4802,7 +4700,7 @@ def _guide_coverage_payload(
                 "the cleaned channel-name class is disclosed in "
                 "localSyntheticClasses."
             ),
-            "ignoredNonChannel": "Mapping row explicitly marked IGNORE.",
+            "ignoredNonChannel": "Ignored non-channel rows, including presentation-only group headers.",
             "uncovered": (
                 "Non-ignored channel row with no retained programme rows."
             ),
@@ -4885,6 +4783,9 @@ def build_guide_coverage(
     synthetic_classes: Counter[str] = Counter()
 
     for row in rows:
+        if row.runtime_synthetic_reason == GROUP_HEADER_RUNTIME_REASON:
+            ignored_non_channel += 1
+            continue
         if row.stream_id in programme_streams:
             if not row.runtime_eligible:
                 raise BuildError(
@@ -4917,11 +4818,15 @@ def build_guide_coverage(
     useful = verified_epgshare + native_panel + local_synthetic
     real = verified_epgshare + native_panel
     uncovered = quarantined_review + disabled_review + other_uncovered
-    actionable_rows = sum(1 for row in rows if row.runtime_eligible)
+    actionable_rows = sum(
+        1 for row in rows if row.runtime_eligible
+        and row.runtime_synthetic_reason != GROUP_HEADER_RUNTIME_REASON
+    )
     actionable_uncovered = sum(
         1
         for row in rows
         if row.runtime_eligible and row.stream_id not in programme_streams
+        and row.runtime_synthetic_reason != GROUP_HEADER_RUNTIME_REASON
     )
     denominators = {
         "literalLoadedMappingRows": len(rows),
@@ -5036,7 +4941,7 @@ def build_future_programme_coverage(
         for key in ("epgshare", "nativePanel", "localSynthetic")
     }
     for row in rows:
-        if not row.runtime_eligible:
+        if not row.runtime_eligible or row.runtime_synthetic_reason == GROUP_HEADER_RUNTIME_REASON:
             continue
         source = ("localSynthetic" if row.uses_local_synthetic else
                   "nativePanel" if row.effective_source == "panel" else "epgshare")
@@ -5184,6 +5089,11 @@ def build_server(
         conflicts=conflicts,
     )
     mapped_rows = [row for row in server_rows if row.runtime_eligible]
+    coverage_rows = [row for row in mapped_rows
+                     if row.runtime_synthetic_reason != GROUP_HEADER_RUNTIME_REASON]
+    coverage_streams = sum(
+        1 for row in coverage_rows if row.stream_id in streams_with_programmes
+    )
     quarantined_server_1_panel_rows = sum(
         1
         for row in server_rows
@@ -5327,8 +5237,12 @@ def build_server(
         "compressedBytes": xml_path.stat().st_size,
         "mappedStreams": len(mapped_rows),
         "mappedStreamsWithProgrammes": len(streams_with_programmes),
+        "groupHeaderStreams": len(mapped_rows) - len(coverage_rows),
+        "coverageEligibleStreams": len(coverage_rows),
+        "coverageStreamsWithProgrammes": coverage_streams,
+        "coverageBasis": "CHANNELS_EXCLUDING_GROUP_HEADERS",
         "mappingProgrammeCoveragePercent": round(
-            len(streams_with_programmes) * 100.0 / max(1, len(mapped_rows)), 2
+            coverage_streams * 100.0 / max(1, len(coverage_rows)), 2
         ),
         "guideCoverage": guide_coverage,
         "futureProgrammeCoverage": future_coverage,
@@ -5915,6 +5829,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "families": {},
         "runtimeSyntheticRows": 0,
         "runtimeSyntheticFamilies": {},
+        "groupHeaderRows": 0,
         "sha256": "",
     }
     if args.provider_inventory_file is not None:
@@ -5933,7 +5848,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{provider_event_title_overlays['appliedRows']:,} exact numbered "
             "slot(s); activated per-stream local guides for "
             f"{provider_event_title_overlays['runtimeSyntheticRows']:,} "
-            "unresolved slot(s).",
+            "unresolved slot(s); added "
+            f"{provider_event_title_overlays['groupHeaderRows']:,} group-header welcome guide(s).",
             flush=True,
         )
     if any(
@@ -6266,6 +6182,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "coveragePercent": manifest[
                         "mappingProgrammeCoveragePercent"
                     ],
+                    **{key: manifest[key] for key in (
+                        "groupHeaderStreams", "coverageEligibleStreams",
+                        "coverageStreamsWithProgrammes", "coverageBasis",
+                    )},
                     "programmeRows": manifest["programmeRows"],
                     "recommendedRefreshAt": manifest["refreshPlan"].get(
                         "recommendedRefreshAt"
@@ -6292,6 +6212,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "streamsWithProgrammes"
                     ],
                     "coveragePercent": app_manifest["coveragePercent"],
+                    **{key: app_manifest[key] for key in (
+                        "groupHeaderStreams", "coverageEligibleStreams",
+                        "coverageStreamsWithProgrammes", "coverageBasis",
+                    )},
                     "programmeRows": app_manifest["programmeRows"],
                     "guideCoverage": app_manifest["guideCoverage"],
                     "futureProgrammeCoverage": app_manifest["futureProgrammeCoverage"],

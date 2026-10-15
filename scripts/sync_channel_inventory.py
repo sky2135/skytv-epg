@@ -52,6 +52,7 @@ import auto_match_inventory as automatch  # noqa: E402
 import ai_grounded_search as gemini_review  # noqa: E402
 import ai_review_policy as ai_policy  # noqa: E402
 import provider_event_slots  # noqa: E402
+import provider_presentation  # noqa: E402
 
 try:  # Optional unless the explicit native REVIEW lane is enabled.
     import native_epg_review as native_review  # type: ignore[import-not-found]  # noqa: E402
@@ -2426,6 +2427,19 @@ def compare_inventory(
                 reuse_risk = possible_id_reuse(
                     sheet_name, provider_name, sheet_category, provider_category
                 )
+                if (
+                    str(current.get("action", "")).upper() == "IGNORE"
+                    and provider_presentation.is_machine_group_heading(current)
+                    and provider_presentation.is_same_group_heading(
+                        sheet_name, provider_name, sheet_category, provider_category,
+                        require_category_corroboration=False,
+                    )
+                ):
+                    # A disabled, machine-classified group heading has no
+                    # channel schedule to inherit. Only decoration/font style
+                    # may vary here; OPEN alerts remain authoritative and are
+                    # never resolved by this inventory comparison.
+                    reuse_risk = False
                 changed_rows.append(
                     {
                         "server_id": key[0],

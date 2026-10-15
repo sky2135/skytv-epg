@@ -27,6 +27,14 @@ def exact_text_key(value: object) -> str:
 
 _EVENT_SLOT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
+        "espn_play",
+        re.compile(
+            r"^\(\s*(?P<market>US|AU)\s*\)\s+ESPN\s+PLAY\s+"
+            r"(?P<slot>[0-9]{1,3})(?:\s*[|:–—-]\s*.*)?$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "us_espn_plus",
         re.compile(
             r"^US\s*\(\s*ESPN\+\s*(?P<slot>[0-9]{3})\s*\)\s*\|(?:\s*.*)?$",
@@ -123,6 +131,16 @@ def event_slot_identity(
         matched = pattern.fullmatch(text)
         if matched is None:
             continue
+        if family == "espn_play":
+            if not 1 <= int(matched.group("slot")) <= 999 or (
+                re.sub(r"\s+", "", exact_text_key(category))
+                not in {"sports|espn+", "|na|usaespn+"}
+            ):
+                return None
+            family = (
+                "us_espn_play" if matched.group("market").upper() == "US"
+                else "au_espn_play"
+            )
         # Broad commercial slot shapes are accepted only inside an explicit
         # event/PPV category.  The narrower ESPN+/Flo/league grammars are
         # self-identifying but still require an unchanged category at the
