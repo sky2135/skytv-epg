@@ -62,6 +62,8 @@ EFFECTIVE_QUARANTINE_REASON = (
 )
 PROVIDER_EVENT_RUNTIME_REASON = "providerEventInventory"
 GROUP_HEADER_RUNTIME_REASON = "providerGroupHeader"
+# Source clock for provider ISO timestamps that omit their own time zone.
+PROVIDER_EVENT_NAIVE_ISO_TIMEZONES = {"server_3": "+01:00"}
 PROVIDER_EVENT_REVIEW_ACTIONS = frozenset(
     {"REVIEW", "UNMATCHED", "NO_EPG", "UNRESOLVED"}
 )
@@ -2239,6 +2241,7 @@ def decode_synthetic_event_title(
         reference_epoch=reference_epoch,
         family=identity[0] if identity else "",
         category=row.category_name,
+        naive_iso_timezone=PROVIDER_EVENT_NAIVE_ISO_TIMEZONES.get(row.server_id, ""),
     )
     return (
         decoded if decoded.timing_status in {"no_event", "off_air", "tba"}

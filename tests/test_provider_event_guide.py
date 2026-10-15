@@ -258,6 +258,110 @@ class ProviderEventGuideTests(unittest.TestCase):
                 self.assertEqual(result.explicit_end_epoch, end)
                 self.assertEqual(result.timing_status, "scheduled")
 
+    def test_configured_naive_iso_offset_resolves_mlb_range_and_displays_eastern(self):
+        result = self.parse(
+            "MLB 02 : Brewers x Dodgers Start:2026-10-16 01:00:00 stop 2026-10-16 08:13:20",
+            family="league_event", category="|NA| USA MLB", naive_iso_timezone="+01:00",
+        )
+        self.assertEqual(result.start_epoch, 1792108800)
+        self.assertEqual(result.explicit_end_epoch, 1792134800)
+        self.assertEqual(result.explicit_end_epoch - result.start_epoch, 26000)
+        self.assertEqual(result.time_label, "Oct 15, 2026 8:00 PM EDT")
+        self.assertEqual(result.timezone, "UTC+01:00")
+
+    def test_configured_iso_offset_never_overrides_explicit_zones_or_range_inheritance(self):
+        for start_zone, stop_zone, expected in (
+            ("Z", "Z", epoch(2026, 10, 16, 1)),
+            (" ET", " ET", epoch(2026, 10, 16, 5)),
+            ("+02:00", "+02:00", epoch(2026, 10, 15, 23)),
+            ("", " ET", epoch(2026, 10, 16, 5)),
+            ("Z", " ET", epoch(2026, 10, 16, 1)),
+        ):
+            with self.subTest(start_zone=start_zone, stop_zone=stop_zone):
+                result = self.parse(
+                    f"MLB02| Red x Blue start:2026-10-16 01:00:00{start_zone} "
+                    f"stop:2026-10-16 08:13:20{stop_zone}",
+                    family="league_event", category="|NA| USA MLB", naive_iso_timezone="+01:00",
+                )
+                self.assertEqual(result.start_epoch, expected)
+                self.assertIn("EDT", result.time_label)
+        clock_range = self.parse(
+            "MLB02| Red x Blue 2026-10-16 01:00:00 until 08:13:20 ET",
+            family="league_event", category="|NA| USA MLB", naive_iso_timezone="+01:00",
+        )
+        self.assertEqual(clock_range.start_epoch, epoch(2026, 10, 16, 5))
+        self.assertEqual(clock_range.explicit_end_epoch, epoch(2026, 10, 16, 12, 13, 20))
+
+    def test_configured_iso_offset_preserves_same_wall_explicit_corroboration(self):
+        for iso, expected in (
+            ("07:00:00", epoch(2026, 10, 15, 11)),
+            ("07:00:15", epoch(2026, 10, 15, 11, 0, 15)),
+            ("12:00:15", epoch(2026, 10, 15, 11, 0, 15)),
+        ):
+            with self.subTest(iso=iso):
+                result = self.parse(
+                    f"US (ESPN+ 001) | Red vs Blue Oct15 7:00AM ET (2026-10-15 {iso})",
+                    naive_iso_timezone="+01:00",
+                )
+                self.assertEqual(result.start_epoch, expected)
+                self.assertEqual(result.timing_evidence, "corroborated_provider_datetime")
+                self.assertEqual(result.time_label, "Oct 15, 2026 7:00 AM EDT")
+        for iso in ("07:01:00", "12:01:00", "13:00:00"):
+            with self.subTest(conflicting_iso=iso):
+                result = self.parse(
+                    f"US (ESPN+ 001) | Red vs Blue Oct15 7:00AM ET (2026-10-15 {iso})",
+                    naive_iso_timezone="+01:00",
+                )
+                self.assertIsNone(result.start_epoch)
+                self.assertEqual(result.timing_status, "ambiguous")
+        conflict = self.parse(
+            "PPV EVENT 01: Red vs Blue (2026-10-15 07:00:00 ET) "
+            "(2026-10-15 07:00:00Z) (2026-10-15 07:00:00)",
+            naive_iso_timezone="+01:00",
+        )
+        self.assertEqual(conflict.timing_status, "ambiguous")
+        self.assertIsNone(conflict.start_epoch)
+
+    def test_configured_iso_offset_leaves_human_dates_and_default_calls_unchanged(self):
+        for label in ("Oct16 1:00AM", "(10.16 1:00AM)"):
+            with self.subTest(label=label):
+                result = self.parse("US (ESPN+ 001) | Red vs Blue " + label, naive_iso_timezone="+01:00")
+                self.assertEqual(result.start_epoch, epoch(2026, 10, 16, 5))
+        label = "PPV EVENT 01: Red vs Blue 2026-10-15T07:00:00Z (2026-10-15 07:00:00)"
+        self.assertEqual(self.parse(label).timing_status, "ambiguous")
+        configured = self.parse(label, naive_iso_timezone="+01:00")
+        self.assertEqual(configured.start_epoch, epoch(2026, 10, 15, 7))
+        self.assertEqual(configured.time_label, "Oct 15, 2026 3:00 AM EDT")
+        default = self.parse("MLB02| Red x Blue start:2026-10-16 01:00:00", category="USA MLB")
+        self.assertEqual(default.start_epoch, epoch(2026, 10, 16, 5))
+
+    def test_configured_fixed_offset_displays_winter_and_dst_transitions_without_guessing(self):
+        for stamp, label in (
+            ("2026-12-16 01:00:00", "Dec 15, 2026 7:00 PM EST"),
+            ("2026-03-08 07:30:00", "Mar 8, 2026 1:30 AM EST"),
+            ("2026-03-08 08:30:00", "Mar 8, 2026 3:30 AM EDT"),
+            ("2026-11-01 06:30:00", "Nov 1, 2026 1:30 AM EDT"),
+            ("2026-11-01 07:30:00", "Nov 1, 2026 1:30 AM EST"),
+        ):
+            with self.subTest(stamp=stamp):
+                result = self.parse("MLB02| Red x Blue start:" + stamp, naive_iso_timezone="+01:00")
+                self.assertEqual(result.timing_status, "scheduled")
+                self.assertEqual(result.time_label, label)
+        for stamp, status in (
+            ("2026-03-08 02:30:00 ET", "invalid"),
+            ("2026-11-01 01:30:00 ET", "ambiguous"),
+        ):
+            with self.subTest(explicit_eastern=stamp):
+                result = self.parse("MLB02| Red x Blue start:" + stamp, naive_iso_timezone="+01:00")
+                self.assertIsNone(result.start_epoch)
+                self.assertEqual(result.timing_status, status)
+
+    def test_invalid_configured_iso_timezone_fails_before_parsing(self):
+        for zone in (None, True, "PST", "America/New_York", "+15:00", "+01:99", " +01:00", " "):
+            with self.subTest(zone=zone):
+                with self.assertRaises(ValueError):
+                    self.parse("No Event Scheduled", naive_iso_timezone=zone)
+
     def test_labeled_ranges_reject_invalid_endpoints_and_remove_stop_labels(self):
         for start, end in (
             ("2026-10-16 08:00:00", "2026-10-16 01:00:00"),

@@ -2980,6 +2980,8 @@ class ProviderPlaylistLinkingTests(unittest.TestCase):
         reference = int(datetime(2026, 10, 15, 17, tzinfo=timezone.utc).timestamp())
         decoded = runner.decode_synthetic_event_title(projected[0], reference_epoch=reference)
         self.assertEqual(decoded.name, "Brewers x Dodgers")
+        self.assertEqual(decoded.start_epoch, int(datetime(2026, 10, 16, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(decoded.time_label, "Oct 15, 2026 8:00 PM EDT")
         self.assertEqual(decoded.explicit_end_epoch - decoded.start_epoch, 26000)
         with tempfile.TemporaryDirectory() as temporary:
             connection = runner.create_database(Path(temporary) / "mlb.sqlite3")
@@ -3000,8 +3002,34 @@ class ProviderPlaylistLinkingTests(unittest.TestCase):
                 self.assertTrue(any(title.startswith("Next game: Brewers x Dodgers on") for title in titles))
                 self.assertIn("Live (scheduled): Brewers x Dodgers", titles)
                 self.assertIn("No upcoming event announced", titles)
+                live_rows = list(connection.execute(
+                    "SELECT start_epoch, stop_epoch FROM programmes WHERE title = ?",
+                    ("Live (scheduled): Brewers x Dodgers",),
+                ))
+                self.assertEqual(live_rows, [(decoded.start_epoch, decoded.explicit_end_epoch)])
             finally:
                 connection.close()
+
+    def test_server3_source_clock_does_not_shift_other_servers_or_explicit_et(self) -> None:
+        raw = _mapping_row(
+            server_id="server_3", stream_id="1",
+            channel_name="MLB 02 : Brewers x Dodgers Start:2026-10-16 01:00:00 stop 2026-10-16 08:13:20",
+            category_name="|NA| USA MLB", epg_id="PPV.EVENTS.Dummy.us",
+            source="dummy", epg_feed="DUMMY_CHANNELS",
+        )
+        raw["action"] = "AUTO_DUMMY"
+        row = runner.parse_mapping_csv(_mapping_bytes([raw]), {"server_3"})[0]
+        reference = int(datetime(2026, 10, 15, 17, tzinfo=timezone.utc).timestamp())
+        for server_id, expected_hour in (("server_1", 5), ("server_2", 5), ("server_3", 0)):
+            with self.subTest(server=server_id):
+                event = runner.decode_synthetic_event_title(replace(row, server_id=server_id), reference_epoch=reference)
+                self.assertEqual(event.start_epoch, int(datetime(2026, 10, 16, expected_hour, tzinfo=timezone.utc).timestamp()))
+        explicit = replace(row, channel_name=(
+            "US (ESPN+ 001) | Red vs Blue Oct 15 7:00AM ET (2026-10-15 07:00:15)"
+        ), category_name="|NA| USA ESPN+")
+        event = runner.decode_synthetic_event_title(explicit, reference_epoch=reference)
+        self.assertEqual(event.start_epoch, int(datetime(2026, 10, 15, 11, 0, 15, tzinfo=timezone.utc).timestamp()))
+        self.assertEqual(event.time_label, "Oct 15, 2026 7:00 AM EDT")
 
 
 class SyntheticGuideTests(unittest.TestCase):

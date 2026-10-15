@@ -191,6 +191,31 @@ def _label(value: datetime) -> str:
     return f"{value.strftime('%b')} {value.day}, {value.year} {value.strftime('%I').lstrip('0')}:{value.strftime('%M %p %Z')}"
 
 
+def _corroborating_explicit_zone(match, matches, *, reference_epoch: int) -> str:
+    for sibling, _kind in matches:
+        zone = sibling.groupdict().get("zone") or ""
+        if sibling is match or not zone:
+            continue
+        candidate, _zone_name, _evidence = _decode(
+            match, reference_epoch=reference_epoch, allow_eastern=False,
+            inherited_zone=zone,
+        )
+        explicit, _zone_name, _evidence = _decode(
+            sibling, reference_epoch=reference_epoch, allow_eastern=False,
+        )
+        precision = 1 if all(
+            value.groupdict().get("second") is not None
+            for value in (match, sibling)
+        ) else 60
+        if (
+            candidate is not None and explicit is not None
+            and int(candidate.timestamp()) // precision
+            == int(explicit.timestamp()) // precision
+        ):
+            return zone
+    return ""
+
+
 def _unknown_zone_after(tail: str) -> bool:
     tail = re.sub(r"^(?:\s*[)\]]){0,3}\s*", "", tail)
     if _UNSUPPORTED_ZONE.match(tail):
@@ -211,15 +236,22 @@ def _unknown_zone_after(tail: str) -> bool:
 
 def parse_provider_event(
     value: object, *, reference_epoch: int, family: str = "", category: str = "",
+    naive_iso_timezone: str = "",
 ) -> ProviderEventGuide:
     """Return source-derived name/time, failing closed on uncertain clocks.
 
     A yearless date must be within 31 days of the build. Legacy parenthesized
     ISO/numeric formats retain their documented Eastern clock assumption;
     other naive formats require a North American family/category/route.
+    A configured ISO source zone overrides those defaults after explicit and
+    corroborated zones; configured calls display the instant in Eastern time.
     """
     if type(reference_epoch) is not int:
         raise ValueError("reference_epoch must be an integer")
+    if not isinstance(naive_iso_timezone, str) or (
+        naive_iso_timezone and _zone(naive_iso_timezone, False)[0] is None
+    ):
+        raise ValueError("naive_iso_timezone must be a supported explicit timezone")
     has_control = any(
         (unicodedata.category(character) in {"Cc", "Cs"} and not character.isspace())
         or character in "\ufffe\uffff\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\ufeff"
@@ -295,6 +327,16 @@ def parse_provider_event(
             inherited_zone = next((other.groupdict().get("zone") for other, _ in matches if other.groupdict().get("zone")), "")
         elif clock_end is not None:
             inherited_zone = clock_end.groupdict().get("zone") or ""
+        if (
+            naive_iso_timezone and kind == "iso"
+            and not match.groupdict().get("zone") and not inherited_zone
+        ):
+            inherited_zone = (
+                _corroborating_explicit_zone(
+                    match, matches, reference_epoch=reference_epoch,
+                )
+                if not is_range and clock_end is None else ""
+            ) or naive_iso_timezone
         start, zone_name, evidence = _decode(match, reference_epoch=reference_epoch, allow_eastern=allow_eastern, inherited_zone=inherited_zone)
         if start is None:
             status = "ambiguous" if evidence == "ambiguous_local_time" else "invalid" if evidence in {"invalid_datetime", "invalid_local_time", "invalid_timezone", "date_outside_window"} else "unscheduled"
@@ -344,7 +386,8 @@ def parse_provider_event(
             end_epoch = int(end.timestamp())
         except (ValueError, KeyError, OverflowError):
             return ProviderEventGuide(name, timing_status="invalid", timing_evidence="invalid_event_range", timezone=zone_name)
-    return ProviderEventGuide(name, int(start.timestamp()), _label(start), end_epoch, "scheduled", evidence, zone_name)
+    display_start = start.astimezone(_EASTERN) if naive_iso_timezone else start
+    return ProviderEventGuide(name, int(start.timestamp()), _label(display_start), end_epoch, "scheduled", evidence, zone_name)
 
 
 __all__ = ["ProviderEventGuide", "parse_provider_event"]
