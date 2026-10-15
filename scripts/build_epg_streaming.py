@@ -1400,7 +1400,7 @@ def apply_provider_event_title_overrides(
         verified_playlist_names = {
             name for name in playlist_names
             if re.fullmatch(r"[0-9]+", row.stream_id)
-            and provider_event_slots.is_same_event_slot(
+            and provider_event_slots.is_same_event_presentation(
                 current_name, name, current_category, current_category
             )
         }

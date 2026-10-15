@@ -71,5 +71,16 @@ class ProviderEventSlotTests(unittest.TestCase):
                 self.assertEqual(slots.descriptive_event_family(name, "NBA"), "")
 
 
+    def test_exact_descriptive_presentation_does_not_authorize_game_rotation(self):
+        name = "NBA Summer League Mavericks vs Thunder jul 16"
+        other = "NBA Summer League Mavericks vs Bulls jul 17"
+        self.assertTrue(slots.is_same_event_presentation(name, name, "NBA", "NBA"))
+        self.assertFalse(slots.is_same_event_presentation(name, other, "NBA", "NBA"))
+        self.assertFalse(slots.is_same_event_presentation(name, name, "NBA", "Sports"))
+        self.assertFalse(slots.is_same_event_slot(name, name, "NBA", "NBA"))
+        self.assertIsNone(slots.event_slot_identity(name, "NBA"))
+        self.assertFalse(slots.is_same_event_presentation("NBA TV", "NBA TV", "NBA", "NBA"))
+
+
 if __name__ == "__main__":
     unittest.main()

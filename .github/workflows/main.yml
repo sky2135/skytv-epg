@@ -698,6 +698,14 @@ jobs:
               "synthetic_upgrade_preserved_rows",
               "review_apply_limit",
               "coverage_fallback_limit",
+              "native_review_m3u_servers_attempted",
+              "native_review_m3u_servers_available",
+              "native_review_m3u_name_mismatches",
+              "native_review_m3u_missing_rows",
+              "provider_event_m3u_name_aliases",
+              "provider_event_m3u_epg_id_aliases",
+              "provider_event_m3u_shared_epg_id_aliases",
+              "provider_event_m3u_ambiguous_stream_ids",
           )
           counts = {}
           for key in count_keys:

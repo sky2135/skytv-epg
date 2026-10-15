@@ -1640,7 +1640,7 @@ _PROVIDER_EVENT_HINT_FIELDS = (
     "_provider_event_name_alias", "_provider_event_epg_id_alias",
     "_provider_event_name_aliases", "_m3u_tvg_name",
     "_provider_event_alias_category", "_provider_event_alias_stream_id",
-    "_provider_event_alias_verified",
+    "_provider_event_alias_verified", "_provider_event_alias_primary_name",
 )
 
 
@@ -1658,17 +1658,33 @@ def _event_presentation_hints(channel: Mapping[str, Any]) -> tuple[str, str, tup
     alias_name = str(channel.get("_provider_event_name_alias", ""))
     alias_id = str(channel.get("_provider_event_epg_id_alias", ""))
     aliases = channel.get("_provider_event_name_aliases")
+    primary_name = str(channel.get("_provider_event_alias_primary_name", ""))
+    numbered_slot = provider_event_slots.event_slot_identity(
+        channel.get("name", ""), channel.get("category_name", "")
+    )
     if (
         not alias_name
         or not isinstance(aliases, (tuple, list))
         or not 1 <= len(aliases) <= 2
         or aliases[0] != alias_name
         or alias_id != streaming.clean_identifier(alias_id, 300)
+        or (
+            numbered_slot is None
+            and (
+                not primary_name
+                or primary_name != streaming.clean_identifier(primary_name, 300)
+                or not provider_event_slots.is_same_event_presentation(
+                    channel.get("name", ""), primary_name,
+                    channel.get("category_name", ""),
+                    channel.get("_provider_event_alias_category", ""),
+                )
+            )
+        )
         or any(
             not isinstance(name, str)
             or not name
             or name != streaming.clean_identifier(name, 300)
-            or not provider_event_slots.is_same_event_slot(
+            or not provider_event_slots.is_same_event_presentation(
                 channel.get("name", ""), name,
                 channel.get("category_name", ""),
                 channel.get("_provider_event_alias_category", ""),
@@ -1911,12 +1927,25 @@ def enrich_review_inventories_from_m3u(
                 and m3u_channel.get("_native_epg_id_exact") is True
             )
             event_aliases: list[str] = []
+            primary_name = str(m3u_channel.get("name", ""))
+            numbered_slot = provider_event_slots.event_slot_identity(
+                channel.get("name", ""), channel.get("category_name", "")
+            )
+            primary_presentation_proven = bool(
+                primary_name
+                and primary_name == streaming.clean_identifier(primary_name, 300)
+                and provider_event_slots.is_same_event_presentation(
+                    channel.get("name", ""), primary_name,
+                    channel.get("category_name", ""), m3u_channel.get("category_name", ""),
+                )
+            )
             for candidate_name in (m3u_channel.get("name", ""), m3u_channel.get("_m3u_tvg_name", "")):
                 safe_name = streaming.clean_identifier(candidate_name, 300)
                 if (
                     m3u_id_exact and safe_name and safe_name == str(candidate_name)
                     and safe_name not in event_aliases
-                    and provider_event_slots.is_same_event_slot(
+                    and (numbered_slot is not None or primary_presentation_proven)
+                    and provider_event_slots.is_same_event_presentation(
                         channel.get("name", ""), safe_name,
                         channel.get("category_name", ""), m3u_channel.get("category_name", ""),
                     )
@@ -1933,6 +1962,7 @@ def enrich_review_inventories_from_m3u(
                     "_provider_event_alias_category": str(m3u_channel.get("category_name", "")),
                     "_provider_event_alias_stream_id": stream_id,
                     "_provider_event_alias_verified": True,
+                    "_provider_event_alias_primary_name": primary_name,
                 })
                 stats["provider_event_m3u_name_aliases"] += len(event_aliases)
                 if unique_id_alias:
