@@ -53,19 +53,27 @@ authentication, TLS, payload, and local-I/O failures still leave the row in
 
 ## Workflows
 
-- `1 - Sync channels to Google Sheet` — runs daily at **02:17 Toronto time** and
-  can also be dispatched manually. The scheduled run appends missing channels,
-  rechecks existing `REVIEW` rows on all servers, and defaults the total apply
-  and synthetic fallback limits to `30000`. Scheduled Gemini turns on when its
-  API-key secret exists unless `EPG_USE_GEMINI_AI=false`. Manual dispatch stays
-  conservative: no new-row write, `dry-run`, Gemini off, and zero write limits
-  until explicitly changed.
-- `2 - Build and publish EPG` — daily and manual inventory, build, validation,
-  and GitHub Pages deployment.
+- `1 - Sync channels to Google Sheet` — manual preview and repair. Defaults
+  remain no new-row write, `dry-run`, Gemini off, and zero write limits.
+- `2 - Build and publish EPG` — the single daily pipeline at **04:37 Toronto
+  time**, also available manually. It discovers channels, rechecks eligible
+  `REVIEW` and authenticated fallback rows on all servers, creates one snapshot,
+  builds, validates, and deploys. Total existing-row apply and synthetic limits
+  default to `30000`; existing repository variables still override them. Gemini
+  runs when its key exists unless `EPG_USE_GEMINI_AI=false`, within the 200-row
+  AI ceiling and remaining total apply allowance.
+- `Validate repository changes` — credential-free regression tests on relevant
+  pull requests and changes to `main`.
+- `Check published EPG freshness` — an independent check every four hours for
+  publication age, real future programmes, and degraded provider availability.
 
 Both workflows use the same non-cancelling concurrency group, so they cannot
 write to the Sheet at the same time. Neither workflow commits generated output
 or mapping data to a Git branch.
+
+See [automation operations](docs/AUTOMATION_OPERATIONS.md) for retry behavior,
+controls, health states, and the distinction between real EPGShare matches and
+local placeholder coverage.
 
 ## Matching Lab (proposal-only)
 
@@ -113,13 +121,13 @@ Safe rows not proven real become `AUTO_DUMMY` with a truthful, unique local
 guide, and decorative headings become disabled `IGNORE`. Later runs retry local
 coverage fallbacks as real-schedule upgrade candidates.
 
-Workflow 1 also rechecks existing `REVIEW` rows and earlier
+The daily publisher also rechecks existing `REVIEW` rows and earlier
 `coverage-fallback-v1` synthetics. Smart Rules always run first. A real match is
 enabled only after the exact-ID, region, catalog, and programme checks used for
 a new channel all pass. One `review_apply_limit` of `0`, `25`, `100`, `500`,
 `2500`, `5000`, or `30000` caps the total persisted across deterministic,
 native, synthetic, heading, and AI lanes. Scheduled runs default to `30000`;
-manual dispatch defaults to `0`.
+the manual preview workflow defaults to `0`.
 For Server 2 and Server 3, the same run may also recover an exact native ID
 from current API/M3U evidence, but only after whole-catalog name uniqueness,
 current programme, and immediate pre-write provider checks pass. Server 1

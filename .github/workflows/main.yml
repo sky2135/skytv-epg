@@ -42,14 +42,18 @@ env:
     https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.txt
   EPG_PUBLIC_BASE_URL: ${{ vars.EPG_PUBLIC_BASE_URL }}
   EPG_MINIMUM_COVERAGE: ${{ vars.EPG_MINIMUM_COVERAGE || '80' }}
-  EPG_COVERAGE_FALLBACK_LIMIT: ${{ vars.EPG_COVERAGE_FALLBACK_LIMIT || '0' }}
+  EPG_COVERAGE_FALLBACK_LIMIT: ${{ vars.EPG_COVERAGE_FALLBACK_LIMIT || '30000' }}
+  REVIEW_APPLY_LIMIT: ${{ vars.EPG_REVIEW_APPLY_LIMIT || '30000' }}
+  AI_REVIEW_LIMIT: "200"
+  USE_GEMINI_AI: >-
+    ${{ vars.EPG_USE_GEMINI_AI != 'false' && secrets.GEMINI_API_KEY != '' && 'true' || 'false' }}
 
 jobs:
   build:
     name: Stream, validate, and package EPG outputs
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 210
 
     steps:
       - name: Check out repository
@@ -87,6 +91,8 @@ jobs:
           import os
           import re
           from urllib.parse import urlsplit
+
+          from scripts.automation_config import validate_run_limits
 
           sheet_id = os.environ.get("GOOGLE_SHEET_ID", "").strip()
           if not re.fullmatch(r"[A-Za-z0-9_-]{20,200}", sheet_id):
@@ -131,13 +137,14 @@ jobs:
               raise SystemExit(
                   "EPG_MINIMUM_COVERAGE must be between 0 and 100."
               )
-          fallback_limit = os.environ.get(
-              "EPG_COVERAGE_FALLBACK_LIMIT", ""
-          ).strip()
-          if fallback_limit not in {"0", "500", "2500", "5000"}:
-              raise SystemExit(
-                  "EPG_COVERAGE_FALLBACK_LIMIT must be 0, 500, 2500, or 5000."
+          try:
+              validate_run_limits(
+                  review_apply_limit=os.environ["REVIEW_APPLY_LIMIT"],
+                  coverage_fallback_limit=os.environ["EPG_COVERAGE_FALLBACK_LIMIT"],
+                  ai_review_limit=os.environ["AI_REVIEW_LIMIT"],
               )
+          except ValueError as exc:
+              raise SystemExit(str(exc)) from None
           PY
 
       - name: Install pinned dependencies
@@ -204,6 +211,7 @@ jobs:
           SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
           SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
           SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euo pipefail
           mkdir -p .build/channel-sync
@@ -224,17 +232,30 @@ jobs:
                 "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.txt"
               --epgshare-spool-out
                 "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3"
+              --epgshare-icon-catalog-out
+                "$RUNNER_TEMP/skytv-epg-v1/source_icons.json"
+              --review-recheck-mode apply
+              --review-recheck-servers server_1 server_2 server_3
+              --validate-native-review
+              --review-apply-limit "$REVIEW_APPLY_LIMIT"
+              --ai-review-limit "$AI_REVIEW_LIMIT"
               --coverage-fallback-limit "$EPG_COVERAGE_FALLBACK_LIMIT"
+              --minimum-server-channels
+                server_1=4000 server_2=10500 server_3=9400
               --write-to-sheet
           )
+          if [[ "${USE_GEMINI_AI,,}" == "true" ]]; then
+            sync_command+=(--use-gemini-ai)
+          fi
           if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
             sync_command+=(--allow-insecure-http)
             echo "::warning::Provider credentials may be sent over unencrypted HTTP."
           fi
-          "${sync_command[@]}"
+          timeout --signal=TERM --kill-after=60s 85m "${sync_command[@]}"
           test -s .build/channel-sync/effective_mapping.csv
           test -s .build/channel-sync/authoritative_mapping.csv
           test -s .build/channel-sync/mapping_snapshot_manifest.json
+          test -s "$RUNNER_TEMP/skytv-epg-v1/source_icons.json"
 
       - name: Verify private snapshot contains no passwords, private URLs, or credential fields
         shell: bash
@@ -249,6 +270,7 @@ jobs:
           SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
           SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
           SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python - <<'PY'
           import base64
@@ -373,6 +395,9 @@ jobs:
           raw_tokens: set[bytes] = set()
           casefold_tokens: set[bytes] = set()
           google_values = [raw_account]
+          gemini_key = os.environ.get("GEMINI_API_KEY", "")
+          if gemini_key:
+              raw_tokens.update(encoded_variants(gemini_key))
           for field in ("client_email", "private_key", "private_key_id"):
               value = account.get(field)
               if isinstance(value, str) and value:
@@ -597,6 +622,29 @@ jobs:
               failures = payload.get("provider_failures", {})
               count = len(failures) if isinstance(failures, dict) else 0
               handle.write(f"- Provider checks unavailable: **{count}**\n")
+              if count:
+                  handle.write("\n**Degraded discovery:** unavailable providers retain their existing mappings; their new channels could not be checked.\n")
+                  print("::warning::Discovery was partial: one or more provider inventories were unavailable.")
+              handle.write("\n### Autonomous matching\n\n")
+              matching_counts = (
+                  ("review_recheck_safe_matches_persisted", "Existing mappings safely updated"),
+                  ("review_apply_persisted_deterministic_rows", "Deterministic upgrades saved"),
+                  ("review_apply_persisted_native_rows", "Native guide upgrades saved"),
+                  ("review_apply_persisted_ai_rows", "AI-verified upgrades saved"),
+                  ("ai_review_retry_candidate_rows", "Unresolved identities retained for real-match retries"),
+                  ("ai_review_active_fallback_candidate_rows", "Active placeholders in the retry queue"),
+                  ("ai_review_active_fallback_upgraded_rows", "Active placeholders upgraded by verified AI"),
+                  ("new_channel_approval_deferred_rows", "New approvals deferred safely to REVIEW"),
+                  ("ai_review_attempted_rows", "Rows considered for bounded AI verification"),
+                  ("ai_review_deferred_rows", "AI rows deferred by the run cap"),
+                  ("ai_review_error_rows", "AI rows requiring a later retry"),
+                  ("coverage_fallback_applied_rows", "Disclosed local guides proposed"),
+              )
+              for key, label in matching_counts:
+                  value = payload.get(key, 0)
+                  if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1_000_000:
+                      raise SystemExit("Invalid aggregate matching count.")
+                  handle.write(f"- {label}: **{value:,}**\n")
               snapshot_servers = payload.get("snapshot_integrity_servers", {})
               if isinstance(snapshot_servers, dict) and snapshot_servers:
                   handle.write("\n### Mapping snapshot integrity\n\n")
@@ -642,6 +690,9 @@ jobs:
             --mapping-csv .build/channel-sync/effective_mapping.csv \
             --source-xmltv \
               "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
+            --source-icon-catalog \
+              "$RUNNER_TEMP/skytv-epg-v1/source_icons.json" \
+            --source-base-url https://epgshare01.online/epgshare01/ \
             --base-config config/channel_icons.csv \
             --output-config .build/channel-sync/channel_icons.csv \
             --asset-catalog assets/logos/icon_catalog.csv \
@@ -680,7 +731,7 @@ jobs:
           fi
 
           # This inner timeout preserves time for failure diagnostics before the
-          # 120-minute job timeout is reached.
+          # job timeout is reached after the bounded inventory and AI phase.
           build_command=(
             python -u scripts/build_epg_streaming.py
               --mapping-file .build/channel-sync/effective_mapping.csv \
@@ -690,6 +741,7 @@ jobs:
                 .build/channel-sync/mapping_snapshot_manifest.json \
               --provider-inventory-file \
                 .build/channel-sync/inventory.csv \
+              --inventory-summary-file .build/channel-sync/summary.json \
               --all-source-file \
                 "$RUNNER_TEMP/skytv-epg-v1/epg_ripper_ALL_SOURCES1.xml.gz" \
               --all-source-file-origin-url "$EPG_ALL_SOURCE_URL" \
@@ -718,6 +770,28 @@ jobs:
               "${build_command[@]}"
           fi
 
+      - name: Check local publication freshness
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_epg_freshness.py \
+            --public-dir public \
+            --max-age-hours 36 \
+            --minimum-future-hours 6 \
+            --expected-server server_1 \
+            --expected-server server_2 \
+            --expected-server server_3 \
+            --allow-degraded \
+            --output .build/reports/freshness-check.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path(".build/reports/freshness-check.json").read_text(encoding="utf-8"))
+          if report["status"] == "degraded":
+              print("::warning::Guides passed publication validation, but provider discovery or native guide availability was degraded.")
+          PY
+
       - name: Verify files contain no passwords, private URLs, or credential fields
         id: public_secret_scan
         if: always()
@@ -733,6 +807,7 @@ jobs:
           SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
           SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
           SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euo pipefail
           if [[ -d public ]]; then
@@ -869,6 +944,9 @@ jobs:
           raw_tokens: set[bytes] = set()
           casefold_tokens: set[bytes] = set()
           google_values = [raw_account]
+          gemini_key = os.environ.get("GEMINI_API_KEY", "")
+          if gemini_key:
+              raw_tokens.update(encoded_variants(gemini_key))
           for field in ("client_email", "private_key", "private_key_id"):
               value = account.get(field)
               if isinstance(value, str) and value:

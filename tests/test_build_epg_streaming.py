@@ -1226,6 +1226,16 @@ class MappingContractTests(unittest.TestCase):
                 manifest["guideCoverage"]["counts"]["localSynthetic"], 1
             )
             self.assertEqual(
+                manifest["futureProgrammeCoverage"]["realStreamsWithFutureProgrammes"], 0
+            )
+            self.assertEqual(
+                manifest["futureProgrammeCoverage"]["sources"]["localSynthetic"]["streamsWithFutureProgrammes"], 1
+            )
+            health = json.loads((public / "health.json").read_text(encoding="utf-8"))
+            self.assertEqual(health["status"], "degraded")
+            self.assertEqual(health["unavailableNativePanelServers"], ["server_2"])
+            self.assertEqual(health["freshnessValidUntilUtc"], runner.utc_iso(FIXED_NOW + 36 * 3600))
+            self.assertEqual(
                 manifest["sourceProvenance"]["panel:server_2"],
                 {
                     "fallback": "CHANNEL_DERIVED_LOCAL_SYNTHETIC",

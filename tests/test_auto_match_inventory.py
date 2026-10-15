@@ -1089,6 +1089,7 @@ class AutoMatchInventoryTests(unittest.TestCase):
                     "SELECT channel_key, request_kind, source_channel_id "
                     "FROM epg_spool_requests"
                 ).fetchall()
+            connection.close()
             self.assertEqual(requests, [("Old.Channel.us2", "fixed", "Old.Channel.us2")])
 
     def test_malformed_source_removes_stale_spool(self) -> None:
@@ -1131,7 +1132,7 @@ class AutoMatchInventoryTests(unittest.TestCase):
                     prepare_matcher_runtime([], {})
             load_engine.assert_not_called()
 
-    def test_large_automatic_approval_batch_fails_before_spool_seal(self) -> None:
+    def test_large_automatic_approval_batch_resumes_as_disabled_review(self) -> None:
         many_channels = [
             {
                 "stream_id": f"new-{index}",
@@ -1163,8 +1164,7 @@ class AutoMatchInventoryTests(unittest.TestCase):
             spool = base / "selected.sqlite3"
             write_gzip(source, xml_bytes(strong=True))
             text_catalog.write_bytes(text_catalog_bytes("Good.Channel.us2"))
-            with self.assertRaisesRegex(AutoMatchError, "approval batch exceeded"):
-                auto_match_and_spool(
+            outcome = auto_match_and_spool(
                     mapping_rows=[],
                     inventories=[inv],
                     new_rows=new_rows,
@@ -1174,8 +1174,42 @@ class AutoMatchInventoryTests(unittest.TestCase):
                     generated_at=GENERATED_AT,
                     minimum_unique_channels=1,
                     runtime_factory=RuntimeFactory(),
-                )
-            self.assertFalse(spool.exists())
+            )
+            enabled = [row for row in outcome.rows if row["enabled"] == "TRUE"]
+            deferred = [row for row in outcome.rows if row["enabled"] == "FALSE"]
+            self.assertEqual(len(enabled), 35)
+            self.assertEqual(len(deferred), 65)
+            self.assertTrue(all(row["action"] == "REVIEW" for row in deferred))
+            self.assertEqual(outcome.new_approval_deferred_rows, 65)
+            self.assertEqual(outcome.approved_rows, 35)
+            self.assertTrue(spool.exists())
+            # Deferred target-bound proposals are durable retry work, rather
+            # than operator-controlled targets or lost discovery rows.
+            selected, stats = sync.select_review_recheck_rows(
+                sync.MappingTable(list(streaming.SHEET_COLUMNS), list(streaming.SHEET_COLUMNS), list(outcome.rows)),
+                [inv],
+                selected_servers=("server_1",),
+            )
+            self.assertEqual(len(selected), 65)
+            self.assertEqual(stats["review_recheck_excluded_manual_candidate"], 0)
+
+    def test_bulk_approval_cap_retains_server_limit_and_interleaves_servers(self) -> None:
+        keys = {
+            (server_id, str(index))
+            for server_id in ("server_1", "server_2", "server_3")
+            for index in range(3000)
+        }
+        selected = integration._bounded_new_approval_keys(keys, total_new_rows=9000)
+        self.assertEqual(len(selected), 3150)
+        self.assertEqual(
+            {server: sum(key[0] == server for key in selected) for server in integration.SUPPORTED_SERVERS},
+            {"server_1": 1050, "server_2": 1050, "server_3": 1050},
+        )
+        one_server = integration._bounded_new_approval_keys(
+            {( "server_1", str(index)) for index in range(10000)},
+            total_new_rows=10000,
+        )
+        self.assertEqual(len(one_server), integration.MAX_LARGE_BATCH_APPROVALS_PER_SERVER)
 
     def test_catalogs_with_no_complete_exact_intersection_block_before_spool(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

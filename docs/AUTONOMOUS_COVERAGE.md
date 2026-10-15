@@ -41,15 +41,31 @@ may additionally use a verified native panel schedule.
 
 ## Scheduled and manual controls
 
-The scheduled Workflow 1 run uses `apply` across all servers. Its default total
+The scheduled Workflow 2 publisher uses `apply` across all servers, in the same
+run that builds and deploys the resulting snapshot. Its default total
 REVIEW apply limit and synthetic proposal limit are both `30000`; repository
 variables may set either limit to another allowed value, including `0` to
 disable that class of scheduled writes.
 
 When `GEMINI_API_KEY` exists, scheduled grounded review is enabled unless
 `EPG_USE_GEMINI_AI=false`. Setting the variable to `false` is the explicit
-kill switch. Manual dispatch remains conservative: no new-row write, `dry-run`,
+kill switch. The separate manual Workflow 1 remains conservative: no new-row write, `dry-run`,
 Gemini off, and both write limits at `0` until the operator selects otherwise.
+
+Authenticated fallback rows remain in the bounded AI retry pool as well as
+deterministic/native rechecks. The default AI queue advances a full budget-sized
+window each day and interleaves servers. New discoveries receive AI only after
+their initial Mapping append is confirmed, so a later run can reread an actual
+authoritative Sheet row. An abstention or quota failure leaves the current
+placeholder active and eligible for a later retry. Human overrides and OPEN
+alerts still block automated changes.
+
+New-channel approval bursts retain the existing percentage and absolute caps.
+Excess verified proposals are appended disabled in REVIEW with target-bound
+provenance, instead of aborting discovery; later bounded runs reconsider them.
+
+See [automation operations](AUTOMATION_OPERATIONS.md) for publication freshness
+and source-separated future-programme metrics.
 
 ## Coverage reporting
 

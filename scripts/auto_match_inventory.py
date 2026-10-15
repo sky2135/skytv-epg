@@ -452,6 +452,9 @@ class AutoMatchOutcome:
     synthetic_upgrade_considered_rows: int = 0
     synthetic_upgrade_real_rows: int = 0
     synthetic_upgrade_preserved_rows: int = 0
+    new_approval_deferred_rows: int = 0
+    ai_review_retry_candidate_rows: int = 0
+    ai_review_active_fallback_candidate_rows: int = 0
 
     def summary_fields(self) -> dict[str, Any]:
         return {
@@ -518,6 +521,11 @@ class AutoMatchOutcome:
             "synthetic_upgrade_real_rows": self.synthetic_upgrade_real_rows,
             "synthetic_upgrade_preserved_rows": (
                 self.synthetic_upgrade_preserved_rows
+            ),
+            "new_channel_approval_deferred_rows": self.new_approval_deferred_rows,
+            "ai_review_retry_candidate_rows": self.ai_review_retry_candidate_rows,
+            "ai_review_active_fallback_candidate_rows": (
+                self.ai_review_active_fallback_candidate_rows
             ),
             "ai_review_attempted_rows": self.ai_review_attempted_rows,
             "ai_review_fuzzy_comparisons": self.ai_review_comparisons,
@@ -1339,6 +1347,30 @@ def _enforce_approval_blast_radius(
         )
 
 
+def _bounded_new_approval_keys(
+    approved_keys: Iterable[tuple[str, str]], *, total_new_rows: int
+) -> frozenset[tuple[str, str]]:
+    """Retain a safe first batch; disabled REVIEW rows resume on later runs."""
+
+    keys = frozenset(approved_keys)
+    if total_new_rows < LARGE_BATCH_THRESHOLD:
+        return keys
+    total_limit = min(
+        MAX_LARGE_BATCH_APPROVALS,
+        int(math.ceil(total_new_rows * MAX_LARGE_BATCH_APPROVAL_FRACTION)),
+    )
+    selected: set[tuple[str, str]] = set()
+    by_server: dict[str, int] = {}
+    for key in _rotated_round_robin_review_keys(keys, rotation=0):
+        if len(selected) >= total_limit:
+            break
+        if by_server.get(key[0], 0) >= MAX_LARGE_BATCH_APPROVALS_PER_SERVER:
+            continue
+        selected.add(key)
+        by_server[key[0]] = by_server.get(key[0], 0) + 1
+    return frozenset(selected)
+
+
 def _coverage_fallback_marker(row: Mapping[str, Any]) -> str:
     """Return an audit-only local marker for a per-stream synthetic guide.
 
@@ -1968,6 +2000,11 @@ def _previous_ai_review_keys(
         key
         for key in review_keys
         if "ai-verified-v2" in str(rows_by_key[key].get("notes", "")).casefold()
+        and str(rows_by_key[key].get("action", "")).upper() == "AUTO_EPGSHARE"
+        and _mapping_is_enabled(rows_by_key[key], "AUTO_EPGSHARE")
+        and str(rows_by_key[key].get("source", "")).casefold() == "epgshare01"
+        and str(rows_by_key[key].get("epg_feed", "")).upper() == "ALL_SOURCES1"
+        and _target_bound_automatic_provenance(rows_by_key[key])
     )
 
 
@@ -2043,9 +2080,9 @@ def _stage_ai_review_shortlists_with_metrics(
     """Build deterministic fuzzy shortlists without making a mapping decision.
 
     The frozen Smart Rules proposal is always evaluated first.  This fallback
-    is intentionally limited to existing REVIEW rows which Smart Rules could
-    not safely finalize from exact evidence.  A shortlist is data for an
-    optional reviewer; it never changes the proposal or enables a row.
+    accepts existing REVIEW rows and authenticated active coverage fallbacks
+    which Smart Rules could not safely finalize from exact evidence. A
+    shortlist never changes the proposal or enables a row.
     """
 
     if (
@@ -2106,10 +2143,8 @@ def _stage_ai_review_shortlists_with_metrics(
     # policy abstains.  Deleting the tied leaders here could promote a weaker
     # third candidate into a manufactured unique winner.
 
-    # Rows which already hold an AI suggestion still run through Smart Rules,
-    # but must not consume the bounded AI backlog again.  Filtering the key set
-    # before iteration prevents the first 50 previously reviewed rows from
-    # starving every later unresolved row forever.
+    # Only finalized dual-verifier approvals are excluded. Abstentions and
+    # active placeholders remain in the bounded rotated queue on later runs.
     eligible_review_keys = set(review_keys).difference(ai_excluded_keys)
     shortlists: list[AiReviewShortlist] = []
     attempted_rows = 0
@@ -3047,6 +3082,7 @@ def auto_match_and_spool(
     defer_review_coverage_fallback: bool = False,
     minimum_unique_channels: int = MINIMUM_CORROBORATED_CATALOG_IDS,
     runtime_factory: MatcherRuntimeFactory = prepare_matcher_runtime,
+    icon_catalog_out: Path | None = None,
 ) -> AutoMatchOutcome:
     """Return patched candidate rows after one successful sealed source parse.
 
@@ -3092,6 +3128,14 @@ def auto_match_and_spool(
             text_catalog_path.resolve(strict=False),
             spool_path.resolve(strict=False),
         }
+        icon_path = Path(icon_catalog_out) if icon_catalog_out is not None else None
+        if icon_path is not None:
+            if icon_path.resolve(strict=False) in distinct_paths:
+                raise AutoMatchError(
+                    "The icon catalog must be different from the matching inputs and spool."
+                )
+            if icon_path.is_symlink() or (icon_path.exists() and not icon_path.is_file()):
+                raise AutoMatchError("The icon catalog output path is invalid.")
     except (OSError, RuntimeError) as exc:
         raise AutoMatchError("The ALL_SOURCES1 file paths are invalid.") from exc
     if len(distinct_paths) != 3:
@@ -3153,20 +3197,32 @@ def auto_match_and_spool(
         synthetic_upgrade_rows=synthetic_upgrade_rows,
         existing_rows=existing_rows_by_key,
     )
+    # An authenticated fallback is durable unresolved work, even while its
+    # placeholder keeps output useful. New rows enter this queue only after
+    # their disabled REVIEW/fallback state is confirmed in Sheets next run.
+    ai_review_keys = review_keys.union(
+        key for key in synthetic_upgrade_keys
+        if verified_coverage_fallback_preimage(rows_by_key[key]) is not None
+    )
     fixed_ids = active_combined_source_ids(mapping_rows)
     window_start = now_epoch - DEFAULT_EPG_HISTORY_DAYS * 86400
     # A caller may pin the rotation for exact replay. Otherwise advance it
-    # once per UTC minute, deterministically from this run's generated_at.
-    # Completed AI rows are excluded separately; this rotation also prevents
-    # permanently unshortlistable rows at the head of a large backlog from
-    # starving later servers and streams.
+    # once per UTC day by a full shortlist window. Round to a complete server
+    # cycle so the next window does not overlap at the interleave boundary.
+    # Explicit rotations retain their exact replay semantics.
+    ai_server_count = max(1, len({key[0] for key in ai_review_keys}))
+    ai_rotation_stride = (
+        math.ceil(MAX_AI_REVIEW_SHORTLISTS / ai_server_count) * ai_server_count
+    )
     effective_ai_review_rotation = (
         0
         if not enable_ai_review
         else (
             int(ai_review_rotation)
             if ai_review_rotation is not None
-            else (now_epoch // 60) % (MAX_AI_REVIEW_ROTATION + 1)
+            else (
+                (now_epoch // 86400) * ai_rotation_stride
+            ) % (MAX_AI_REVIEW_ROTATION + 1)
         )
     )
 
@@ -3406,14 +3462,14 @@ def auto_match_and_spool(
             _stage_ai_review_shortlists_with_metrics(
                 resolver=runtime.resolver,
                 proposals=proposals,
-                review_keys=review_keys,
+                review_keys=ai_review_keys,
                 ai_excluded_keys=_previous_ai_review_keys(
-                    review_keys, rows_by_key
+                    ai_review_keys, rows_by_key
                 ),
                 corroborated_real_candidates=corroborated_real_candidates,
                 rotation=effective_ai_review_rotation,
             )
-            if enable_ai_review and review_keys
+            if enable_ai_review and ai_review_keys
             else _AiReviewStaging((), 0, 0)
         )
         # Gemini cannot resolve either a routed target shadowed by an unscoped
@@ -3460,6 +3516,7 @@ def auto_match_and_spool(
                 programme_sink=spool.add_programme,
                 source_base_url=SOURCE_BASE_URL,
                 minimum_unique_channels=int(minimum_unique_channels),
+                icon_catalog_path=icon_path,
             )
             if (
                 len(runtime_box) != 1
@@ -3672,9 +3729,33 @@ def auto_match_and_spool(
                     approved_count += 1
                     approved_by_server[key[0]] += 1
 
-            # Preserve the original new-channel blast-radius policy. Existing
-            # REVIEW approvals and the separately bounded local-synthetic lane
-            # are capped independently by the Sheet caller.
+            # Keep the original new-channel blast radius, but persist surplus
+            # verified proposals as disabled REVIEW so later bounded rechecks
+            # make progress instead of aborting every discovery run.
+            new_approval_keys = frozenset(
+                key for key in new_keys
+                if key not in coverage_fallback_keys
+                and patched_by_key_during_run[key].get("enabled") == "TRUE"
+            )
+            selected_new_keys = _bounded_new_approval_keys(
+                new_approval_keys, total_new_rows=len(new_keys)
+            )
+            deferred_new_keys = new_approval_keys.difference(selected_new_keys)
+            for key in deferred_new_keys:
+                row = patched_by_key_during_run[key]
+                row["enabled"] = "FALSE"
+                row["action"] = "REVIEW"
+                row["reason"] = (
+                    "Verified automatic proposal deferred by the new-channel "
+                    "batch limit; retry in the existing REVIEW queue."
+                )
+            approved_count -= len(deferred_new_keys)
+            approved_ids = {
+                row["epg_id"] for key, row in patched_by_key_during_run.items()
+                if row.get("enabled") == "TRUE"
+                and row.get("action") == "AUTO_EPGSHARE"
+                and (key not in synthetic_upgrade_keys or row != rows_by_key[key])
+            }
             new_approved_by_server = {
                 server_id: sum(
                     1
@@ -3711,8 +3792,12 @@ def auto_match_and_spool(
             }
             unresolved_review_keys = frozenset(
                 key
-                for key in review_keys
+                for key in ai_review_keys
                 if patched_by_key_for_review[key].get("enabled") != "TRUE"
+                or (
+                    key in synthetic_upgrade_keys
+                    and patched_by_key_for_review[key] == rows_by_key[key]
+                )
             )
             finalized_shortlists_box.append(
                 _finalize_ai_review_shortlists(
@@ -3953,6 +4038,11 @@ def auto_match_and_spool(
             1
             for key in synthetic_upgrade_keys
             if patched_by_key[key] == rows_by_key[key]
+        ),
+        new_approval_deferred_rows=len(deferred_new_keys),
+        ai_review_retry_candidate_rows=len(unresolved_review_keys),
+        ai_review_active_fallback_candidate_rows=len(
+            unresolved_review_keys.intersection(synthetic_upgrade_keys)
         ),
     )
 

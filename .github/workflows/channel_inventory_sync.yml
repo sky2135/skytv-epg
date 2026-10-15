@@ -2,15 +2,8 @@ name: 1 - Sync channels to Google Sheet
 run-name: "Channel sync (${{ github.event_name }} #${{ github.run_number }})"
 
 on:
-  # Analyze the REVIEW backlog before the daily 04:37 EPG build. Scheduled
-  # runs use bounded autonomous apply/fallback caps; manual dispatch remains
-  # separately controlled. The shared concurrency group prevents this job and
-  # Workflow 2 from touching the private Sheet at the same time if a run takes
-  # longer than expected.
-  schedule:
-    - cron: "17 2 * * *"
-      timezone: "America/Toronto"
-
+  # The daily publisher now discovers and rechecks channels in the same run.
+  # Retain this separately controlled manual preview/repair workflow.
   workflow_dispatch:
     inputs:
       update_google_sheet:
@@ -99,22 +92,14 @@ env:
   GOOGLE_SHEET_TAB: ${{ vars.GOOGLE_SHEET_TAB || 'Mappings' }}
   ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
   # New-row appends and existing-REVIEW updates are independent controls.
-  REQUEST_SHEET_WRITE: >-
-    ${{ github.event_name == 'schedule' && 'true' || inputs.update_google_sheet }}
-  REQUEST_REVIEW_UPDATE: >-
-    ${{ github.event_name == 'schedule' && 'true' || inputs.recheck_existing_review == 'apply' }}
-  REVIEW_RECHECK_MODE: >-
-    ${{ github.event_name == 'schedule' && 'apply' || inputs.recheck_existing_review }}
-  REVIEW_RECHECK_SERVER: >-
-    ${{ github.event_name == 'schedule' && 'all' || inputs.recheck_server }}
-  USE_GEMINI_AI: >-
-    ${{ github.event_name == 'schedule' && (vars.EPG_USE_GEMINI_AI != 'false' && secrets.GEMINI_API_KEY != '' && 'true' || 'false') || inputs.use_gemini_ai }}
-  AI_REVIEW_LIMIT: >-
-    ${{ github.event_name == 'schedule' && '200' || inputs.ai_review_limit }}
-  REVIEW_APPLY_LIMIT: >-
-    ${{ github.event_name == 'schedule' && (vars.EPG_REVIEW_APPLY_LIMIT || '30000') || inputs.review_apply_limit }}
-  COVERAGE_FALLBACK_LIMIT: >-
-    ${{ github.event_name == 'schedule' && (vars.EPG_COVERAGE_FALLBACK_LIMIT || '30000') || inputs.coverage_fallback_limit }}
+  REQUEST_SHEET_WRITE: ${{ inputs.update_google_sheet }}
+  REQUEST_REVIEW_UPDATE: ${{ inputs.recheck_existing_review == 'apply' }}
+  REVIEW_RECHECK_MODE: ${{ inputs.recheck_existing_review }}
+  REVIEW_RECHECK_SERVER: ${{ inputs.recheck_server }}
+  USE_GEMINI_AI: ${{ inputs.use_gemini_ai }}
+  AI_REVIEW_LIMIT: ${{ inputs.ai_review_limit }}
+  REVIEW_APPLY_LIMIT: ${{ inputs.review_apply_limit }}
+  COVERAGE_FALLBACK_LIMIT: ${{ inputs.coverage_fallback_limit }}
   EPG_ALL_SOURCE_URL: >-
     https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.xml.gz
   EPG_ALL_CATALOG_URL: >-
@@ -163,6 +148,8 @@ jobs:
           import os
           import re
           from urllib.parse import urlsplit
+
+          from scripts.automation_config import validate_run_limits
 
           def required(name: str) -> str:
               value = os.environ.get(name, "").strip()
@@ -222,18 +209,16 @@ jobs:
               )
 
           ai_limit = required("AI_REVIEW_LIMIT")
-          if ai_limit not in {"10", "25", "50", "100", "200"}:
-              raise SystemExit(
-                  "ai_review_limit must be 10, 25, 50, 100, or 200."
-              )
           review_apply_limit = required("REVIEW_APPLY_LIMIT")
-          if review_apply_limit not in {
-              "0", "25", "100", "500", "2500", "5000", "30000"
-          }:
-              raise SystemExit(
-                  "review_apply_limit must be 0, 25, 100, 500, 2500, 5000, "
-                  "or 30000."
+          fallback_limit = required("COVERAGE_FALLBACK_LIMIT")
+          try:
+              validate_run_limits(
+                  review_apply_limit=review_apply_limit,
+                  coverage_fallback_limit=fallback_limit,
+                  ai_review_limit=ai_limit,
               )
+          except ValueError as exc:
+              raise SystemExit(str(exc)) from None
 
           if use_gemini == "true" and review_apply_limit != "0":
               gemini_key = os.environ.get("GEMINI_API_KEY", "")
@@ -248,12 +233,6 @@ jobs:
                       "GitHub Actions secret; do not paste it into workflow inputs."
                   )
 
-          fallback_limit = required("COVERAGE_FALLBACK_LIMIT")
-          if fallback_limit not in {"0", "500", "2500", "5000", "30000"}:
-              raise SystemExit(
-                  "coverage_fallback_limit must be 0, 500, 2500, 5000, or "
-                  "30000."
-              )
 
           source = urlsplit(required("EPG_ALL_SOURCE_URL"))
           if (

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import hashlib
 import json
 import re
 import unicodedata
@@ -29,6 +30,13 @@ from typing import Iterable, Mapping
 from urllib.parse import urljoin, urlparse
 
 from lxml import etree
+
+from epg_catalog_stream import (
+    ICON_CATALOG_MAX_BYTES, ICON_CATALOG_MAX_TEXT_BYTES,
+    ICON_CATALOG_MAX_RECORDS, ICON_CATALOG_MAX_NAMES_PER_RECORD,
+    ICON_CATALOG_MAX_TOTAL_NAMES, ICON_CATALOG_MAX_NAME_TEXT_BYTES,
+    ICON_CATALOG_SCHEMA_VERSION,
+)
 
 from named_person_subjects import (
     canonical_name,
@@ -466,6 +474,86 @@ def extract_source_icon_catalog(
     return icons, variants_by_fold, unique_name_icons
 
 
+def read_source_icon_catalog(
+    catalog_path: Path, source_path: Path, wanted_ids: Iterable[str],
+    wanted_names: Iterable[str], *, base_url: str = "",
+) -> tuple[dict[str, str], dict[str, set[str]], dict[str, str]]:
+    """Reuse the complete first-pass catalog only for its hash-bound XML input."""
+    with catalog_path.open("rb") as handle:
+        raw = handle.read(ICON_CATALOG_MAX_BYTES + 1)
+    if len(raw) > ICON_CATALOG_MAX_BYTES:
+        raise ValueError("Source icon catalog exceeds its size limit.")
+    data = json.loads(raw)
+    required_fields = {"schema_version", "source_sha256", "source_bytes", "source_base_url", "channel_records", "logical_sha256"}
+    if (not isinstance(data, dict) or set(data) != required_fields
+            or type(data.get("schema_version")) is not int or data["schema_version"] != ICON_CATALOG_SCHEMA_VERSION
+            or type(data.get("source_bytes")) is not int or data["source_bytes"] <= 0
+            or not isinstance(data.get("source_base_url"), str)
+            or any(not isinstance(data.get(key), str) or re.fullmatch(r"[0-9a-f]{64}", data[key]) is None
+                   for key in ("source_sha256", "logical_sha256"))):
+        raise ValueError("Source icon catalog has an invalid schema.")
+    logical_payload = {key: value for key, value in data.items() if key != "logical_sha256"}
+    logical_sha = hashlib.sha256(json.dumps(
+        logical_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    if data["logical_sha256"] != logical_sha:
+        raise ValueError("Source icon catalog logical SHA-256 does not match its payload.")
+    digest = hashlib.sha256()
+    source_bytes = 0
+    with source_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+            source_bytes += len(chunk)
+    if (
+        data["source_sha256"] != digest.hexdigest()
+        or data["source_bytes"] != source_bytes
+        or data["source_base_url"] != base_url
+    ):
+        raise ValueError("Source icon catalog does not match the XMLTV source and origin.")
+    records = data.get("channel_records")
+    if not isinstance(records, list) or len(records) > ICON_CATALOG_MAX_RECORDS:
+        raise ValueError("Source icon catalog has an invalid channel-record list.")
+    wanted_folds = {folded_identifier(value) for value in wanted_ids if folded_identifier(value)}
+    wanted_name_keys = {exact_logo_name_key(value) for value in wanted_names if exact_logo_name_key(value)}
+    icons: dict[str, str] = {}
+    variants: dict[str, set[str]] = defaultdict(set)
+    by_name: dict[str, set[str]] = defaultdict(set)
+    total_text_bytes = 0
+    total_names = 0
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {"epg_id", "display_names", "icon_url"}:
+            raise ValueError("Source icon catalog contains an invalid record.")
+        source_id = record.get("epg_id")
+        display_names = record.get("display_names")
+        source_icon = record.get("icon_url")
+        if (
+            not isinstance(source_id, str) or len(source_id) > 300 or identifier(source_id) != source_id
+            or not isinstance(display_names, list) or len(display_names) > ICON_CATALOG_MAX_NAMES_PER_RECORD
+            or any(not isinstance(value, str) for value in display_names)
+            or sum(len(value.encode("utf-8")) for value in display_names) > ICON_CATALOG_MAX_NAME_TEXT_BYTES
+            or not isinstance(source_icon, str) or len(source_icon) > 2_000
+            or (source_icon and safe_http_url(source_icon) != source_icon)
+        ):
+            raise ValueError("Source icon catalog contains an unsafe channel record.")
+        total_text_bytes += sum(len(value.encode("utf-8")) for value in (source_id, source_icon, *display_names))
+        total_names += len(display_names)
+        if total_text_bytes > ICON_CATALOG_MAX_TEXT_BYTES or total_names > ICON_CATALOG_MAX_TOTAL_NAMES:
+            raise ValueError("Source icon catalog exceeds its text limit.")
+        folded = folded_identifier(source_id)
+        if source_id and folded in wanted_folds:
+            variants[folded].add(source_id)
+            if source_icon:
+                icons.setdefault(source_id, source_icon)
+        if source_icon:
+            for display_name in display_names:
+                key = exact_logo_name_key(display_name)
+                if key in wanted_name_keys:
+                    by_name[key].add(source_icon)
+    return icons, variants, {
+        key: next(iter(values)) for key, values in by_name.items() if len(values) == 1
+    }
+
+
 def extract_source_icons(
     path: Path, wanted_ids: Iterable[str], *, base_url: str = ""
 ) -> tuple[dict[str, str], dict[str, set[str]]]:
@@ -611,6 +699,7 @@ def generate(
     asset_catalog: Path,
     brand_catalog: Path | None = None,
     source_base_url: str = "",
+    source_icon_catalog: Path | None = None,
     category_extension: str = "png",
 ) -> dict[str, object]:
     if base_config.resolve() == output_config.resolve():
@@ -669,12 +758,16 @@ def generate(
         for value in (row.get("channel_name", ""), row.get("canonical_name", ""))
         if exact_logo_name_key(value)
     }
-    source_icons, source_variants, source_name_icons = extract_source_icon_catalog(
-        source_xmltv,
-        wanted_source_ids,
-        wanted_source_names,
-        base_url=source_base_url,
-    )
+    if source_icon_catalog is not None:
+        source_icons, source_variants, source_name_icons = read_source_icon_catalog(
+            source_icon_catalog, source_xmltv, wanted_source_ids,
+            wanted_source_names, base_url=source_base_url,
+        )
+    else:
+        source_icons, source_variants, source_name_icons = extract_source_icon_catalog(
+            source_xmltv, wanted_source_ids, wanted_source_names,
+            base_url=source_base_url,
+        )
 
     manual_matches: set[tuple[str, str]] = set()
     for row in enabled_rows:
@@ -912,6 +1005,7 @@ def main() -> int:
     parser.add_argument("--mapping-csv", type=Path, required=True)
     parser.add_argument("--source-xmltv", type=Path, required=True)
     parser.add_argument("--source-base-url", default="")
+    parser.add_argument("--source-icon-catalog", type=Path)
     parser.add_argument(
         "--base-config", type=Path, default=Path("config/channel_icons.csv")
     )
@@ -940,6 +1034,7 @@ def main() -> int:
         asset_catalog=args.asset_catalog,
         brand_catalog=args.brand_catalog,
         source_base_url=args.source_base_url,
+        source_icon_catalog=args.source_icon_catalog,
         category_extension=args.category_extension,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))

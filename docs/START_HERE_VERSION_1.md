@@ -497,8 +497,9 @@ uses the synthetic lane when otherwise safe.
 
 ### 12A. Let the daily workflow reduce channels waiting in REVIEW
 
-The Section 12 apply run starts the backlog process. Workflow 1 then runs daily
-before Workflow 2. With the repository variables unset, the scheduled run uses
+The Section 12 apply run can start the backlog process immediately. The daily
+Workflow 2 publisher then rechecks the backlog and publishes in the same run.
+With the repository variables unset, that scheduled run uses
 `30000` for both the total existing-row apply cap and the synthetic fallback
 cap. Set either variable to `0` only when you intentionally want to disable that
 class of scheduled writes.
@@ -714,7 +715,7 @@ or setup package.
 
 After the first setup, the system runs automatically:
 
-1. Every day at **02:17 Toronto time**, Workflow 1 checks all three servers,
+1. Every day at **04:37 Toronto time**, Workflow 2 checks all three servers,
    appends missing channels, and rechecks eligible existing `REVIEW` rows in
    `apply` mode. A temporarily unavailable provider is preserved and skipped,
    so healthy providers can still complete the run.
@@ -731,9 +732,9 @@ After the first setup, the system runs automatically:
    requires two independent web authorities for the same complete identity
    claim and every local and terminal gate. AI failure or abstention falls
    through to synthetic when the row is otherwise safe.
-5. Every day at **04:37 Toronto time**, Workflow 2 refreshes the private Sheet
-   snapshot, builds and validates the guide, and deploys the XML and JSON
-   outputs.
+5. That same run reuses its private Sheet snapshot, first-pass icon catalog,
+   and selected programme spool, then builds, validates, and deploys the XML
+   and JSON outputs. Workflow 1 is available for manual preview and repair.
 6. Existing human `MANUAL`/`APPROVED` classifications are never silently
    remapped, and the existing live-sports workflow continues independently.
 
@@ -936,7 +937,9 @@ the inventory see it as new and add it again. Instead:
       uncertain values deliberately left unknown
 - [ ] `OPEN` Sync Alerts reviewed and resolved, or deliberately left quarantined
 - [ ] First EPG build and Pages deployment completed successfully
-- [ ] `health.json` shows `status: ok`
+- [ ] The independent **Check published EPG freshness** workflow passes;
+      generation time and real future programmes are current, and provider
+      availability is healthy (an old `status: ok` alone is insufficient)
 - [ ] TiviMate and custom-app URLs tested
 
 ## Official references

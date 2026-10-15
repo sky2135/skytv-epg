@@ -530,6 +530,96 @@ class AutoMatchShortlistTests(unittest.TestCase):
             self.assertEqual(outcome.ai_review_attempted_rows, 0)
             self.assertEqual(outcome.ai_review_comparisons, 0)
 
+    def test_active_authenticated_fallback_keeps_its_guide_and_ai_retry(self) -> None:
+        row = _mapping_row(stream_id="17", name="US: Good Channell HD")
+        fallback = dict(row)
+        integration._apply_coverage_fallback(
+            key=("server_1", "17"), original=row, patched=fallback,
+            source_sha256="a" * 64,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "all.xml.gz"
+            catalog = root / "all.txt"
+            with gzip.open(source, "wb") as handle:
+                handle.write(_xml_bytes())
+            catalog.write_bytes(_text_catalog_bytes())
+            outcome = integration.auto_match_and_spool(
+                mapping_rows=[fallback],
+                inventories=[_inventory(stream_id="17", name=row["channel_name"])],
+                new_rows=[], synthetic_upgrade_rows=[fallback],
+                all_source_file=source, all_source_catalog_file=catalog,
+                spool_out=root / "selection.sqlite", generated_at=GENERATED_AT,
+                enable_ai_review=True, minimum_unique_channels=5,
+                runtime_factory=_runtime_factory,
+            )
+        self.assertEqual(outcome.rows, (fallback,))
+        self.assertEqual(outcome.approved_rows, 0)
+        self.assertEqual(outcome.synthetic_upgrade_preserved_rows, 1)
+        self.assertEqual(outcome.ai_review_attempted_rows, 1)
+        self.assertEqual(len(outcome.ai_review_shortlists), 1)
+        self.assertEqual(outcome.ai_review_shortlists[0].key, ("server_1", "17"))
+
+    def test_daily_retry_window_advances_a_full_bounded_batch(self) -> None:
+        keys = {(server, str(index)) for server in ("server_1", "server_2", "server_3") for index in range(1000)}
+        first = integration._rotated_round_robin_review_keys(
+            keys, rotation=0
+        )[:integration.MAX_AI_REVIEW_SHORTLISTS]
+        second = integration._rotated_round_robin_review_keys(
+            keys, rotation=201
+        )[:integration.MAX_AI_REVIEW_SHORTLISTS]
+        self.assertEqual(len(set(first).intersection(second)), 0)
+
+    def test_new_unmatched_channel_enters_ai_queue_after_fallback_is_persisted(self) -> None:
+        row = _mapping_row(stream_id="17", name="US: Good Channell HD")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "all.xml.gz"
+            catalog = root / "all.txt"
+            with gzip.open(source, "wb") as handle:
+                handle.write(_xml_bytes())
+            catalog.write_bytes(_text_catalog_bytes())
+            arguments = dict(
+                inventories=[_inventory(stream_id="17", name=row["channel_name"])],
+                all_source_file=source, all_source_catalog_file=catalog,
+                generated_at=GENERATED_AT, enable_ai_review=True,
+                minimum_unique_channels=5, runtime_factory=_runtime_factory,
+            )
+            discovered = integration.auto_match_and_spool(
+                mapping_rows=[], new_rows=[row],
+                spool_out=root / "discovery.sqlite", coverage_fallback_limit=1,
+                **arguments,
+            )
+            self.assertEqual(discovered.rows[0]["action"], "AUTO_DUMMY")
+            self.assertEqual(discovered.ai_review_shortlists, ())
+            # The returned row represents the exact state authoritatively
+            # reread after the preceding run confirmed its append.
+            persisted = dict(discovered.rows[0])
+            retried = integration.auto_match_and_spool(
+                mapping_rows=[persisted], new_rows=[],
+                synthetic_upgrade_rows=[persisted],
+                spool_out=root / "retry.sqlite", **arguments,
+            )
+        self.assertEqual(retried.rows, (persisted,))
+        self.assertEqual(len(retried.ai_review_shortlists), 1)
+        self.assertEqual(retried.ai_review_active_fallback_candidate_rows, 1)
+
+    def test_historical_or_quoted_ai_marker_does_not_erase_unresolved_retry(self) -> None:
+        row = _mapping_row(stream_id="17", name="US: Good Channell HD")
+        row["notes"] = "operator discarded ai-verified-v2 target"
+        fallback = dict(row)
+        integration._apply_coverage_fallback(
+            key=("server_1", "17"), original=row, patched=fallback,
+            source_sha256="a" * 64,
+        )
+        for unresolved in (row, fallback):
+            self.assertEqual(
+                integration._previous_ai_review_keys(
+                    (("server_1", "17"),), {("server_1", "17"): unresolved}
+                ),
+                frozenset(),
+            )
+
     def test_new_rows_and_unsafe_contexts_never_receive_shortlists(self) -> None:
         candidate = {
             "epg_id": "Good.Channel.us2",

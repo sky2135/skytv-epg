@@ -4094,7 +4094,7 @@ class ReportsAndSheetsTests(unittest.TestCase):
             with self.subTest(removed=removed):
                 self.assertNotIn(removed, summary_section)
 
-    def test_workflow_one_safe_defaults_and_scheduled_caps_are_pinned(self) -> None:
+    def test_manual_sync_preserves_safe_defaults_and_daily_publisher_owns_rechecks(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "channel_inventory_sync.yml"
         ).read_text(encoding="utf-8")
@@ -4102,8 +4102,6 @@ class ReportsAndSheetsTests(unittest.TestCase):
             "# This workflow never commits", 1
         )[0]
         for required in (
-            'cron: "17 2 * * *"',
-            'timezone: "America/Toronto"',
             "REVIEW backlog to recheck (inventory still checks all servers)",
             "default: dry-run",
             "default: all",
@@ -4121,17 +4119,31 @@ class ReportsAndSheetsTests(unittest.TestCase):
         self.assertGreaterEqual(dispatch_section.count("default: false"), 2)
         self.assertEqual(dispatch_section.count('default: "0"'), 2)
         self.assertNotIn("default: true", dispatch_section)
-        for scheduled_value in (
-            "github.event_name == 'schedule' && 'true' || inputs.update_google_sheet",
-            "github.event_name == 'schedule' && 'apply' || inputs.recheck_existing_review",
-            "github.event_name == 'schedule' && 'all' || inputs.recheck_server",
-            "github.event_name == 'schedule' && (vars.EPG_USE_GEMINI_AI != 'false' && secrets.GEMINI_API_KEY != '' && 'true' || 'false') || inputs.use_gemini_ai",
-            "github.event_name == 'schedule' && '200' || inputs.ai_review_limit",
-            "github.event_name == 'schedule' && (vars.EPG_REVIEW_APPLY_LIMIT || '30000') || inputs.review_apply_limit",
-            "github.event_name == 'schedule' && (vars.EPG_COVERAGE_FALLBACK_LIMIT || '30000') || inputs.coverage_fallback_limit",
+        self.assertNotIn("  schedule:", workflow)
+        self.assertNotIn("github.event_name == 'schedule'", workflow)
+        for manual_value in (
+            "REQUEST_SHEET_WRITE: ${{ inputs.update_google_sheet }}",
+            "REQUEST_REVIEW_UPDATE: ${{ inputs.recheck_existing_review == 'apply' }}",
+            "REVIEW_RECHECK_MODE: ${{ inputs.recheck_existing_review }}",
+            "REVIEW_RECHECK_SERVER: ${{ inputs.recheck_server }}",
+            "USE_GEMINI_AI: ${{ inputs.use_gemini_ai }}",
+            "REVIEW_APPLY_LIMIT: ${{ inputs.review_apply_limit }}",
         ):
-            with self.subTest(scheduled_value=scheduled_value):
-                self.assertIn(scheduled_value, workflow)
+            with self.subTest(manual_value=manual_value):
+                self.assertIn(manual_value, workflow)
+        publisher = (REPO_ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+        for autonomous_option in (
+            '--review-recheck-mode apply',
+            '--review-recheck-servers server_1 server_2 server_3',
+            '--review-apply-limit "$REVIEW_APPLY_LIMIT"',
+            '--validate-native-review',
+            '--use-gemini-ai',
+            '--epgshare-icon-catalog-out',
+        ):
+            with self.subTest(autonomous_option=autonomous_option):
+                self.assertIn(autonomous_option, publisher)
+        self.assertIn("from scripts.automation_config import validate_run_limits", publisher)
+        self.assertIn("from scripts.automation_config import validate_run_limits", workflow)
         self.assertEqual(dispatch_section.count('- "30000"'), 2)
         self.assertIn("tests.test_ai_review_policy", workflow)
         self.assertIn("New-channel mappings proposed", workflow)
@@ -6093,6 +6105,66 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(summary["ai_review_abstained_rows"], 0)
         self.assertEqual(summary["ai_review_error_rows"], 0)
         self.assertEqual(summary["ai_review_total_tokens"], 15)
+
+    def test_gemini_upgrades_active_fallback_only_after_authenticated_terminal_read(self) -> None:
+        fallback = self.authenticated_fallback(self.disabled_review("review-1"))
+        outcome = SimpleNamespace(
+            ai_review_shortlists=(self.ai_shortlist(),), ai_review_rotation=0,
+            source_sha256="a" * 64,
+            verification_evidence=self.ai_verification_evidence(),
+        )
+        for terminal_kind in ("unchanged", "tampered", "manual", "disabled_review", "open_alert"):
+            with self.subTest(terminal_kind=terminal_kind):
+                current = dict(fallback)
+                if terminal_kind == "tampered":
+                    current["reason"] = "operator edited rollback"
+                elif terminal_kind == "manual":
+                    current.update({"action": "KEEP_PANEL", "source": "panel", "epg_id": "operator.choice"})
+                elif terminal_kind == "disabled_review":
+                    current = self.disabled_review("review-1")
+                alerts = frozenset({("server_1", "review-1")}) if terminal_kind == "open_alert" else frozenset()
+                def load(candidate_rows):
+                    self.assertEqual(list(candidate_rows), [fallback])
+                    return table([current]), alerts, frozenset({("server_1", "review-1")})
+                with mock.patch.object(
+                    sync.gemini_review, "review_flagged_channels",
+                    side_effect=self.gemini_result_for(),
+                ):
+                    updates, summary = sync._gemini_review_updates(
+                        outcome=outcome, authoritative_table=table([fallback]),
+                        api_key="test-key", limit=25, terminal_state_loader=load,
+                    )
+                self.assertEqual(len(updates), 1 if terminal_kind == "unchanged" else 0)
+                self.assertEqual(summary["ai_review_active_fallback_upgraded_rows"], 1 if terminal_kind == "unchanged" else 0)
+                if updates:
+                    self.assertEqual(updates[0]["action"], "AUTO_EPGSHARE")
+                    self.assertEqual(updates[0]["epg_id"], "Candidate.One.us2")
+        self.assertEqual(fallback["action"], "AUTO_DUMMY")
+        self.assertEqual(fallback["enabled"], "TRUE")
+
+    def test_gemini_abstention_preserves_active_fallback_for_next_retry(self) -> None:
+        fallback = self.authenticated_fallback(self.disabled_review("review-1"))
+        before = dict(fallback)
+        outcome = SimpleNamespace(
+            ai_review_shortlists=(self.ai_shortlist(),), ai_review_rotation=0,
+            source_sha256="a" * 64,
+            verification_evidence=self.ai_verification_evidence(),
+        )
+        with mock.patch.object(
+            sync.gemini_review, "review_flagged_channels",
+            side_effect=self.gemini_result_for(
+                decision=sync.gemini_review.ReviewDecision.ABSTAIN,
+                confidence=sync.gemini_review.ReviewConfidence.NONE,
+            ),
+        ):
+            updates, summary = sync._gemini_review_updates(
+                outcome=outcome, authoritative_table=table([fallback]),
+                api_key="test-key", limit=25,
+                terminal_state_loader=self.ai_terminal_loader(table([fallback]), ("server_1", "review-1")),
+            )
+        self.assertEqual(updates, [])
+        self.assertEqual(fallback, before)
+        self.assertEqual(summary["ai_review_abstained_rows"], 1)
 
     def test_gemini_remaining_capacity_defers_whole_cluster(self) -> None:
         first = self.disabled_review("review-1")

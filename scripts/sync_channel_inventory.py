@@ -5861,6 +5861,9 @@ def _ai_policy_row(
     shortlist: automatch.AiReviewShortlist,
     before: Mapping[str, str],
 ) -> ai_policy.ReviewRowEvidence:
+    # The placeholder remains active in Sheets. Only its authenticated,
+    # exact disabled preimage enters the strict unresolved-row policy.
+    before = automatch.verified_coverage_fallback_preimage(before) or before
     try:
         enabled = streaming.parse_bool(
             before.get("enabled", ""),
@@ -5917,6 +5920,7 @@ def _ai_policy_terminal_rows(
     terminal_table: MappingTable,
     terminal_open_alert_keys: frozenset[tuple[str, str]],
     provider_verified_keys: frozenset[tuple[str, str]],
+    expected_rows: Mapping[tuple[str, str], Mapping[str, str]] | None = None,
 ) -> tuple[ai_policy.TerminalRowState, ...]:
     """Bind policy decisions to an actual terminal Sheet/provider reread."""
 
@@ -5932,6 +5936,18 @@ def _ai_policy_terminal_rows(
         if terminal_entry is None:
             continue
         _row_number, current = terminal_entry
+        expected = (expected_rows or {}).get(key)
+        if expected is not None and any(
+            str(current.get(column, "")) != str(expected.get(column, ""))
+            for column in streaming.SHEET_COLUMNS
+        ):
+            # An operator edit made while AI was running supersedes the old
+            # proposal, including a freshly disabled or retargeted fallback.
+            continue
+        # Reauthenticate against the actual terminal Sheet row after AI
+        # returns. An edited/unbound active row remains enabled and is rejected
+        # by policy; it can never masquerade as a disabled REVIEW row.
+        current = automatch.verified_coverage_fallback_preimage(current) or current
         try:
             enabled = streaming.parse_bool(
                 current.get("enabled", ""),
@@ -6113,6 +6129,7 @@ def _gemini_review_updates(
         "ai_review_prompt_tokens": 0,
         "ai_review_candidate_tokens": 0,
         "ai_review_total_tokens": 0,
+        "ai_review_active_fallback_upgraded_rows": 0,
     }
     if not available:
         return [], summary
@@ -6317,6 +6334,7 @@ def _gemini_review_updates(
                     terminal_table=terminal_table,
                     terminal_open_alert_keys=terminal_open_alert_keys,
                     provider_verified_keys=provider_verified_keys,
+                    expected_rows=terminal_input_by_key,
                 ),
                 decision_epoch=decision_epoch,
             )
@@ -6383,6 +6401,8 @@ def _gemini_review_updates(
             )
             updates.append(row)
             updated_keys.add(key)
+            if automatch.verified_coverage_fallback_preimage(before) is not None:
+                summary["ai_review_active_fallback_upgraded_rows"] += 1
             summary["ai_review_high_suggestion_updates"] += 1
             summary["ai_review_auto_enabled_rows"] += 1
     summary["ai_review_status"] = (
@@ -6410,6 +6430,7 @@ def _run_sync_review_mode(
     all_source_file: Path | None,
     all_source_catalog_file: Path | None,
     epgshare_spool_out: Path | None,
+    epgshare_icon_catalog_out: Path | None,
     review_recheck_mode: str,
     review_recheck_servers: Sequence[str],
     review_apply_limit: int,
@@ -6583,6 +6604,7 @@ def _run_sync_review_mode(
                 all_source_file=Path(all_source_file),
                 all_source_catalog_file=Path(all_source_catalog_file),
                 spool_out=Path(epgshare_spool_out),
+                icon_catalog_out=epgshare_icon_catalog_out,
                 generated_at=generated_at,
                 enable_ai_review=bool(use_gemini_ai),
                 coverage_fallback_limit=coverage_fallback_limit,
@@ -7764,6 +7786,7 @@ def run_sync(
     all_source_file: Path | None = None,
     all_source_catalog_file: Path | None = None,
     epgshare_spool_out: Path | None = None,
+    epgshare_icon_catalog_out: Path | None = None,
     review_recheck_mode: str = "off",
     review_recheck_servers: Sequence[str] = (),
     review_apply_limit: int = 0,
@@ -7826,6 +7849,7 @@ def run_sync(
             all_source_file=all_source_file,
             all_source_catalog_file=all_source_catalog_file,
             epgshare_spool_out=epgshare_spool_out,
+            epgshare_icon_catalog_out=epgshare_icon_catalog_out,
             review_recheck_mode=normalized_recheck_mode,
             review_recheck_servers=review_recheck_servers,
             review_apply_limit=review_apply_limit,
@@ -7945,6 +7969,7 @@ def run_sync(
                     all_source_file=Path(all_source_file),
                     all_source_catalog_file=Path(all_source_catalog_file),
                     spool_out=Path(epgshare_spool_out),
+                    icon_catalog_out=epgshare_icon_catalog_out,
                     generated_at=generated_at,
                     coverage_fallback_limit=coverage_fallback_limit,
                 )
@@ -8455,6 +8480,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Ephemeral sealed SQLite hand-off for the production EPG builder.",
     )
     parser.add_argument(
+        "--epgshare-icon-catalog-out",
+        type=Path,
+        help="Ephemeral source-bound icon catalog collected during the matching parse.",
+    )
+    parser.add_argument(
         "--minimum-server-channels",
         nargs="*",
         default=[],
@@ -8534,6 +8564,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.epgshare_spool_out
         else None
     )
+    epgshare_icon_catalog_out = (
+        Path(args.epgshare_icon_catalog_out).resolve()
+        if args.epgshare_icon_catalog_out
+        else None
+    )
+    if epgshare_icon_catalog_out is not None and not all(
+        (all_source_file, all_source_catalog_file, epgshare_spool_out)
+    ):
+        raise SyncError("The icon catalog requires the ALL_SOURCES1 matching inputs.")
+    if epgshare_icon_catalog_out in {
+        all_source_file, all_source_catalog_file, epgshare_spool_out
+    } and epgshare_icon_catalog_out is not None:
+        raise SyncError("The icon catalog must be different from the matching inputs and spool.")
     if (
         all_source_file is not None
         and all_source_catalog_file is not None
@@ -8653,6 +8696,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             all_source_file=all_source_file,
             all_source_catalog_file=all_source_catalog_file,
             epgshare_spool_out=epgshare_spool_out,
+            epgshare_icon_catalog_out=epgshare_icon_catalog_out,
             review_recheck_mode=effective_recheck_mode,
             review_recheck_servers=args.review_recheck_servers,
             review_apply_limit=args.review_apply_limit,

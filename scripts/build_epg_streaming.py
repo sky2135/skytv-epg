@@ -5018,6 +5018,87 @@ def aggregate_guide_coverage(
     )
 
 
+def build_future_programme_coverage(
+    rows: Sequence[MappingRow],
+    schedule_stats: Mapping[tuple[str, str], ScheduleStats],
+    *, now_epoch: int, minimum_future_seconds: int = 6 * 3600,
+) -> dict[str, Any]:
+    """Disclose future source rows separately from generated placeholders.
+
+    A retained external row is schedule availability evidence, not an assertion
+    of title or channel-match accuracy. The horizon is an endpoint measurement;
+    it does not imply a continuous or gap-free schedule.
+    """
+    buckets: dict[str, dict[str, Any]] = {
+        key: {"mappedStreams": 0, "streamsWithFutureProgrammes": 0,
+              "streamsReachingMinimumHorizon": 0, "latestStop": None,
+              "latestStopUtc": None}
+        for key in ("epgshare", "nativePanel", "localSynthetic")
+    }
+    for row in rows:
+        if not row.runtime_eligible:
+            continue
+        source = ("localSynthetic" if row.uses_local_synthetic else
+                  "nativePanel" if row.effective_source == "panel" else "epgshare")
+        bucket = buckets[source]
+        bucket["mappedStreams"] += 1
+        stats = schedule_stats.get((row.source_key, row.epg_id))
+        if not stats or not stats.future_rows or stats.latest_future_stop <= now_epoch:
+            continue
+        bucket["streamsWithFutureProgrammes"] += 1
+        if stats.latest_future_stop >= now_epoch + minimum_future_seconds:
+            bucket["streamsReachingMinimumHorizon"] += 1
+        bucket["latestStop"] = max(bucket["latestStop"] or 0, stats.latest_future_stop)
+        bucket["latestStopUtc"] = utc_iso(bucket["latestStop"])
+    real_sources = [buckets["epgshare"], buckets["nativePanel"]]
+    real_latest_stop = max((item["latestStop"] or 0 for item in real_sources), default=0)
+    eligible = sum(item["mappedStreams"] for item in buckets.values())
+    real_future = sum(item["streamsWithFutureProgrammes"] for item in real_sources)
+    return {
+        "schemaVersion": 1,
+        "measuredAt": int(now_epoch),
+        "measuredAtUtc": utc_iso(now_epoch),
+        "countUnit": "mappingRowsWithUniqueServerStreamIds",
+        "basis": "RETAINED_ROWS_WITH_STOP_AFTER_GENERATION_TIME",
+        "horizonMeaning": "LATEST_STOP_ENDPOINT_NOT_CONTINUOUS_COVERAGE_OR_MATCH_ACCURACY",
+        "minimumFutureSeconds": int(minimum_future_seconds),
+        "eligibleStreams": eligible,
+        "realStreamsWithFutureProgrammes": real_future,
+        "realStreamsReachingMinimumHorizon": sum(
+            item["streamsReachingMinimumHorizon"] for item in real_sources
+        ),
+        "realFutureCoveragePercent": _guide_coverage_percent(real_future, eligible),
+        "realLatestStop": real_latest_stop or None,
+        "realLatestStopUtc": utc_iso(real_latest_stop) if real_latest_stop else None,
+        "sources": buckets,
+    }
+
+
+def read_inventory_availability(summary_path: Path | None) -> dict[str, Any]:
+    """Publish availability enums/counts only; never copy provider diagnostics."""
+    if summary_path is None:
+        return {"status": "not_provided", "checkedServers": [], "unavailableServers": []}
+    try:
+        if summary_path.stat().st_size > 2 * 1024 * 1024:
+            raise ValueError("oversized summary")
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        servers = summary["servers"]
+        failures = summary["provider_failures"]
+        if not isinstance(servers, dict) or not isinstance(failures, dict):
+            raise ValueError("invalid availability fields")
+        if set(servers) - set(DEFAULT_SERVERS) or set(failures) - set(DEFAULT_SERVERS):
+            raise ValueError("unknown server identity")
+        if not (servers or failures) or set(servers) & set(failures):
+            raise ValueError("inconsistent availability fields")
+    except (OSError, ValueError, AttributeError, KeyError, TypeError) as exc:
+        raise BuildError("Inventory summary has invalid availability data.") from exc
+    return {
+        "status": "partial" if failures else "ok",
+        "checkedServers": sorted(servers),
+        "unavailableServers": sorted(failures),
+    }
+
+
 def build_server(
     *,
     server_id: str,
@@ -5051,6 +5132,9 @@ def build_server(
         server_rows,
         streams_with_programmes,
         scope=server_id,
+    )
+    future_coverage = build_future_programme_coverage(
+        server_rows, schedule_stats, now_epoch=generated_at
     )
     xml_path = staging_public / "epg" / f"{server_id}_tivimate.xml.gz"
     xml_result = write_tivimate_xmltv(
@@ -5247,6 +5331,7 @@ def build_server(
             len(streams_with_programmes) * 100.0 / max(1, len(mapped_rows)), 2
         ),
         "guideCoverage": guide_coverage,
+        "futureProgrammeCoverage": future_coverage,
         "xmltvChannels": xml_result["channels"],
         "channelNameEntries": xml_result["channelNameEntries"],
         "canonicalEpgIdEntries": xml_result["canonicalEpgChannels"],
@@ -5332,6 +5417,7 @@ def build_server(
             server_source_provenance.get("synthetic", {}).get("eventWindowHours")
         ),
         "guideCoverage": guide_coverage,
+        "futureProgrammeCoverage": future_coverage,
     }
     write_json(
         staging_public / "EPG" / f"{server_id}_epg_manifest.json",
@@ -5582,6 +5668,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Hash-bound manifest for the authoritative/effective snapshot pair.",
     )
     parser.add_argument(
+        "--inventory-summary-file",
+        type=Path,
+        help="Current sync summary; only fixed server IDs and availability counts are published.",
+    )
+    parser.add_argument(
         "--provider-inventory-file",
         type=Path,
         help=(
@@ -5727,6 +5818,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     (staging_public / ".nojekyll").write_text("", encoding="utf-8")
 
     generated_at = int(args.now_epoch or datetime.now(timezone.utc).timestamp())
+    inventory_availability = read_inventory_availability(args.inventory_summary_file)
     xml_window_start = generated_at - int(args.past_days) * 86400
     app_window_start = generated_at - int(args.app_past_hours) * 3600
     app_window_end = generated_at + int(args.app_future_hours) * 3600
@@ -6185,6 +6277,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "sourcePolicy": manifest["sourcePolicy"],
                     "nativePanelXmltvUsed": manifest["nativePanelXmltvUsed"],
                     "guideCoverage": manifest["guideCoverage"],
+                    "futureProgrammeCoverage": manifest["futureProgrammeCoverage"],
                 }
             )
             app_builds.append(
@@ -6201,11 +6294,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "coveragePercent": app_manifest["coveragePercent"],
                     "programmeRows": app_manifest["programmeRows"],
                     "guideCoverage": app_manifest["guideCoverage"],
+                    "futureProgrammeCoverage": app_manifest["futureProgrammeCoverage"],
                 }
             )
 
         global_guide_coverage = aggregate_guide_coverage(
             [build["guideCoverage"] for build in tivimate_builds]
+        )
+        unavailable_panel_servers = sorted(
+            key.split(":", 1)[1] for key, value in source_provenance.items()
+            if key.startswith("panel:") and value.get("status") == "unavailable"
+        )
+        degraded = bool(
+            inventory_availability["unavailableServers"] or unavailable_panel_servers
         )
         write_json(staging_public / "EPG" / "taxonomy.json", taxonomy_payload())
         write_json(
@@ -6216,6 +6317,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "generatedAt": generated_at,
                 "generatedAtIso": utc_iso(generated_at),
                 "generatedAtUtc": utc_iso(generated_at),
+                "freshnessValidUntilUtc": utc_iso(generated_at + 36 * 3600),
+                "recommendedRefreshAt": utc_iso(generated_at + 24 * 3600),
                 "targetApp": "TVMeta / TiviMate",
                 "matcherPolicy": "APPROVED_MAPPINGS_ONLY_NO_AUTOMATIC_REMATCH",
                 "mappingSource": "PRIVATE_GOOGLE_SHEET_EPHEMERAL_SNAPSHOT",
@@ -6242,11 +6345,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         write_json(
             staging_public / "health.json",
             {
-                "status": "ok",
+                "status": "degraded" if degraded else "ok",
                 "pipelineVersion": PIPELINE_VERSION,
                 "generatedAt": generated_at,
                 "generatedAtIso": utc_iso(generated_at),
                 "generatedAtUtc": utc_iso(generated_at),
+                "freshnessValidUntilUtc": utc_iso(generated_at + 36 * 3600),
+                "recommendedRefreshAt": utc_iso(generated_at + 24 * 3600),
+                "statusBasis": "PROVIDER_AVAILABILITY_AT_GENERATION_RECHECK_AGE_AND_FUTURE_HORIZON",
+                "inventoryAvailability": inventory_availability,
+                "unavailableNativePanelServers": unavailable_panel_servers,
                 "serverCount": len(selected_servers),
                 "servers": len(selected_servers),
                 "mappingSha256": mapping_sha,
