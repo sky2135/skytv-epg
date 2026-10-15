@@ -50,7 +50,7 @@ _END_CLOCK_12 = re.compile(
 )
 _RANGE_SEPARATOR = re.compile(r"^\s*[)\]]?\s*(?:[-–—]|to|until|->)\s*[(\[]?\s*$", re.I)
 _LABELED_RANGE_SEPARATOR = re.compile(r"^\s*[)\]]?\s*(?:stop|end)\b\s*:?\s*[(\[]?\s*$", re.I)
-_UNSUPPORTED_ZONE = re.compile(r"^\s*(?:PST|PDT|MST|MDT|CST|CDT|PT|MT|CT|CET|CEST|BST|IST|AEST|AEDT|(?:ET|EST|EDT|GMT|UTC)[A-Z0-9_:+-]+)(?!\w)", re.I)
+_UNSUPPORTED_ZONE = re.compile(r"^\s*(?:PST|PDT|MST|MDT|CST|CDT|PT|MT|CT|CET|CEST|BST|IST|JST|HST|KST|SGT|HKT|NZST|NZDT|AKST|AKDT|AEST|AEDT|ACST|ACDT|AWST|(?:ET|EST|EDT|GMT|UTC)[A-Z0-9_:+-]+)(?!\w)", re.I)
 _COUNTRY = r"US|USA|UK|GB|CA|CAN|CANADA|IN|INDIA|FR|DE|ES|NL|BR|LAT|PK|AU|NZ|UAE"
 _PREFIXES = (
     re.compile(r"^\(\s*(?:US|AU)\s*\)\s+ESPN\s+PLAY\s*(?!0+(?=\s*(?:[|:–—-]|$)))[0-9]{1,3}(?=\s*(?:[|:–—-]|$))\s*(?:[|:–—-]\s*)?", re.I),

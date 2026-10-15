@@ -302,6 +302,21 @@ class ProviderEventGuideTests(unittest.TestCase):
         self.assertIsNone(unknown.start_epoch)
         self.assertEqual(unknown.timing_evidence, "unknown_timezone")
 
+    def test_mixed_case_unsupported_zones_reject_both_labeled_range_endpoints(self):
+        for zone in ("Jst", "Hst", "Kst", "Sgt", "Hkt", "Nzst", "Nzdt", "Akst", "Akdt", "Acst", "Acdt", "Awst"):
+            for endpoint in ("start", "stop"):
+                with self.subTest(zone=zone, endpoint=endpoint):
+                    start_zone = f" {zone}" if endpoint == "start" else ""
+                    stop_zone = f" {zone}" if endpoint == "stop" else ""
+                    result = self.parse(
+                        f"MLB02| Red x Blue start:2026-10-16 01:00:00{start_zone} "
+                        f"stop:2026-10-16 08:00:00{stop_zone}",
+                        family="league_event", category="|NA| USA MLB",
+                    )
+                    self.assertIsNone(result.start_epoch)
+                    self.assertIsNone(result.explicit_end_epoch)
+                    self.assertEqual(result.timing_evidence, "unknown_timezone")
+
     def test_nfl_clock_without_a_date_never_gets_a_scheduled_epoch(self):
         result = self.parse("NFL |01-TNF 8:15pm Eagles at Bears", family="league_event", category="NFL")
         self.assertEqual(result.name, "TNF 8:15pm Eagles at Bears")
