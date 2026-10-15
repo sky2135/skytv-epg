@@ -116,6 +116,7 @@ class FreshnessTests(unittest.TestCase):
     def test_future_counts_separate_native_external_and_placeholders(self):
         def row(stream, source, synthetic=False):
             return SimpleNamespace(runtime_eligible=True, uses_local_synthetic=synthetic,
+                                   runtime_synthetic_reason="",
                                    effective_source=source, source_key=source,
                                    epg_id=stream)
         rows = [row("external", "epgshare01"), row("expired", "epgshare01"),
