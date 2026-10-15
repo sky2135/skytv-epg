@@ -308,6 +308,7 @@ class MappingRow:
     metadata: ChannelMetadata
     runtime_synthetic_reason: str = ""
     provider_name_aliases: tuple[str, ...] = ()
+    provider_epg_id_aliases: tuple[str, ...] = ()
 
     @property
     def uses_local_synthetic(self) -> bool:
@@ -1245,8 +1246,9 @@ def apply_provider_event_title_overrides(
     This narrow runtime layer can update the title of a proven rotating slot
     and can give an unresolved slot its own local synthetic schedule.  It
     never assigns a third-party EPG ID or writes back to the Sheet.  A row
-    qualifies only when its old and current names are the same anchored
-    numbered event slot in the same non-empty category.
+    qualifies only for the same numbered slot/category, or an unchanged
+    descriptive event name outside quarantine. Authenticated playlist aliases
+    link the provider's independently rotating M3U label to that same slot.
     """
 
     if len(inventory_content) > MAX_PROVIDER_INVENTORY_BYTES:
@@ -1262,7 +1264,7 @@ def apply_provider_event_title_overrides(
         raise BuildError(
             "Provider inventory title overlay is missing: " + ", ".join(missing)
         )
-    inventory: dict[tuple[str, str], tuple[str, str]] = {}
+    inventory: dict[tuple[str, str], tuple[str, str, tuple[str, ...], str]] = {}
     for row_number, raw in enumerate(reader, start=2):
         if row_number > MAX_MAPPING_ROWS + 1:
             raise BuildError("Provider inventory title overlay has too many rows.")
@@ -1283,18 +1285,43 @@ def apply_provider_event_title_overrides(
             raise BuildError(
                 "Provider inventory title overlay contains a duplicate identity."
             )
-        inventory[key] = (channel_name, category_name)
+        playlist_name = str(raw.get("provider_event_name_alias") or "")
+        playlist_id = str(raw.get("provider_event_epg_id_alias") or "")
+        try:
+            extra_names = json.loads(raw.get("provider_event_name_aliases") or "[]")
+            if not isinstance(extra_names, list) or len(extra_names) > 2 or any(
+                not isinstance(value, str) for value in extra_names
+            ):
+                raise ValueError("Invalid playlist alias list")
+            playlist_names = tuple(dict.fromkeys(
+                value for value in (playlist_name, *extra_names) if value
+            ))
+        except (ValueError, TypeError):
+            playlist_names, playlist_id = (), ""
+        # These optional hints come from the same run's authenticated M3U.
+        # Never repair/truncate an identifier into a different public alias.
+        if (
+            len(playlist_names) > 2
+            or any(value != clean_identifier(value, 300) for value in playlist_names)
+            or playlist_id != clean_identifier(playlist_id, 300)
+        ):
+            playlist_names, playlist_id = (), ""
+        inventory[key] = (channel_name, category_name, playlist_names, playlist_id)
 
+    playlist_id_counts = Counter(
+        (key[0], item[3]) for key, item in inventory.items() if item[3]
+    )
     applied_by_family: Counter[str] = Counter()
     runtime_synthetic_by_family: Counter[str] = Counter()
     group_header_rows = 0
+    playlist_alias_rows = 0
     overlaid: list[MappingRow] = []
     for row in rows:
         current = inventory.get((row.server_id, row.stream_id))
         if current is None:
             overlaid.append(row)
             continue
-        current_name, current_category = current
+        current_name, current_category, playlist_names, playlist_id = current
         header_evidence = {
             "enabled": row.enabled,
             "action": row.action,
@@ -1332,24 +1359,35 @@ def apply_provider_event_title_overrides(
                 metadata=replace(row.metadata, genre="general", channel_role="virtual"),
             ))
             continue
-        if not provider_event_slots.is_same_event_slot(
+        same_slot = provider_event_slots.is_same_event_slot(
             row.channel_name,
             current_name,
             row.category_name,
             current_category,
-        ):
+        )
+        descriptive_family = provider_event_slots.descriptive_event_family(
+            current_name, current_category
+        )
+        unchanged_descriptive_event = bool(
+            descriptive_family
+            and row.reason != EFFECTIVE_QUARANTINE_REASON
+            and provider_event_slots.exact_text_key(row.channel_name)
+            == provider_event_slots.exact_text_key(current_name)
+            and provider_event_slots.exact_text_key(row.category_name)
+            == provider_event_slots.exact_text_key(current_category)
+        )
+        if not same_slot and not unchanged_descriptive_event:
             overlaid.append(row)
             continue
         identity = provider_event_slots.event_slot_identity(
             current_name, current_category
         )
-        if identity is None:
+        if identity is None and not unchanged_descriptive_event:
             raise BuildError("Provider event-slot title overlay lost its identity.")
+        family = identity[0] if identity else descriptive_family
         current_row = row
-        if provider_event_slots.exact_text_key(row.channel_name) != (
-            provider_event_slots.exact_text_key(current_name)
-        ):
-            applied_by_family[identity[0]] += 1
+        if row.channel_name != current_name:
+            applied_by_family[family] += 1
             current_row = replace(
                 current_row,
                 channel_name=current_name,
@@ -1357,6 +1395,25 @@ def apply_provider_event_title_overrides(
                 provider_name_aliases=tuple(sorted(
                     set(current_row.provider_name_aliases) | {row.channel_name}
                 )),
+            )
+
+        verified_playlist_names = {
+            name for name in playlist_names
+            if re.fullmatch(r"[0-9]+", row.stream_id)
+            and provider_event_slots.is_same_event_slot(
+                current_name, name, current_category, current_category
+            )
+        }
+        if verified_playlist_names:
+            playlist_alias_rows += 1
+            current_row = replace(
+                current_row,
+                provider_name_aliases=tuple(sorted(
+                    set(current_row.provider_name_aliases) | verified_playlist_names
+                )),
+                provider_epg_id_aliases=(playlist_id,) if (
+                    playlist_id and playlist_id_counts[(row.server_id, playlist_id)] == 1
+                ) else (),
             )
 
         # A rotating event slot does not need an uncertain external schedule:
@@ -1374,7 +1431,7 @@ def apply_provider_event_title_overrides(
             and current_row.metadata.genre != "adult"
             and current_row.metadata.content_rating != "adult"
         ):
-            runtime_synthetic_by_family[identity[0]] += 1
+            runtime_synthetic_by_family[family] += 1
             current_row = replace(
                 current_row,
                 enabled=True,
@@ -1406,6 +1463,7 @@ def apply_provider_event_title_overrides(
             sorted(runtime_synthetic_by_family.items())
         ),
         "groupHeaderRows": group_header_rows,
+        "playlistAliasRows": playlist_alias_rows,
         "sha256": hashlib.sha256(inventory_content).hexdigest(),
     }
 
@@ -2087,6 +2145,9 @@ def _synthetic_event_like(row: MappingRow) -> bool:
             row.channel_name, row.category_name
         )
         is not None
+        or bool(provider_event_slots.descriptive_event_family(
+            row.channel_name, row.category_name
+        ))
         or row.metadata.genre == "events"
         or row.metadata.channel_role in {"event", "ppv"}
         or "ppv.events" in epg_id
@@ -3776,7 +3837,8 @@ def build_xml_entries(
         key = (row.source_key, row.epg_id)
         quality = schedule_quality(schedule_stats.get(key), row.source_key)
         entry_priority = (
-            2
+            -1 if entry_type in {"provider_name_alias", "provider_epg_id_alias"}
+            else 2
             if entry_type in {"canonical_epg_id", "synthetic_stream_id"}
             else (0 if row.uses_local_synthetic else 1)
         )
@@ -3887,6 +3949,14 @@ def build_xml_entries(
                     icon_url,
                     "provider_name_alias",
                 )
+        for playlist_id in row.provider_epg_id_aliases:
+            register(
+                playlist_id,
+                [row.channel_name, *row.provider_name_aliases],
+                row,
+                icon_url,
+                "provider_epg_id_alias",
+            )
         if row.uses_local_synthetic and channel_name_counts[
             clean_identifier(row.channel_name, 300)
         ] > 1:
@@ -5830,6 +5900,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "runtimeSyntheticRows": 0,
         "runtimeSyntheticFamilies": {},
         "groupHeaderRows": 0,
+        "playlistAliasRows": 0,
         "sha256": "",
     }
     if args.provider_inventory_file is not None:
@@ -5848,7 +5919,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{provider_event_title_overlays['appliedRows']:,} exact numbered "
             "slot(s); activated per-stream local guides for "
             f"{provider_event_title_overlays['runtimeSyntheticRows']:,} "
-            "unresolved slot(s); added "
+            "unresolved event channel(s); verified "
+            f"{provider_event_title_overlays['playlistAliasRows']:,} "
+            "provider playlist alias set(s); added "
             f"{provider_event_title_overlays['groupHeaderRows']:,} group-header welcome guide(s).",
             flush=True,
         )

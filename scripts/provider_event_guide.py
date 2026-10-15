@@ -242,10 +242,12 @@ def parse_provider_event(
     if clock_end is not None:
         name_text = name_text[:matches[0][0].end()] + " " + name_text[matches[0][0].end() + clock_end.end():]
     if is_range:
-        name_text = name_text[:matches[0][0].start()] + " " + name_text[matches[1][0].end():]
+        prefix = re.sub(r"\bstart\s*:\s*$", "", name_text[:matches[0][0].start()], flags=re.I)
+        name_text = prefix + " " + name_text[matches[1][0].end():]
     else:
         for match, _kind in reversed(matches):
-            name_text = name_text[:match.start()] + " " + name_text[match.end():]
+            prefix = re.sub(r"\bstart\s*:\s*$", "", name_text[:match.start()], flags=re.I)
+            name_text = prefix + " " + name_text[match.end():]
     name = _clean_name(name_text, had_date=bool(matches))
     normalized_name = name.casefold()
     if re.search(r"\b(?:no events?(?: scheduled)?|no scheduled events?)\b", normalized_name):

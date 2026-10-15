@@ -4810,6 +4810,169 @@ class ReviewRecheckBoundaryTests(unittest.TestCase):
         self.assertEqual(stats["native_review_m3u_name_mismatches"], 1)
         self.assertEqual(stats["native_review_m3u_id_conflicts"], 1)
 
+    def test_m3u_event_aliases_keep_native_name_mismatch_rejection(self) -> None:
+        pairs = (
+            ("101", "NFL | 01 - Seahawks at Broncos", "NFL | 01 - Eagles at Bears", "|NA| USA NFL", "001-nfl"),
+            ("102", "US (ESPN+ 001) | Reyes Cup Oct 15", "US (ESPN+ 001) | Football Good Morning Sep 30", "|NA| USA ESPN+", "10561"),
+            ("103", "(FLSP 001) | bikes: Tour of Guangxi", "(FLSP 001) bikes: Tour of Langkawi", "|NA| USA FLO PPV", "flo.slot.001"),
+        )
+        api = inventory("server_3", [
+            {"stream_id": key, "name": current, "category_name": category, "epg_channel_id": "api.native"}
+            for key, current, _old, category, _epg in pairs
+        ])
+        m3u = inventory("server_3", [
+            {"stream_id": key, "name": old, "category_name": category, "epg_channel_id": epg,
+             "_native_epg_id_exact": True, "_native_epg_id_raw_present": True}
+            for key, _current, old, category, epg in pairs
+        ], source="authenticated_m3u")
+        config = sync.ServerConfig("server_3", "Server 3", "https://panel.example", "user123", "pass123")
+        with mock.patch.object(sync, "fetch_m3u_inventory", return_value=m3u):
+            enriched, stats = sync.enrich_review_inventories_from_m3u(
+                object(), [api], [config], selected_servers={"server_3"}, allow_insecure_http=False,
+            )
+        rows = sync.inventory_rows(enriched)
+        self.assertEqual(stats["provider_event_m3u_name_aliases"], 3)
+        self.assertEqual(stats["provider_event_m3u_epg_id_aliases"], 3)
+        self.assertEqual(stats["native_review_m3u_name_mismatches"], 3)
+        for row, pair, enriched_channel in zip(rows, pairs, enriched[0].channels):
+            _key, current, old, _category, epg = pair
+            self.assertEqual(row["channel_name"], current)
+            self.assertEqual(row["provider_event_name_alias"], old)
+            self.assertEqual(row["provider_event_epg_id_alias"], epg)
+            self.assertEqual(enriched_channel["epg_channel_id"], "")
+        self.assertTrue(all(row["epg_channel_id"] == "api.native" for row in api.channels))
+
+    def test_event_aliases_require_unique_exact_safe_m3u_identity(self) -> None:
+        original_name = "US (ESPN+ 001) | Current event"
+        original_category = "|NA| USA ESPN+"
+        for case in ("category", "slot", "duplicate", "raw_id", "invalid_attribute", "api_conflict", "api_invalid_raw", "ordinary", "opaque"):
+            with self.subTest(case=case):
+                api_channel = {"stream_id": "101", "name": original_name, "category_name": original_category, "epg_channel_id": "api.native"}
+                m3u_channel = {"stream_id": "101", "name": "US (ESPN+ 001) | Older event", "category_name": original_category,
+                    "epg_channel_id": "10561", "_native_epg_id_exact": True, "_native_epg_id_raw_present": True}
+                if case == "category": m3u_channel["category_name"] = "|NA| USA NEWS"
+                elif case == "slot": m3u_channel["name"] = "US (ESPN+ 002) | Older event"
+                elif case == "raw_id": m3u_channel["epg_channel_id"] = " 10561 "
+                elif case == "invalid_attribute": m3u_channel["_native_epg_id_exact"] = False
+                elif case == "api_conflict": api_channel["_native_epg_id_conflict"] = True
+                elif case == "api_invalid_raw": api_channel.update({"_native_epg_id_exact": False, "_native_epg_id_raw_present": True})
+                elif case == "ordinary": api_channel["name"] = m3u_channel["name"] = "ESPN 2"
+                elif case == "opaque": api_channel["stream_id"] = m3u_channel["stream_id"] = "opaque"
+                api_channel.update({"_provider_event_name_alias": "injected", "_provider_event_epg_id_alias": "injected.id", "_provider_event_alias_verified": True})
+                api = inventory("server_3", [api_channel])
+                m3u = inventory("server_3", [m3u_channel, dict(m3u_channel)] if case == "duplicate" else [m3u_channel], source="authenticated_m3u")
+                config = sync.ServerConfig("server_3", "Server 3", "https://panel.example", "user123", "pass123")
+                with mock.patch.object(sync, "fetch_m3u_inventory", return_value=m3u):
+                    enriched, stats = sync.enrich_review_inventories_from_m3u(
+                        object(), [api], [config], selected_servers={"server_3"}, allow_insecure_http=False,
+                    )
+                exported = sync.inventory_rows(enriched)[0]
+                self.assertEqual(exported["provider_event_name_alias"], "")
+                self.assertEqual(exported["provider_event_epg_id_alias"], "")
+                self.assertNotIn("_provider_event_alias_verified", enriched[0].channels[0])
+                if case == "duplicate":
+                    self.assertEqual(stats["provider_event_m3u_ambiguous_stream_ids"], 1)
+
+    def test_m3u_display_and_tvg_names_are_independently_proven_event_aliases(self) -> None:
+        current_name = "US (ESPN+ 001) | Current event Oct 15"
+        display_name = "US (ESPN+ 001) | Cached display Oct 02"
+        config = sync.ServerConfig("server_3", "Server 3", "https://panel.example", "user123", "pass123")
+        api = inventory("server_3", [{"stream_id": "101", "name": current_name, "category_name": "|NA| USA ESPN+", "epg_channel_id": "api.native"}])
+        for tvg_name, additional in (
+            ("US (ESPN+ 001) | Football Good Morning Sep 30", True),
+            ("US (ESPN+ 002) | Other slot", False),
+            ("ESPN 2", False),
+            (" US (ESPN+ 001) | Trimmed attribute ", False),
+        ):
+            with self.subTest(tvg_name=tvg_name):
+                text = (
+                    '#EXTM3U\n'
+                    f'#EXTINF:-1 tvg-id="10561" tvg-name="{tvg_name}" group-title="|NA| USA ESPN+",{display_name}\n'
+                    'https://panel.example/live/user123/pass123/101.ts\n'
+                )
+                categories, channels = sync.parse_xtream_m3u(text, username="user123", password="pass123")
+                self.assertEqual(channels[0]["name"], display_name)
+                m3u = sync.PanelInventory("server_3", "Server 3", categories, channels, "authenticated_m3u")
+                with mock.patch.object(sync, "fetch_m3u_inventory", return_value=m3u):
+                    enriched, stats = sync.enrich_review_inventories_from_m3u(
+                        object(), [api], [config], selected_servers={"server_3"}, allow_insecure_http=False,
+                    )
+                exported = sync.inventory_rows(enriched)[0]
+                aliases = json.loads(exported["provider_event_name_aliases"])
+                self.assertEqual(aliases, [display_name, tvg_name] if additional else [display_name])
+                self.assertEqual(exported["provider_event_epg_id_alias"], "10561")
+                self.assertEqual(stats["native_review_m3u_name_mismatches"], 1)
+                self.assertEqual(enriched[0].channels[0]["epg_channel_id"], "")
+                self.assertEqual(stats["provider_event_m3u_name_aliases"], len(aliases))
+
+    def test_verified_event_hint_export_does_not_publish_arbitrary_native_ids(self) -> None:
+        api = inventory("server_3", [{"stream_id": "101", "name": "NFL | 01 - Current event", "category_name": "|NA| USA NFL", "epg_channel_id": "api.private.native"}])
+        m3u = inventory("server_3", [{"stream_id": "101", "name": "NFL | 01 - Older event", "category_name": "|NA| USA NFL",
+            "epg_channel_id": "10561", "_native_epg_id_exact": True, "_native_epg_id_raw_present": True}], source="authenticated_m3u")
+        config = sync.ServerConfig("server_3", "Server 3", "https://panel.example", "user123", "pass123")
+        with mock.patch.object(sync, "fetch_m3u_inventory", return_value=m3u):
+            enriched, _stats = sync.enrich_review_inventories_from_m3u(object(), [api], [config], selected_servers={"server_3"}, allow_insecure_http=False)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sync.write_reports(root, inventories=enriched, new_rows=[], changed_rows=[], missing_rows=[], summary={})
+            with (root / "inventory.csv").open(encoding="utf-8-sig", newline="") as handle:
+                exported = list(csv.DictReader(handle))[0]
+        self.assertEqual(exported["provider_event_name_alias"], "NFL | 01 - Older event")
+        self.assertEqual(exported["provider_event_epg_id_alias"], "10561")
+        self.assertNotIn("api.private.native", json.dumps(exported))
+        tampered = dataclasses.replace(enriched[0], channels=[dict(enriched[0].channels[0], category_name="|NA| USA NEWS")])
+        self.assertEqual(sync.inventory_rows([tampered])[0]["provider_event_name_alias"], "")
+
+    def test_shared_linear_or_ineligible_m3u_tvg_id_never_claimed_by_event(self) -> None:
+        for other_stream in ("102", "opaque-playlist-stream"):
+            with self.subTest(other_stream=other_stream):
+                api = inventory("server_3", [{"stream_id": "101", "name": "NFL | 01 - Current event", "category_name": "|NA| USA NFL", "epg_channel_id": ""}])
+                m3u = inventory("server_3", [
+                    {"stream_id": "101", "name": "NFL | 01 - Older event", "category_name": "|NA| USA NFL",
+                     "epg_channel_id": "10561", "_native_epg_id_exact": True, "_native_epg_id_raw_present": True},
+                    {"stream_id": other_stream, "name": "BBC One", "category_name": "UK | General",
+                     "epg_channel_id": "10561", "_native_epg_id_exact": True, "_native_epg_id_raw_present": True},
+                ], source="authenticated_m3u")
+                config = sync.ServerConfig("server_3", "Server 3", "https://panel.example", "user123", "pass123")
+                with mock.patch.object(sync, "fetch_m3u_inventory", return_value=m3u):
+                    enriched, stats = sync.enrich_review_inventories_from_m3u(object(), [api], [config], selected_servers={"server_3"}, allow_insecure_http=False)
+                exported = sync.inventory_rows(enriched)[0]
+                self.assertEqual(exported["provider_event_name_alias"], "NFL | 01 - Older event")
+                self.assertEqual(json.loads(exported["provider_event_name_aliases"]), ["NFL | 01 - Older event"])
+                self.assertEqual(exported["provider_event_epg_id_alias"], "")
+                self.assertEqual(stats["provider_event_m3u_epg_id_aliases"], 0)
+                self.assertEqual(stats["provider_event_m3u_shared_epg_id_aliases"], 1)
+
+    def test_m3u_event_alias_uses_the_existing_main_workflow_enrichment(self) -> None:
+        api = inventory("server_3", [{"stream_id": "101", "name": "NFL | 01 - Current event", "category_name": "|NA| USA NFL", "epg_channel_id": ""}])
+        m3u = inventory("server_3", [{"stream_id": "101", "name": "NFL | 01 - Older event", "category_name": "|NA| USA NFL",
+            "epg_channel_id": "10561", "_native_epg_id_exact": True, "_native_epg_id_raw_present": True}], source="authenticated_m3u")
+        config = sync.ServerConfig("server_3", "Server 3", "https://panel.example", "user123", "pass123")
+        captured = {}
+        summary = {"inventory_rows": 1, "new_rows": 0, "auto_matched_rows": 0, "appended_rows": 0, "changed_rows": 0, "missing_rows": 0}
+        def run_sync(**kwargs):
+            captured.update(kwargs)
+            sync.write_reports(kwargs["output_dir"], inventories=kwargs["inventories"], new_rows=[], changed_rows=[], missing_rows=[], summary=summary)
+            return summary
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = SimpleNamespace(headers={}, close=mock.Mock())
+            google = SimpleNamespace(close=mock.Mock())
+            with mock.patch.object(sync, "authorized_google_session", return_value=google), mock.patch.object(sync, "google_sheet_values", return_value=mapping_values([])), mock.patch.object(sync, "load_server_configs", return_value=[config]), mock.patch.object(sync.requests, "Session", return_value=session), mock.patch.object(sync, "fetch_panel_inventory", return_value=api), mock.patch.object(sync, "fetch_m3u_inventory", return_value=m3u) as fetch_m3u, mock.patch.object(sync, "run_sync", side_effect=run_sync):
+                code = sync.main([
+                    "--servers", "server_3", "--mode", "refresh", "--sheet-id", "a" * 30,
+                    "--output-dir", str(root / "reports"), "--snapshot-out", str(root / "effective.csv"),
+                    "--all-source-file", str(root / "guide.xml.gz"), "--all-source-catalog-file", str(root / "guide.txt"),
+                    "--epgshare-spool-out", str(root / "spool.sqlite"), "--review-recheck-mode", "apply",
+                    "--review-recheck-servers", "server_3", "--validate-native-review", "--review-apply-limit", "25",
+                ])
+            with (root / "reports" / "inventory.csv").open(encoding="utf-8-sig", newline="") as handle:
+                exported = list(csv.DictReader(handle))[0]
+        self.assertEqual(code, 0)
+        fetch_m3u.assert_called_once()
+        self.assertEqual(exported["provider_event_epg_id_alias"], "10561")
+        self.assertEqual(captured["inventories"][0].channels[0]["epg_channel_id"], "")
+
     def test_native_update_requires_exact_verified_writer_allowlist(self) -> None:
         before = mapping_row(
             "server_2", "101", "BBC One", action="REVIEW", source="panel", epg_feed="panel", epg_id=""
