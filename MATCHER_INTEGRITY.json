@@ -12,8 +12,8 @@
   "iconLayerSha256": "c42f1e651603d4cf57fbb5520995bb01f55d2139bc174d311abfbb52052bc285",
   "productionRunnerSha256": "56dbadde8360bd177adfebcbcbe4fecd80044b8c9d6dded3bb06ef9da4a49ea3",
   "legacyProductionRunnerSha256": "56dbadde8360bd177adfebcbcbe4fecd80044b8c9d6dded3bb06ef9da4a49ea3",
-  "streamingRunnerSha256": "1a213370f577cbfeb70404045b517ad6668012b420e3fdd194e84f775bbbb8cd",
-  "providerEventSlotsSha256": "b92ac33aaa089a9d3890d17683e0b417ff2362ae54885dd182b1458a8d1cb2af",
+  "streamingRunnerSha256": "cff73aaa7e119d06ea0d8480ed91f58d132ece45371c2bd9551736a2589e7ec6",
+  "providerEventSlotsSha256": "eb9b82e7b8e1dd539747ac62149325915ae619310b0f449569dfce6ee9487b0e",
   "iconOverrideGeneratorSha256": "75e19cfc62cd34c6133396120c553f4a6738202c9069b4ccddd243da6be06ade",
   "brandLogoCatalogSha256": "6db26647eb234a13795a6432c6ec36605f60441c8c203b2de6d53a920c1ea833",
   "autoMatchAdapterSha256": "c03814a41c525ac3f1b348aa2d5bd0fcd4bb48c5f88c86fab0b6defcfd3c5c56",
@@ -28,8 +28,8 @@
   "epgCatalogStreamSha256": "1f5e347a655443ab0167193e0707af333ede542b6caef79deed7986f6933db03",
   "epgSelectionSpoolSha256": "c0ad4e485972b206515f2205e37cf056593cb1105035a6031ef95b5371cd1336",
   "sheetSeedExporterSha256": "c5530d0a2dd63c62b8ffafed102651859e0155fe9ba5b731d5ced1ab6e17d80b",
-  "workflowSha256": "c64099424eba7eade2928ad8c08f923ec58b312474e69f25c3fb9dc0bec2d3da",
-  "channelInventoryRunnerSha256": "3d50657994e4779be7265721a594dcd919366f93fcaf454cd716211907ccccdc",
+  "workflowSha256": "2f0e190bdddb0bbd6ab9e402dc29b2f1ecdbfeca73d2c38e29876dd781eddb29",
+  "channelInventoryRunnerSha256": "fd464def6ca5e196086c6076d0548261df178f503abfc5bc9a9b56962750d906",
   "channelInventoryWorkflowSha256": "4bbb9c036dad193e2a9e623bfbd8a88b63088769a06ce5181746d7ab8a16c160",
   "channelInventoryRequirementsSha256": "cb80ac4377fa3656ea135c65273fdc1b6ba7f5ce198f1f14ccb13de0e3ed593f",
   "approvedAliasesSha256": "22fac64d4dd47fa804a804816d10a1148bced719d10c06a394b1bebddead6055",
@@ -56,5 +56,7 @@
   "automationConfigSha256": "1206aa170ffe303ca5e2bf9cafe6bf7717e9cb342be30765d470bdfc5a716f3e",
   "freshnessCheckerSha256": "958dfff36996fb9f43f3a395cbefed7682024be58be779ee087d41a3925ba01c",
   "freshnessWorkflowSha256": "81198f48714652186ead9ca2deb4da78b09e4cf23a1306b5a2ce3512088f17e5",
-  "ciWorkflowSha256": "2c03d3b249930a9f84408beea91e4434b2c2d3d596081a757f1bc21093be77d4"
+  "ciWorkflowSha256": "2c03d3b249930a9f84408beea91e4434b2c2d3d596081a757f1bc21093be77d4",
+  "providerEventGuideSha256": "7155ef35d17b644f08825046fca4229e3e76e4367417501d14c577d1d381a1ad",
+  "providerPresentationSha256": "42a8153dde8eb1f7657cecdbd0a547339f54c52b2984b0765322d11c0a7eb9ff"
 }

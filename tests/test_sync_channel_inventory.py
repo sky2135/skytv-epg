@@ -1126,6 +1126,87 @@ class MappingAndComparisonTests(unittest.TestCase):
         )
         self.assertEqual((new, changed, missing), ([], [], []))
 
+    def test_machine_group_heading_style_change_preserves_existing_open_alert(self) -> None:
+        heading = mapping_row(
+            "server_1", "1", "#### USA CW #####", category_name="|NA| USA CW & MY",
+            action="IGNORE", source="dummy", epg_feed="DUMMY_CHANNELS", epg_id="Blank.Dummy.us",
+        )
+        heading.update({
+            "enabled": "FALSE",
+            "reason": sync.provider_presentation.HEADING_CLASSIFICATION_REASON,
+            "notes": current_unbound_auto_map_v1_note(method="heading_placeholder"),
+        })
+        current = table([heading])
+        provider = inventory("server_1", [{
+            "stream_id": "1", "name": "═══ 𝗨𝗦𝗔 𝗖𝗪 ═══",
+            "category_name": heading["category_name"],
+        }])
+        _new, changed, _missing = sync.compare_inventory(
+            current, [provider], discovered_at="2026-10-16T00:00:00Z"
+        )
+        self.assertEqual(changed[0]["risk"], "NAME_OR_CATEGORY_DRIFT")
+        alerts = [{"server_id": "server_1", "stream_id": "1", "status": "OPEN", "alert_type": "POSSIBLE_STREAM_ID_REUSE"}]
+        self.assertEqual(sync.pending_sync_alert_rows(changed, alerts, detected_at="2026-10-16T00:00:00Z"), [])
+        blocked = sync.open_alert_quarantine_keys(alerts)
+        self.assertEqual(blocked, frozenset({("server_1", "1")}))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "effective.csv"
+            sync.write_mapping_snapshot(path, current, changed_rows=changed, persistent_quarantine_keys=blocked)
+            effective = sync.parse_mapping_csv(path.read_bytes())
+        self.assertEqual(effective.rows[0]["action"], "REVIEW")
+        self.assertEqual(effective.rows[0]["enabled"], "FALSE")
+        self.assertEqual(effective.rows[0]["reason"], streaming.EFFECTIVE_QUARANTINE_REASON)
+        self.assertEqual(heading["action"], "IGNORE")
+
+    def test_heading_style_exception_preserves_manual_adult_and_category_guards(self) -> None:
+        base = mapping_row(
+            "server_1", "1", "#### USA CW #####", category_name="|NA| USA CW & MY",
+            action="IGNORE", source="dummy", epg_feed="DUMMY_CHANNELS", epg_id="Blank.Dummy.us",
+        )
+        base.update({
+            "enabled": "FALSE", "reason": sync.provider_presentation.HEADING_CLASSIFICATION_REASON,
+            "notes": current_unbound_auto_map_v1_note(method="heading_placeholder"),
+        })
+        for changes, provider_name, provider_category in (
+            ({"action": "MANUAL"}, "### 𝗨𝗦𝗔 𝗖𝗪 ###", base["category_name"]),
+            ({"reason": "Operator ignored"}, "### 𝗨𝗦𝗔 𝗖𝗪 ###", base["category_name"]),
+            ({"enabled": "TRUE"}, "### 𝗨𝗦𝗔 𝗖𝗪 ###", base["category_name"]),
+            ({"genre": "adult"}, "### 𝗨𝗦𝗔 𝗖𝗪 ###", base["category_name"]),
+            ({}, "### 𝗨𝗦𝗔 𝗖𝗪 ###", "|NA| USA CW"),
+            ({}, "### USA MY ###", base["category_name"]),
+            ({"channel_name": "USA CW"}, "### 𝗨𝗦𝗔 𝗖𝗪 ###", base["category_name"]),
+        ):
+            with self.subTest(changes=changes, provider_category=provider_category):
+                current = dict(base, **changes)
+                provider = inventory("server_1", [{"stream_id": "1", "name": provider_name, "category_name": provider_category}])
+                _new, changed, _missing = sync.compare_inventory(
+                    table([current]), [provider], discovered_at="2026-10-16T00:00:00Z"
+                )
+                self.assertEqual(changed[0]["risk"], "POSSIBLE_STREAM_ID_REUSE_REVIEW_REQUIRED")
+
+    def test_machine_heading_style_can_use_same_unrelated_provider_category(self) -> None:
+        row = mapping_row(
+            "server_1", "1", "#### USA CW #####", category_name="|NA| USA LOCAL",
+            action="IGNORE", source="dummy", epg_feed="DUMMY_CHANNELS", epg_id="Blank.Dummy.us",
+        )
+        row.update({
+            "enabled": "FALSE", "reason": sync.provider_presentation.HEADING_CLASSIFICATION_REASON,
+            "notes": current_unbound_auto_map_v1_note(method="heading_placeholder"),
+        })
+        for reason, expected_risk in (
+            (sync.provider_presentation.HEADING_CLASSIFICATION_REASON, "NAME_OR_CATEGORY_DRIFT"),
+            ("Operator ignored this row", "POSSIBLE_STREAM_ID_REUSE_REVIEW_REQUIRED"),
+        ):
+            with self.subTest(reason=reason):
+                current = dict(row, reason=reason)
+                provider = inventory("server_1", [{
+                    "stream_id": "1", "name": "*** 𝗨𝗦𝗔 𝗖𝗪 ***", "category_name": row["category_name"],
+                }])
+                _new, changed, _missing = sync.compare_inventory(
+                    table([current]), [provider], discovered_at="2026-10-16T00:00:00Z"
+                )
+                self.assertEqual(changed[0]["risk"], expected_risk)
+
     def test_possible_id_reuse_is_reported_and_snapshot_only_is_quarantined(self) -> None:
         original = mapping_row(
             "server_1", "1", "Sports One", category_name="Sports"

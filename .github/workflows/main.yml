@@ -680,6 +680,51 @@ jobs:
                           f"**{authoritative:,}** "
                           f"(minimum **{minimums.get(server_id, 0):,}**)\n"
                       )
+
+          count_keys = (
+              *(key for key, _label in labels
+                if key != "epgshare_catalog_corroboration_mode"),
+              *(key for key, _label in matching_counts),
+              "ai_review_considered_rows",
+              "ai_review_shortlisted_rows",
+              "ai_review_shortlisted_candidates",
+              "ai_review_policy_blocked_clusters",
+              "ai_review_abstained_rows",
+              "ai_review_batches_attempted",
+              "ai_review_batches_succeeded",
+              "ai_review_http_attempts",
+              "synthetic_upgrade_considered_rows",
+              "synthetic_upgrade_real_rows",
+              "synthetic_upgrade_preserved_rows",
+              "review_apply_limit",
+              "coverage_fallback_limit",
+          )
+          counts = {}
+          for key in count_keys:
+              value = payload.get(key, 0)
+              if type(value) is not int or not 0 <= value <= 1_000_000:
+                  raise SystemExit("Invalid aggregate inventory metric.")
+              counts[key] = value
+          enabled = payload.get("ai_review_enabled", False)
+          if type(enabled) is not bool:
+              raise SystemExit("Invalid aggregate AI enabled state.")
+          counts["ai_review_enabled"] = int(enabled)
+          for source_key, metric_key in (
+              ("servers", "provider_checks_available"),
+              ("provider_failures", "provider_checks_unavailable"),
+          ):
+              values = payload.get(source_key, {})
+              if not isinstance(values, dict) or set(values) - {
+                  "server_1", "server_2", "server_3"
+              }:
+                  raise SystemExit("Invalid aggregate provider count.")
+              counts[metric_key] = len(values)
+          metrics = {"schemaVersion": 1, "counts": counts}
+          rendered = json.dumps(metrics, sort_keys=True, separators=(",", ":"))
+          destination = Path(".build/reports/inventory-metrics.json")
+          destination.parent.mkdir(parents=True, exist_ok=True)
+          destination.write_text(rendered + "\n", encoding="utf-8")
+          print("Inventory matching metrics: " + rendered, flush=True)
           PY
 
       - name: Prepare private channel icon overrides

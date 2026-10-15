@@ -2835,7 +2835,7 @@ class SyntheticGuideTests(unittest.TestCase):
                 "PPV EVENT 09: UAE Warriors 65 (11.15 9:00 AM ET)",
                 "PPV (LIVE ONLY MATCH TIME)",
                 "PPV.EVENTS.Dummy.us",
-                "Upcoming: UAE Warriors 65 — Nov 15, 9:00 AM EST",
+                "UAE Warriors 65",
             ),
             (
                 "US (ESPN+ 001) | the Memorial Tournament presented by Workday",
@@ -2847,7 +2847,7 @@ class SyntheticGuideTests(unittest.TestCase):
                 "PPV EVENT 02: Championship Fight (2026-09-18 20:30:00)",
                 "PPV (LIVE ONLY MATCH TIME)",
                 "PPV.EVENTS.Dummy.us",
-                "Upcoming: Championship Fight — Sep 18, 8:30 PM EDT",
+                "Next event: Championship Fight on Sep 18, 2026 8:30 PM EDT",
             ),
             (
                 "PPV EVENT 03: Placeholder Fight (2098-01-01 00:00:00)",
@@ -3055,7 +3055,7 @@ class SyntheticGuideTests(unittest.TestCase):
         self.assertIsNotNone(decoded)
         assert decoded is not None
         self.assertEqual(decoded.name, "Summer Showcase")
-        self.assertEqual(decoded.time_label, "Jul 15, 9:00 AM EDT")
+        self.assertEqual(decoded.time_label, "Jul 15, 2026 9:00 AM EDT")
         self.assertEqual(
             datetime.fromtimestamp(decoded.start_epoch, tz=timezone.utc),
             datetime(2026, 7, 15, 13, 0, tzinfo=timezone.utc),
@@ -3073,7 +3073,7 @@ class SyntheticGuideTests(unittest.TestCase):
         )
         self.assertIsNotNone(decoded_explicit)
         assert decoded_explicit is not None
-        self.assertEqual(decoded_explicit.time_label, "Jul 15, 9:00 AM EDT")
+        self.assertEqual(decoded_explicit.time_label, "Jul 15, 2026 9:00 AM EDT")
         self.assertEqual(
             datetime.fromtimestamp(decoded_explicit.start_epoch, tz=timezone.utc),
             datetime(2026, 7, 15, 13, 0, tzinfo=timezone.utc),
@@ -3110,7 +3110,7 @@ class SyntheticGuideTests(unittest.TestCase):
         )
         self.assertIsNotNone(decoded_rollover)
         assert decoded_rollover is not None
-        self.assertEqual(decoded_rollover.time_label, "Jan 2, 8:00 PM EST")
+        self.assertEqual(decoded_rollover.time_label, "Jan 2, 2027 8:00 PM EST")
         self.assertEqual(
             datetime.fromtimestamp(decoded_rollover.start_epoch, tz=timezone.utc),
             datetime(2027, 1, 3, 1, 0, tzinfo=timezone.utc),
@@ -3336,20 +3336,20 @@ class SyntheticGuideTests(unittest.TestCase):
                 (
                     event_start,
                     event_start + 6 * 3600,
-                    "Championship Fight — Sep 18, 8:30 PM EDT",
+                    "Live (scheduled): Championship Fight",
                 )
             ],
         )
         self.assertTrue(
             all(
-                title.startswith("Upcoming: ")
+                title.startswith("Next event: ")
                 for _start, stop, title in programmes
                 if stop <= event_start
             )
         )
         self.assertTrue(
             all(
-                title.startswith("Event Information: ")
+                title == "No upcoming event announced"
                 for start, _stop, title in programmes
                 if start >= event_start + 6 * 3600
             )
