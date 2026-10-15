@@ -2957,6 +2957,52 @@ class ProviderPlaylistLinkingTests(unittest.TestCase):
         self.assertEqual(projected[0].channel_name, current)
         self.assertIn(old, projected[0].provider_name_aliases)
 
+    def test_historical_mlb_pipe_mapping_links_current_start_stop_label(self) -> None:
+        old = "MLB 02 | Dodgers x Phillies start:2026-07-21 23:40:00 stop:2026-07-22 06:53:20"
+        current = "MLB 02 : Brewers x Dodgers Start:2026-10-16 01:00:00 stop 2026-10-16 08:13:20"
+        raw = _mapping_row(
+            server_id="server_3", stream_id="801200", channel_name=old,
+            category_name="|NA| USA MLB", epg_id="PPV.EVENTS.Dummy.us",
+            source="dummy", epg_feed="DUMMY_CHANNELS",
+        )
+        raw["action"] = "AUTO_DUMMY"
+        rows = runner.parse_mapping_csv(_mapping_bytes([raw]), {"server_3"})
+        rows[0] = replace(rows[0], enabled=False, action="REVIEW",
+                          reason=runner.EFFECTIVE_QUARANTINE_REASON)
+        projected, _ = runner.apply_provider_event_title_overrides(
+            rows, self._inventory([{
+                "server_id": "server_3", "stream_id": "801200",
+                "channel_name": current, "category_name": "|NA| USA MLB",
+            }]), {"server_3"},
+        )
+        self.assertTrue(projected[0].runtime_eligible)
+        self.assertIn(old, projected[0].provider_name_aliases)
+        reference = int(datetime(2026, 10, 15, 17, tzinfo=timezone.utc).timestamp())
+        decoded = runner.decode_synthetic_event_title(projected[0], reference_epoch=reference)
+        self.assertEqual(decoded.name, "Brewers x Dodgers")
+        self.assertEqual(decoded.explicit_end_epoch - decoded.start_epoch, 26000)
+        with tempfile.TemporaryDirectory() as temporary:
+            connection = runner.create_database(Path(temporary) / "mlb.sqlite3")
+            try:
+                runner.insert_synthetic_guides(
+                    connection=connection, rows=projected, window_start=reference,
+                    window_end=reference + 2 * 86400, reference_epoch=reference,
+                )
+                entries, streams, _ = runner.build_xml_entries(
+                    rows=projected, connection=connection,
+                    schedule_stats=runner.load_schedule_stats(connection, reference),
+                    icon_overrides=runner.empty_icon_overrides(),
+                )
+                self.assertIn(current, entries)
+                self.assertIn(old, entries)
+                self.assertEqual(streams, {"801200"})
+                titles = {item[0] for item in connection.execute("SELECT title FROM programmes")}
+                self.assertTrue(any(title.startswith("Next game: Brewers x Dodgers on") for title in titles))
+                self.assertIn("Live (scheduled): Brewers x Dodgers", titles)
+                self.assertIn("No upcoming event announced", titles)
+            finally:
+                connection.close()
+
 
 class SyntheticGuideTests(unittest.TestCase):
     def _dummy_row(

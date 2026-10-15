@@ -1996,7 +1996,7 @@ def _smart_synthetic_title(value: object) -> str:
         )
     for connector in (
         "an", "and", "at", "by", "for", "in", "of", "on", "the", "to",
-        "vs", "with",
+        "vs", "with", "x",
     ):
         titled = re.sub(
             rf"(?<=\s){connector}(?=\s)", connector, titled, flags=re.I
@@ -2265,7 +2265,7 @@ def _event_programme_details(
     )
     if start_epoch < event.start_epoch:
         kind = "game" if re.search(
-            r"\b(?:vs\.?|versus|at)\s+", event.name, re.I
+            r"\b(?:vs\.?|versus|at|x)\s+", event.name, re.I
         ) else "event"
         return clean_text(f"Next {kind}: {announced}", 240), (
             f"Provider-announced event: {announced}. Times are shown with their time zone."

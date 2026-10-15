@@ -81,6 +81,41 @@ class ProviderEventSlotTests(unittest.TestCase):
         self.assertIsNone(slots.event_slot_identity(name, "NBA"))
         self.assertFalse(slots.is_same_event_presentation("NBA TV", "NBA TV", "NBA", "NBA"))
 
+    def test_historical_mlb_pipe_and_current_colon_share_the_exact_slot(self):
+        category = "|NA| USA MLB"
+        old = "MLB 02 | Team Red x Team Blue start:2026-07-21 23:40:00 stop:2026-07-22 06:53:20"
+        new = "MLB 02 : Team Green x Team Gold Start:2026-10-16 01:00:00 stop2026-10-16 08:13:20"
+        compact = "MLB02| Team Green x Team Gold"
+        for name in (old, new, compact):
+            with self.subTest(name=name):
+                self.assertEqual(slots.event_slot_identity(name, category), ("league_event", "mlb:02"))
+        self.assertTrue(slots.is_same_event_slot(old, new, category, category))
+        self.assertTrue(slots.is_same_event_slot(old, compact, category, category))
+
+    def test_pipe_slot_identity_still_rejects_different_brand_slot_or_category(self):
+        original = "MLB 02 | Old Game"
+        category = "|NA| USA MLB"
+        for name, new_category in (
+            ("MLB 01 | New Game", category),
+            ("NFL 02 | New Game", category),
+            ("MLB 02 | New Game", "|NA| USA NBA"),
+            ("MLB 02 | New Game", "MLB"),
+            ("MLB 02 | New Game", ""),
+        ):
+            with self.subTest(name=name, category=new_category):
+                self.assertFalse(slots.is_same_event_slot(original, name, category, new_category))
+        for wrong_category in ("", "Sports", "NBA", "MLBTV"):
+            with self.subTest(category=wrong_category):
+                self.assertIsNone(slots.event_slot_identity(original, wrong_category))
+
+    def test_pipe_does_not_turn_linear_or_unanchored_names_into_slots(self):
+        for name in (
+            "MLB Network | 02", "MLB TV | 02", "MLBTV02| Game", "Special MLB02| Game",
+            "MLB 02 Game", "MLB|02 Game", "MLB2| Game", "MLB0020| Game",
+        ):
+            with self.subTest(name=name):
+                self.assertIsNone(slots.event_slot_identity(name, "MLB"))
+
 
 if __name__ == "__main__":
     unittest.main()
