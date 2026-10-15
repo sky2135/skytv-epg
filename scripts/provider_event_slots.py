@@ -239,4 +239,18 @@ def is_same_event_slot(
     )
 
 
-__all__ = ["descriptive_event_family", "event_slot_identity", "exact_text_key", "is_same_event_slot"]
+def is_same_event_presentation(
+    old_name: object, new_name: object, old_category: object, new_category: object,
+) -> bool:
+    """Allow exact descriptive labels as aliases without granting slot reuse."""
+
+    if is_same_event_slot(old_name, new_name, old_category, new_category):
+        return True
+    return bool(
+        descriptive_event_family(old_name, old_category)
+        and exact_text_key(old_name) == exact_text_key(new_name)
+        and exact_text_key(old_category) == exact_text_key(new_category)
+    )
+
+
+__all__ = ["descriptive_event_family", "event_slot_identity", "exact_text_key", "is_same_event_presentation", "is_same_event_slot"]

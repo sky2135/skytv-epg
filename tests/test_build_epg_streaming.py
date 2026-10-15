@@ -2861,7 +2861,7 @@ class ProviderPlaylistLinkingTests(unittest.TestCase):
     def test_exact_nba_descriptive_names_get_information_without_quarantine_bypass(self) -> None:
         name = "NBA Summer League Mavericks vs. Thunder jul 16"
         fixtures = [self._review(key, name, "|NA| USA NBA") for key in (
-            "exact", "quarantined", "changed", "ignored",
+            "1", "2", "3", "4",
         )]
         fixtures[-1]["action"] = "IGNORE"
         rows = runner.parse_mapping_csv(
@@ -2871,12 +2871,16 @@ class ProviderPlaylistLinkingTests(unittest.TestCase):
         projected, _ = runner.apply_provider_event_title_overrides(
             rows, self._inventory([{
                 "server_id": "server_3", "stream_id": row.stream_id,
-                "channel_name": name.replace("Thunder", "Bulls") if row.stream_id == "changed" else name,
+                "channel_name": name.replace("Thunder", "Bulls") if row.stream_id == "3" else name,
                 "category_name": "|NA| USA NBA",
+                "provider_event_name_alias": name,
+                "provider_event_epg_id_alias": f"nba.{row.stream_id}",
             } for row in rows]), {"server_3"},
         )
         self.assertTrue(projected[0].runtime_eligible)
+        self.assertEqual(projected[0].provider_epg_id_aliases, ("nba.1",))
         self.assertTrue(all(not row.runtime_eligible for row in projected[1:]))
+        self.assertTrue(all(not row.provider_epg_id_aliases for row in projected[1:3]))
         reference = int(datetime(2026, 10, 15, 16, tzinfo=timezone.utc).timestamp())
         event = runner.decode_synthetic_event_title(projected[0], reference_epoch=reference)
         self.assertIsNotNone(event)
