@@ -61,6 +61,13 @@ EPGShare or Server 2/3 native schedule only when that real lane passes every
 current gate. Untracked manual targets remain protected, and a verified real
 mapping is never downgraded merely to improve a coverage statistic.
 
+The bounded AI queue includes these authenticated active fallbacks. It verifies
+their bound REVIEW preimage, then rereads the actual active row, provider
+identity, and alerts before saving a real upgrade. A failed or deferred AI
+attempt leaves the placeholder running and eligible for later retries. New
+channels first establish their authoritative Sheet row and enter AI on a later
+run. The daily queue advances by a full review window rather than one row.
+
 ## Run limits
 
 `--coverage-fallback-limit COUNT` bounds local synthetic proposals. Production
@@ -70,10 +77,10 @@ also bounded by `--review-apply-limit`, whose values are `0`, `25`, `100`,
 synthetic, `IGNORE`, and grounded-AI decisions together. Google writes remain
 split into batches of at most 500 rows and 2 MiB.
 
-Scheduled Workflow 1 defaults both limits to `30000`, allowing the dated
+The scheduled Workflow 2 publisher defaults both limits to `30000`, allowing the dated
 backlog to drain without row-by-row human matching. Either repository variable
 may override its scheduled limit, and `0` is the kill switch. Manual dispatch
-retains zero defaults and requires an explicit mode and limits.
+of Workflow 1 retains zero defaults and requires an explicit mode and limits.
 
 ## Metrics
 

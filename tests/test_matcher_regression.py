@@ -306,6 +306,17 @@ class MatcherIntegrityTests(unittest.TestCase):
             manifest["channelInventoryRequirementsSha256"],
             hashlib.sha256(CHANNEL_INVENTORY_REQUIREMENTS_PATH.read_bytes()).hexdigest(),
         )
+        for key, relative_path in (
+            ("automationConfigSha256", "scripts/automation_config.py"),
+            ("freshnessCheckerSha256", "scripts/check_epg_freshness.py"),
+            ("freshnessWorkflowSha256", ".github/workflows/epg-health.yml"),
+            ("ciWorkflowSha256", ".github/workflows/ci.yml"),
+        ):
+            with self.subTest(protected_file=relative_path):
+                self.assertEqual(
+                    manifest[key],
+                    hashlib.sha256((REPO_ROOT / relative_path).read_bytes()).hexdigest(),
+                )
         self.assertEqual(
             manifest["approvedAliasesSha256"],
             hashlib.sha256(APPROVED_ALIASES_PATH.read_bytes()).hexdigest(),

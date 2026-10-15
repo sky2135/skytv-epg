@@ -1,0 +1,78 @@
+name: Check published EPG freshness
+run-name: Published EPG health (${{ github.event_name }})
+
+on:
+  schedule:
+    - cron: "23 */4 * * *"
+  workflow_dispatch:
+
+# This check must still run when matching or publication fails. It has no
+# provider or Google credentials and does not share the Sheet writer lock.
+concurrency:
+  group: ${{ github.repository }}-epg-health
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  health:
+    name: Check publication age and real future programmes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Check public health and guide index
+        env:
+          EPG_PUBLIC_BASE_URL: ${{ vars.EPG_PUBLIC_BASE_URL }}
+          MAX_AGE_HOURS: ${{ vars.EPG_MAX_PUBLICATION_AGE_HOURS || '36' }}
+          MINIMUM_FUTURE_HOURS: ${{ vars.EPG_MINIMUM_FUTURE_HOURS || '6' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          public_base="${EPG_PUBLIC_BASE_URL:-https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}}"
+          python scripts/check_epg_freshness.py \
+            --base-url "$public_base" \
+            --max-age-hours "$MAX_AGE_HOURS" \
+            --minimum-future-hours "$MINIMUM_FUTURE_HOURS" \
+            --expected-server server_1 \
+            --expected-server server_2 \
+            --expected-server server_3 \
+            --output .build/epg-health.json
+
+      - name: Add freshness summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = Path(".build/epg-health.json")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as handle:
+              handle.write("### Published EPG freshness\n\n")
+              if report.is_file():
+                  payload = json.loads(report.read_text(encoding="utf-8"))
+                  handle.write("```json\n" + json.dumps(payload, indent=2) + "\n```\n")
+              else:
+                  handle.write("The freshness check did not produce a report. Open the failed step.\n")
+          PY
+
+      - name: Retain public freshness report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: epg-health-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/epg-health.json
+          if-no-files-found: warn
+          retention-days: 7

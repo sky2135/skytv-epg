@@ -52,6 +52,13 @@ MAX_CATALOG_TEXT_LINES = 250_000
 MAX_CATALOG_SECTIONS = 1_024
 MAX_DUPLICATE_CHANNEL_RECORDS_PER_ID = 64
 MAX_CHANNEL_VALUE_VARIANTS = 16
+ICON_CATALOG_SCHEMA_VERSION = 1
+ICON_CATALOG_MAX_BYTES = 128 * 1024 * 1024
+ICON_CATALOG_MAX_TEXT_BYTES = 64 * 1024 * 1024
+ICON_CATALOG_MAX_RECORDS = MAX_CATALOG_CHANNEL_ELEMENTS
+ICON_CATALOG_MAX_NAMES_PER_RECORD = 256
+ICON_CATALOG_MAX_TOTAL_NAMES = 1_000_000
+ICON_CATALOG_MAX_NAME_TEXT_BYTES = 32_000
 MAX_GATE_SIGNATURES_PER_ID = 8
 MAX_GATE_PROGRAMME_DURATION_SECONDS = 24 * 60 * 60
 DEFAULT_GATE_HORIZON_SECONDS = 72 * 60 * 60
@@ -1132,6 +1139,7 @@ def stream_catalog_and_programmes_once(
     channel_sink: ChannelSink | None = None,
     programme_sink: ProgrammeSink | None = None,
     source_base_url: str = "",
+    icon_catalog_path: Path | None = None,
     maximum_expanded_bytes: int = streaming.MAX_SOURCE_EXPANDED_BYTES,
     maximum_channel_elements: int = MAX_CATALOG_CHANNEL_ELEMENTS,
     minimum_unique_channels: int = DEFAULT_MINIMUM_UNIQUE_CATALOG_CHANNELS,
@@ -1167,6 +1175,9 @@ def stream_catalog_and_programmes_once(
     source_sha256 = bound_source.source_sha256
     stats = CatalogStreamStats(source_bytes=bound_source.source_bytes)
     aggregates: dict[str, _ChannelAggregate] = {}
+    icon_records: list[dict[str, Any]] = []
+    icon_catalog_text_bytes = 0
+    icon_catalog_name_count = 0
     catalog: CatalogSnapshot | None = None
     provisional_ids: tuple[str, ...] = ()
     actual_to_target: dict[str, str] = {}
@@ -1287,6 +1298,28 @@ def stream_catalog_and_programmes_once(
                     epg_id = _strict_xmltv_id(
                         element.get("id") or "", label="Channel XMLTV ID"
                     )
+                    icon_url = streaming.first_channel_icon(element, source_base_url)
+                    if icon_catalog_path is not None:
+                        # Even a nameless-ID source record can make a display
+                        # name's logo ambiguous. Preserve this name-only evidence.
+                        display_names = [
+                            str(child.text) for child in element
+                            if streaming.local_name(child.tag) == "display-name" and child.text
+                        ]
+                        icon_catalog_name_count += len(display_names)
+                        if (len(display_names) > ICON_CATALOG_MAX_NAMES_PER_RECORD
+                                or sum(len(value.encode("utf-8")) for value in display_names) > ICON_CATALOG_MAX_NAME_TEXT_BYTES):
+                            raise CatalogStreamError("One XMLTV channel has too much icon-catalog text.")
+                        icon_catalog_text_bytes += sum(
+                            len(value.encode("utf-8")) for value in (epg_id, icon_url, *display_names)
+                        )
+                        if (icon_catalog_text_bytes > ICON_CATALOG_MAX_TEXT_BYTES
+                                or icon_catalog_name_count > ICON_CATALOG_MAX_TOTAL_NAMES
+                                or len(icon_records) >= ICON_CATALOG_MAX_RECORDS):
+                            raise CatalogStreamError("The XMLTV icon catalog exceeds its text limit.")
+                        icon_records.append({
+                            "epg_id": epg_id, "display_names": display_names, "icon_url": icon_url,
+                        })
                     if epg_id:
                         aggregate = aggregates.get(epg_id)
                         if aggregate is None:
@@ -1309,9 +1342,6 @@ def stream_catalog_and_programmes_once(
                                 raise CatalogStreamError(
                                     "One XMLTV channel has too many display-name variants."
                                 )
-                        icon_url = streaming.first_channel_icon(
-                            element, source_base_url
-                        )
                         if icon_url:
                             aggregate.icon_urls.add(icon_url)
                             if len(aggregate.icon_urls) > MAX_CHANNEL_VALUE_VARIANTS:
@@ -1451,6 +1481,33 @@ def stream_catalog_and_programmes_once(
     if not selector_called:
         freeze_and_select()
     assert catalog is not None
+    if icon_catalog_path is not None:
+        destination = Path(icon_catalog_path)
+        if destination.resolve() == source_path.resolve():
+            raise CatalogStreamError("The icon catalog must not overwrite its XMLTV source.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = destination.with_name(destination.name + ".tmp")
+        payload = {
+            "schema_version": ICON_CATALOG_SCHEMA_VERSION,
+            "source_sha256": source_sha256,
+            "source_bytes": stats.source_bytes,
+            "source_base_url": source_base_url,
+            "channel_records": icon_records,
+        }
+        payload["logical_sha256"] = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        rendered = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(rendered.encode("utf-8")) > ICON_CATALOG_MAX_BYTES:
+            raise CatalogStreamError("The serialized icon catalog exceeds its size limit.")
+        try:
+            temporary.write_text(
+                rendered,
+                encoding="utf-8",
+            )
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
     selected_keys = tuple(sorted(set(actual_to_target.values())))
     return OnePassCatalogResult(
         source_sha256=source_sha256,

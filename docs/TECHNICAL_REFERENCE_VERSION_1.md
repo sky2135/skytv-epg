@@ -824,16 +824,19 @@ out read-only and generated files are not committed.
 
 ## Workflows and scheduling
 
-- `.github/workflows/channel_inventory_sync.yml` runs daily at 02:17 in
-  `America/Toronto`, before publication, and can also be dispatched manually.
-  Scheduled settings append missing rows, recheck all servers in `apply`, and
-  default both the total apply and synthetic fallback caps to `30000`. Grounded
-  Gemini runs when its secret exists unless `EPG_USE_GEMINI_AI=false`. Manual
-  dispatch defaults to no new-row write, `dry-run`, zero write limits, and
-  Gemini off until explicitly selected.
-- `.github/workflows/main.yml` runs daily at 04:37 in `America/Toronto` and may
-  also be started manually. It performs a refresh with Sheet writes, builds,
-  validates, and deploys.
+- `.github/workflows/channel_inventory_sync.yml` is a manual preview/repair
+  workflow. Dispatch defaults to no new-row write, `dry-run`, zero write limits,
+  and Gemini off until explicitly selected.
+- `.github/workflows/main.yml` is the single daily pipeline at 04:37 in
+  `America/Toronto`, also available manually. It appends missing rows and rechecks
+  all servers in `apply`, then builds and deploys the same snapshot. Total apply
+  and synthetic fallback caps default to `30000`; repository variables override
+  them. Gemini runs when its secret exists unless `EPG_USE_GEMINI_AI=false`.
+- `.github/workflows/ci.yml` runs credential-free offline regression tests for
+  relevant pull requests and changes to main.
+- `.github/workflows/epg-health.yml` checks published age, real future endpoints,
+  and provider degradation independently every four hours. See
+  [automation operations](AUTOMATION_OPERATIONS.md) for controls and metrics.
 
 Both workflows use the same non-cancelling concurrency group. This serializes
 Sheet writes and Pages deployments without cancelling an in-progress publish.
@@ -970,7 +973,7 @@ hashes are checked before deployment.
   guide are activated automatically. Verified placeholder families may receive
   a truthful local guide and decorative headings may be disabled as `IGNORE`;
   alert, identity-drift, and untracked manual states remain quarantined.
-- Existing `REVIEW` rows are retried by the daily Workflow 1 recheck. One run
+- Existing `REVIEW` and authenticated fallback rows are retried by the daily publisher. One run
   may persist only the explicit total cap across all lanes; the scheduled cap
   defaults to `30000`, while manual dispatch defaults to zero. Grounded AI may
   consider at most 200 affected rows and only remaining total-cap capacity. It
