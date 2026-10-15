@@ -2773,6 +2773,187 @@ class ProviderEventTitleOverlayTests(unittest.TestCase):
         self.assertFalse(any("Schedule unavailable" in title for title in programme_titles))
 
 
+class ProviderPlaylistLinkingTests(unittest.TestCase):
+    def _inventory(self, rows: list[dict[str, str]]) -> bytes:
+        output = io.StringIO(newline="")
+        writer = csv.DictWriter(output, fieldnames=(
+            "server_id", "stream_id", "channel_name", "category_name",
+            "provider_event_name_alias", "provider_event_epg_id_alias",
+            "provider_event_name_aliases",
+        ), lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+        return output.getvalue().encode("utf-8")
+
+    def _review(self, stream_id: str, name: str, category: str) -> dict[str, str]:
+        row = _mapping_row(
+            server_id="server_3", stream_id=stream_id, channel_name=name,
+            category_name=category, epg_id="",
+        )
+        row.update(enabled="FALSE", action="REVIEW")
+        return row
+
+    def test_playlist_name_and_tvg_id_point_at_current_slot_schedule(self) -> None:
+        stored = "US (ESPN+ 001) | Fairways of Life Sep 16 10:00AM ET"
+        playlist = "US (ESPN+ 001) | Football: Good Morning Sep 30 10:00AM ET"
+        current = "US (ESPN+ 001) | Red vs Blue Oct 15 7:00PM ET"
+        tvg_name = "US (ESPN+ 001) | Another older playlist label"
+        rows = runner.parse_mapping_csv(_mapping_bytes([
+            self._review("1324067", stored, "|NA| USA ESPN+"),
+        ]), {"server_3"}, require_enabled_servers=False)
+        projected, summary = runner.apply_provider_event_title_overrides(
+            rows, self._inventory([{
+                "server_id": "server_3", "stream_id": "1324067",
+                "channel_name": current, "category_name": "|NA| USA ESPN+",
+                "provider_event_name_alias": playlist,
+                "provider_event_epg_id_alias": "provider.espn.slot001",
+                "provider_event_name_aliases": json.dumps([playlist, tvg_name]),
+            }]), {"server_3"},
+        )
+        self.assertEqual(summary["playlistAliasRows"], 1)
+        reference = int(datetime(2026, 10, 15, 16, tzinfo=timezone.utc).timestamp())
+        with tempfile.TemporaryDirectory() as temporary:
+            connection = runner.create_database(Path(temporary) / "stage.sqlite3")
+            try:
+                runner.insert_synthetic_guides(
+                    connection=connection, rows=projected, window_start=reference,
+                    window_end=reference + 86400, reference_epoch=reference,
+                )
+                entries, streams, _ = runner.build_xml_entries(
+                    rows=projected, connection=connection,
+                    schedule_stats=runner.load_schedule_stats(connection, reference),
+                    icon_overrides=runner.empty_icon_overrides(),
+                )
+                for alias in (stored, playlist, tvg_name, current, "provider.espn.slot001"):
+                    self.assertIn(alias, entries)
+                    self.assertEqual(entries[alias].channel_key, projected[0].epg_id)
+                self.assertEqual(streams, {"1324067"})
+                self.assertNotIn("1324067", entries)
+                titles = [value[0] for value in connection.execute("SELECT title FROM programmes")]
+                self.assertTrue(any(title.startswith("Next game: Red vs Blue") for title in titles))
+                self.assertTrue(any(title == "Live (scheduled): Red vs Blue" for title in titles))
+                self.assertFalse(any("Good Morning" in title for title in titles))
+            finally:
+                connection.close()
+
+    def test_unproven_playlist_aliases_cannot_cross_slots_or_linear_channels(self) -> None:
+        fixtures = [
+            ("wrong-slot", "NFL | 01 - old game", "|NA| USA NFL", "NFL | 02 - other game"),
+            ("linear", "Ordinary News", "News", "NFL | 01 - other game"),
+            ("invalid-id", "NFL | 03 - game", "|NA| USA NFL", "NFL | 03 - game"),
+        ]
+        rows = runner.parse_mapping_csv(_mapping_bytes([
+            self._review(key, name, category) for key, name, category, _ in fixtures
+        ]), {"server_3"}, require_enabled_servers=False)
+        projected, summary = runner.apply_provider_event_title_overrides(
+            rows, self._inventory([{
+                "server_id": "server_3", "stream_id": key,
+                "channel_name": name, "category_name": category,
+                "provider_event_name_alias": alias,
+                "provider_event_epg_id_alias": "x" * 301 if key == "invalid-id" else "Unrelated.test",
+            } for key, name, category, alias in fixtures]), {"server_3"},
+        )
+        self.assertEqual(summary["playlistAliasRows"], 0)
+        self.assertTrue(all(not row.provider_name_aliases for row in projected))
+        self.assertTrue(all(not row.provider_epg_id_aliases for row in projected))
+        self.assertFalse(projected[1].runtime_eligible)
+
+    def test_exact_nba_descriptive_names_get_information_without_quarantine_bypass(self) -> None:
+        name = "NBA Summer League Mavericks vs. Thunder jul 16"
+        fixtures = [self._review(key, name, "|NA| USA NBA") for key in (
+            "exact", "quarantined", "changed", "ignored",
+        )]
+        fixtures[-1]["action"] = "IGNORE"
+        rows = runner.parse_mapping_csv(
+            _mapping_bytes(fixtures), {"server_3"}, require_enabled_servers=False,
+        )
+        rows[1] = replace(rows[1], reason=runner.EFFECTIVE_QUARANTINE_REASON)
+        projected, _ = runner.apply_provider_event_title_overrides(
+            rows, self._inventory([{
+                "server_id": "server_3", "stream_id": row.stream_id,
+                "channel_name": name.replace("Thunder", "Bulls") if row.stream_id == "changed" else name,
+                "category_name": "|NA| USA NBA",
+            } for row in rows]), {"server_3"},
+        )
+        self.assertTrue(projected[0].runtime_eligible)
+        self.assertTrue(all(not row.runtime_eligible for row in projected[1:]))
+        reference = int(datetime(2026, 10, 15, 16, tzinfo=timezone.utc).timestamp())
+        event = runner.decode_synthetic_event_title(projected[0], reference_epoch=reference)
+        self.assertIsNotNone(event)
+        self.assertIsNone(event.start_epoch)
+        title = runner.synthetic_programme_title(projected[0], reference_epoch=reference)
+        self.assertIn("Mavericks", title)
+        self.assertFalse(title.startswith(("Live", "Next")))
+
+    def test_shared_playlist_tvg_id_is_not_assigned_to_one_arbitrary_event(self) -> None:
+        fixtures = [self._review(str(slot), f"NFL | {slot:02} - game", "|NA| USA NFL")
+                    for slot in (1, 2)]
+        rows = runner.parse_mapping_csv(_mapping_bytes(fixtures), {"server_3"}, require_enabled_servers=False)
+        projected, _ = runner.apply_provider_event_title_overrides(
+            rows, self._inventory([{
+                "server_id": row.server_id, "stream_id": row.stream_id,
+                "channel_name": row.channel_name, "category_name": row.category_name,
+                "provider_event_name_alias": row.channel_name,
+                "provider_event_epg_id_alias": "Shared.NFL.Events",
+            } for row in rows]), {"server_3"},
+        )
+        self.assertTrue(all(row.runtime_eligible for row in projected))
+        self.assertTrue(all(not row.provider_epg_id_aliases for row in projected))
+
+    def test_playlist_tvg_id_alias_cannot_replace_real_canonical_guide(self) -> None:
+        event = self._review("1", "NFL | 01 - Eagles at Bears", "|NA| USA NFL")
+        linear = _mapping_row(
+            server_id="server_3", stream_id="2", channel_name="Real Sports",
+            category_name="Sports", epg_id="Real.Sports.test",
+        )
+        rows = runner.parse_mapping_csv(_mapping_bytes([event, linear]), {"server_3"})
+        projected, _ = runner.apply_provider_event_title_overrides(
+            rows, self._inventory([{
+                "server_id": "server_3", "stream_id": "1",
+                "channel_name": event["channel_name"], "category_name": event["category_name"],
+                "provider_event_name_alias": event["channel_name"],
+                "provider_event_epg_id_alias": "Real.Sports.test",
+            }]), {"server_3"},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            connection = runner.create_database(Path(temporary) / "stage.sqlite3")
+            try:
+                runner.insert_synthetic_guides(
+                    connection=connection, rows=projected, window_start=FIXED_NOW,
+                    window_end=FIXED_NOW + 86400, reference_epoch=FIXED_NOW,
+                )
+                connection.execute("INSERT INTO channels VALUES ('epgshare01', 'Real.Sports.test', 'Real.Sports.test', 'Real Sports', '')")
+                connection.execute(
+                    "INSERT INTO programmes VALUES ('epgshare01', 'Real.Sports.test', ?, ?, 'Real match', '', '', '[]', 1)",
+                    (FIXED_NOW, FIXED_NOW + 3600),
+                )
+                connection.commit()
+                entries, _, _ = runner.build_xml_entries(
+                    rows=projected, connection=connection,
+                    schedule_stats=runner.load_schedule_stats(connection, FIXED_NOW),
+                    icon_overrides=runner.empty_icon_overrides(),
+                )
+                self.assertEqual(entries["Real.Sports.test"].source_key, "epgshare01")
+                self.assertEqual(entries["Real.Sports.test"].entry_type, "canonical_epg_id")
+            finally:
+                connection.close()
+
+    def test_spacing_only_event_name_changes_keep_exact_playlist_alias(self) -> None:
+        old = "NFL  | 01 - game"
+        current = "NFL | 01 - game"
+        rows = runner.parse_mapping_csv(_mapping_bytes([
+            self._review("1", old, "|NA| USA NFL"),
+        ]), {"server_3"}, require_enabled_servers=False)
+        projected, _ = runner.apply_provider_event_title_overrides(
+            rows, self._inventory([{
+                "server_id": "server_3", "stream_id": "1", "channel_name": current,
+                "category_name": "|NA| USA NFL",
+            }]), {"server_3"},
+        )
+        self.assertEqual(projected[0].channel_name, current)
+        self.assertIn(old, projected[0].provider_name_aliases)
+
+
 class SyntheticGuideTests(unittest.TestCase):
     def _dummy_row(
         self,

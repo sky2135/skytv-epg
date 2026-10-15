@@ -1177,6 +1177,8 @@ def parse_xtream_m3u(
             and raw_tvg_attribute != raw_epg_attribute
         )
         raw_tvg_id = raw_tvg_attribute or raw_epg_attribute
+        raw_tvg_name = str(attributes.get("tvg-name") or "")
+        safe_tvg_name = streaming.clean_identifier(raw_tvg_name, 300)
         tvg_id = (
             ""
             if conflicting_id_aliases
@@ -1205,6 +1207,7 @@ def parse_xtream_m3u(
                     not conflicting_id_aliases and raw_tvg_id == tvg_id
                 ),
                 "_native_epg_id_raw_present": bool(raw_tvg_id),
+                "_m3u_tvg_name": safe_tvg_name if safe_tvg_name == raw_tvg_name else "",
                 "num": streaming.clean_text(
                     attributes.get("tvg-chno")
                     or attributes.get("channel-number")
@@ -1633,10 +1636,55 @@ def new_mapping_row(
     return result
 
 
+_PROVIDER_EVENT_HINT_FIELDS = (
+    "_provider_event_name_alias", "_provider_event_epg_id_alias",
+    "_provider_event_name_aliases", "_m3u_tvg_name",
+    "_provider_event_alias_category", "_provider_event_alias_stream_id",
+    "_provider_event_alias_verified",
+)
+
+
+def _event_presentation_hints(channel: Mapping[str, Any]) -> tuple[str, str, tuple[str, ...]]:
+    """Export only a same-run, exact-joined M3U event identity proof."""
+
+    if channel.get("_provider_event_alias_verified") is not True:
+        return "", "", ()
+    stream_id = str(channel.get("stream_id", ""))
+    if (
+        not re.fullmatch(r"[0-9]{1,120}", stream_id)
+        or channel.get("_provider_event_alias_stream_id") != stream_id
+    ):
+        return "", "", ()
+    alias_name = str(channel.get("_provider_event_name_alias", ""))
+    alias_id = str(channel.get("_provider_event_epg_id_alias", ""))
+    aliases = channel.get("_provider_event_name_aliases")
+    if (
+        not alias_name
+        or not isinstance(aliases, (tuple, list))
+        or not 1 <= len(aliases) <= 2
+        or aliases[0] != alias_name
+        or alias_id != streaming.clean_identifier(alias_id, 300)
+        or any(
+            not isinstance(name, str)
+            or not name
+            or name != streaming.clean_identifier(name, 300)
+            or not provider_event_slots.is_same_event_slot(
+                channel.get("name", ""), name,
+                channel.get("category_name", ""),
+                channel.get("_provider_event_alias_category", ""),
+            )
+            for name in aliases
+        )
+    ):
+        return "", "", ()
+    return alias_name, alias_id, tuple(aliases)
+
+
 def inventory_rows(inventories: Sequence[PanelInventory]) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     for inventory in inventories:
         for channel in inventory.channels:
+            event_name_alias, event_epg_id_alias, event_name_aliases = _event_presentation_hints(channel)
             result.append(
                 {
                     "server_id": inventory.server_id,
@@ -1648,6 +1696,9 @@ def inventory_rows(inventories: Sequence[PanelInventory]) -> list[dict[str, str]
                     "category_name": streaming.clean_text(channel.get("category_name", ""), 200),
                     "channel_number": streaming.clean_text(channel.get("num", ""), 40),
                     "native_epg_id_present": "TRUE" if channel.get("epg_channel_id") else "FALSE",
+                    "provider_event_name_alias": event_name_alias,
+                    "provider_event_epg_id_alias": event_epg_id_alias,
+                    "provider_event_name_aliases": json.dumps(event_name_aliases, ensure_ascii=False, separators=(",", ":")) if event_name_aliases else "",
                 }
             )
     return sorted(
@@ -1714,8 +1765,10 @@ def enrich_review_inventories_from_m3u(
     Xtream's otherwise-authoritative ``get_live_streams`` response commonly
     omits ``epg_channel_id``.  The authenticated M3U is therefore consulted as
     a narrow secondary attribute source.  It can never replace API identity,
-    name, category, ordering, or availability: an ID is copied only after an
-    exact numeric stream-ID join and the same normalized channel name.
+    name, category, ordering, or availability: a native ID is copied only after
+    an exact numeric stream-ID join and the same normalized channel name.
+    Independently proven same-category numbered event slots may retain M3U
+    name/EPG-ID presentation aliases without authorizing a native mapping.
     """
 
     allowed_servers = {
@@ -1732,6 +1785,10 @@ def enrich_review_inventories_from_m3u(
         "native_review_m3u_name_mismatches": 0,
         "native_review_m3u_missing_rows": 0,
         "native_review_invalid_provider_ids": 0,
+        "provider_event_m3u_name_aliases": 0,
+        "provider_event_m3u_epg_id_aliases": 0,
+        "provider_event_m3u_ambiguous_stream_ids": 0,
+        "provider_event_m3u_shared_epg_id_aliases": 0,
     }
     enriched: list[PanelInventory] = []
     for inventory in inventories:
@@ -1743,6 +1800,11 @@ def enrich_review_inventories_from_m3u(
             source=inventory.source,
             diagnostics=list(inventory.diagnostics),
         )
+        for channel in copied.channels:
+            # These proofs must be rebuilt from this authenticated fetch,
+            # never inherited from input data or a preceding enrichment.
+            for field_name in _PROVIDER_EVENT_HINT_FIELDS:
+                channel.pop(field_name, None)
         config = configs.get(inventory.server_id)
         if inventory.server_id in allowed_servers:
             for channel in copied.channels:
@@ -1800,12 +1862,33 @@ def enrich_review_inventories_from_m3u(
         )
         stats["native_review_m3u_servers_available"] += 1
         m3u_by_stream: dict[str, Mapping[str, Any]] = {}
+        ambiguous_m3u_streams: set[str] = set()
+        m3u_epg_id_streams: dict[str, set[str]] = {}
         for channel in m3u_inventory.channels:
+            raw_id = str(channel.get("epg_channel_id", ""))
+            raw_stream = str(channel.get("stream_id", ""))
+            if (
+                raw_stream and raw_id
+                and raw_id == streaming.clean_identifier(raw_id, 300)
+                and channel.get("_native_epg_id_exact") is True
+            ):
+                # Every playlist row participates, including ordinary linear,
+                # nonnumeric and otherwise ineligible streams. A shared TVG
+                # identity must never be claimed by one generated event guide.
+                m3u_epg_id_streams.setdefault(raw_id, set()).add(raw_stream)
             stream_id = streaming.clean_identifier(
                 channel.get("stream_id", ""), 120
             )
-            if re.fullmatch(r"[0-9]+", stream_id):
+            if (
+                str(channel.get("stream_id", "")) == stream_id
+                and re.fullmatch(r"[0-9]+", stream_id)
+            ):
+                if stream_id in m3u_by_stream or stream_id in ambiguous_m3u_streams:
+                    m3u_by_stream.pop(stream_id, None)
+                    ambiguous_m3u_streams.add(stream_id)
+                    continue
                 m3u_by_stream[stream_id] = channel
+        stats["provider_event_m3u_ambiguous_stream_ids"] += len(ambiguous_m3u_streams)
 
         for channel in copied.channels:
             stream_id = streaming.clean_identifier(
@@ -1813,12 +1896,49 @@ def enrich_review_inventories_from_m3u(
             )
             if not re.fullmatch(r"[0-9]+", stream_id):
                 continue
+            if str(channel.get("stream_id", "")) != stream_id:
+                continue
             m3u_channel = m3u_by_stream.get(stream_id)
             if m3u_channel is None:
                 stats["native_review_m3u_missing_rows"] += 1
                 continue
             if channel.get("_native_epg_id_conflict") is True:
                 continue
+            raw_m3u_id = str(m3u_channel.get("epg_channel_id", ""))
+            clean_m3u_id = streaming.clean_identifier(raw_m3u_id, 300)
+            m3u_id_exact = (
+                raw_m3u_id == clean_m3u_id
+                and m3u_channel.get("_native_epg_id_exact") is True
+            )
+            event_aliases: list[str] = []
+            for candidate_name in (m3u_channel.get("name", ""), m3u_channel.get("_m3u_tvg_name", "")):
+                safe_name = streaming.clean_identifier(candidate_name, 300)
+                if (
+                    m3u_id_exact and safe_name and safe_name == str(candidate_name)
+                    and safe_name not in event_aliases
+                    and provider_event_slots.is_same_event_slot(
+                        channel.get("name", ""), safe_name,
+                        channel.get("category_name", ""), m3u_channel.get("category_name", ""),
+                    )
+                ):
+                    event_aliases.append(safe_name)
+            if event_aliases:
+                unique_id_alias = clean_m3u_id if len(
+                    m3u_epg_id_streams.get(clean_m3u_id, ())
+                ) == 1 else ""
+                channel.update({
+                    "_provider_event_name_alias": event_aliases[0],
+                    "_provider_event_name_aliases": event_aliases,
+                    "_provider_event_epg_id_alias": unique_id_alias,
+                    "_provider_event_alias_category": str(m3u_channel.get("category_name", "")),
+                    "_provider_event_alias_stream_id": stream_id,
+                    "_provider_event_alias_verified": True,
+                })
+                stats["provider_event_m3u_name_aliases"] += len(event_aliases)
+                if unique_id_alias:
+                    stats["provider_event_m3u_epg_id_aliases"] += 1
+                elif clean_m3u_id:
+                    stats["provider_event_m3u_shared_epg_id_aliases"] += 1
             if exact_inventory_name_key(
                 channel.get("name", "")
             ) != exact_inventory_name_key(m3u_channel.get("name", "")):
@@ -3246,6 +3366,9 @@ def write_reports(
         "category_name",
         "channel_number",
         "native_epg_id_present",
+        "provider_event_name_alias",
+        "provider_event_epg_id_alias",
+        "provider_event_name_aliases",
     )
     changed_headers = (
         "server_id",

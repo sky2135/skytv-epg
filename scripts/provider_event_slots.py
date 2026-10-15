@@ -56,6 +56,14 @@ _EVENT_SLOT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
+        "flosports_no_pipe",
+        re.compile(
+            r"^\(\s*FLSP\s+(?P<slot>[0-9]{3})\s*\)"
+            r"(?:\s+|\s*:\s*)(?P<payload>[^|\r\n]{1,300})$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "us_flo",
         re.compile(
             r"^US\s*\(\s*FLO\s+(?P<slot>[0-9]{1,4})\s*\)\s*\|(?:\s*.*)?$",
@@ -89,6 +97,14 @@ _EVENT_SLOT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"^(?P<brand>NFL|NBA|WNBA|NHL|MLB|MLS|UEFA|CFL|CHL|UFC|WWE)"
             r"(?:\s*\|\s*|\s+)(?P<slot>[0-9]{2,3})"
             r"\s*[-–—:](?:\s*.*)?$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "mlb_compact",
+        re.compile(
+            r"^(?P<brand>MLB)(?P<slot>[0-9]{2,3})"
+            r"\s*[-–—:](?P<payload>[^\r\n]{0,300})$",
             re.IGNORECASE,
         ),
     ),
@@ -131,6 +147,23 @@ def event_slot_identity(
         matched = pattern.fullmatch(text)
         if matched is None:
             continue
+        if family == "flosports_no_pipe":
+            if (
+                not 1 <= int(matched.group("slot")) <= 999
+                or not re.search(r"\b(?:FLO\s*SPORTS|FLO|FLSP)\b", str(category), re.I)
+                or any(unicodedata.category(character) in {"Cc", "Cs"}
+                       for character in matched.group("payload"))
+            ):
+                return None
+            family = "flosports"
+        if family == "mlb_compact":
+            if (
+                not 1 <= int(matched.group("slot")) <= 999
+                or any(unicodedata.category(character) in {"Cc", "Cs"}
+                       for character in matched.group("payload"))
+            ):
+                return None
+            family = "league_event"
         if family == "espn_play":
             if not 1 <= int(matched.group("slot")) <= 999 or (
                 re.sub(r"\s+", "", exact_text_key(category))
@@ -171,6 +204,24 @@ def event_slot_identity(
     return None
 
 
+def descriptive_event_family(value: object, category: object = "") -> str:
+    """Classify one unnumbered event label without granting a stable identity."""
+
+    raw = unicodedata.normalize("NFKC", str(value or ""))
+    if (
+        len(raw) > 300
+        or any(unicodedata.category(character) in {"Cc", "Cs"} for character in raw)
+        or not re.search(r"\bNBA\b", str(category), re.I)
+    ):
+        return ""
+    text = _SPACE_RE.sub(" ", raw.strip())
+    return "league_event" if re.fullmatch(
+        r"NBA\s+Summer\s+League\s+.{1,100}?\s+(?:vs\.?|versus|at)\s+.{1,140}",
+        text,
+        re.IGNORECASE,
+    ) else ""
+
+
 def is_same_event_slot(
     old_name: object,
     new_name: object,
@@ -188,4 +239,4 @@ def is_same_event_slot(
     )
 
 
-__all__ = ["event_slot_identity", "exact_text_key", "is_same_event_slot"]
+__all__ = ["descriptive_event_family", "event_slot_identity", "exact_text_key", "is_same_event_slot"]

@@ -221,6 +221,44 @@ class ProviderEventGuideTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(self.parse(name).name, name)
 
+    def test_explicit_start_marker_is_removed_with_its_date_only(self):
+        result = self.parse(
+            "MLB01: Team Red vs Team Blue start:2026-09-30 19:00:00",
+            family="league_event", category="USA | MLB",
+        )
+        self.assertEqual(result.name, "Team Red vs Team Blue")
+        self.assertEqual(result.start_epoch, epoch(2026, 9, 30, 23))
+        self.assertLess(result.start_epoch, NOW)
+        self.assertEqual(
+            self.parse("PPV EVENT 01: Fresh Start (2026-10-15 19:00:00 ET)").name,
+            "Fresh Start",
+        )
+        self.assertEqual(self.parse("PPV EVENT 01: Game start: time TBA").timing_status, "tba")
+
+    def test_nfl_clock_without_a_date_never_gets_a_scheduled_epoch(self):
+        result = self.parse("NFL |01-TNF 8:15pm Eagles at Bears", family="league_event", category="NFL")
+        self.assertEqual(result.name, "TNF 8:15pm Eagles at Bears")
+        self.assertEqual(result.timing_status, "unscheduled")
+        self.assertIsNone(result.start_epoch)
+        self.assertIsNone(result.explicit_end_epoch)
+
+    def test_unnumbered_summer_league_day_without_year_or_clock_stays_unscheduled(self):
+        result = self.parse(
+            "NBA Summer League Mavericks vs Thunder jul 16",
+            family="league_event", category="NBA",
+        )
+        self.assertEqual(result.name, "NBA Summer League Mavericks vs Thunder jul 16")
+        self.assertEqual(result.timing_status, "unscheduled")
+        self.assertIsNone(result.start_epoch)
+
+    def test_flsp_without_pipe_keeps_source_event_name_and_explicit_date(self):
+        result = self.parse(
+            "(FLSP 001) bikes: Tour of Example (2026-10-15 12:00:00)",
+            family="flosports", category="FLOSPORTS",
+        )
+        self.assertEqual(result.name, "bikes: Tour of Example")
+        self.assertEqual(result.start_epoch, epoch(2026, 10, 15, 16))
+
 
 if __name__ == "__main__":
     unittest.main()
