@@ -96,7 +96,7 @@ _EVENT_SLOT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             r"^(?P<brand>NFL|NBA|WNBA|NHL|MLB|MLS|UEFA|CFL|CHL|UFC|WWE)"
             r"(?:\s*\|\s*|\s+)(?P<slot>[0-9]{2,3})"
-            r"\s*[-–—:](?:\s*.*)?$",
+            r"\s*[-–—:|](?:\s*.*)?$",
             re.IGNORECASE,
         ),
     ),
@@ -104,7 +104,7 @@ _EVENT_SLOT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "mlb_compact",
         re.compile(
             r"^(?P<brand>MLB)(?P<slot>[0-9]{2,3})"
-            r"\s*[-–—:](?P<payload>[^\r\n]{0,300})$",
+            r"\s*[-–—:|](?P<payload>[^\r\n]{0,300})$",
             re.IGNORECASE,
         ),
     ),

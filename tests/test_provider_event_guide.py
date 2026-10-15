@@ -235,6 +235,73 @@ class ProviderEventGuideTests(unittest.TestCase):
         )
         self.assertEqual(self.parse("PPV EVENT 01: Game start: time TBA").timing_status, "tba")
 
+    def test_labeled_mlb_start_stop_ranges_preserve_both_exact_endpoints(self):
+        cases = (
+            (
+                "MLB 02 : Brewers x Dodgers Start:2026-10-16 01:00:00 stop 2026-10-16 08:13:20",
+                "Brewers x Dodgers", epoch(2026, 10, 16, 5), epoch(2026, 10, 16, 12, 13, 20),
+            ),
+            (
+                "MLB 02 | Dodgers x Phillies start:2026-07-21 23:40:00 stop:2026-07-22 06:53:20",
+                "Dodgers x Phillies", epoch(2026, 7, 22, 3, 40), epoch(2026, 7, 22, 10, 53, 20),
+            ),
+            (
+                "MLB02| Red x Blue Start:2026-10-16T01:00:00Z END:2026-10-16T08:13:20Z",
+                "Red x Blue", epoch(2026, 10, 16, 1), epoch(2026, 10, 16, 8, 13, 20),
+            ),
+        )
+        for label, name, start, end in cases:
+            with self.subTest(label=label):
+                result = self.parse(label, family="league_event", category="|NA| USA MLB")
+                self.assertEqual(result.name, name)
+                self.assertEqual(result.start_epoch, start)
+                self.assertEqual(result.explicit_end_epoch, end)
+                self.assertEqual(result.timing_status, "scheduled")
+
+    def test_labeled_ranges_reject_invalid_endpoints_and_remove_stop_labels(self):
+        for start, end in (
+            ("2026-10-16 08:00:00", "2026-10-16 01:00:00"),
+            ("2026-10-16 01:00:00", "2026-10-16 01:00:00"),
+            ("2026-10-16 01:00:00", "2026-10-18 01:00:01"),
+            ("2026-10-16 01:00:00", "2026-10-16 25:00:00"),
+        ):
+            with self.subTest(start=start, end=end):
+                result = self.parse(
+                    f"MLB 02 | Red x Blue start:{start} stop:{end}",
+                    family="league_event", category="|NA| USA MLB",
+                )
+                self.assertEqual(result.name, "Red x Blue")
+                self.assertEqual(result.timing_status, "invalid")
+                self.assertIsNone(result.start_epoch)
+                self.assertIsNone(result.explicit_end_epoch)
+        boundary = self.parse(
+            "MLB02| Red x Blue start:2026-10-16 01:00:00 end:2026-10-18 01:00:00",
+            family="league_event", category="|NA| USA MLB",
+        )
+        self.assertEqual(boundary.explicit_end_epoch - boundary.start_epoch, 48 * 3600)
+
+    def test_labeled_ranges_never_override_unknown_zones_or_conflicting_dates(self):
+        for label in (
+            "MLB02| Red x Blue start:2026-10-16 01:00:00 PST stop:2026-10-16 08:00:00",
+            "MLB02| Red x Blue start:2026-10-16 01:00:00 stop:2026-10-16 08:00:00 JST",
+            "MLB02| Red x Blue start:2026-10-16 01:00:00 stop:2026-10-16 08:00:00 (2026-10-16 09:00:00)",
+        ):
+            with self.subTest(label=label):
+                result = self.parse(label, family="league_event", category="|NA| USA MLB")
+                self.assertIsNone(result.start_epoch)
+                self.assertIsNone(result.explicit_end_epoch)
+                self.assertNotRegex(result.name.casefold(), r"\b(?:start|stop|end)\s*:?")
+        unmarked = self.parse(
+            "MLB02| Red x Blue 2026-10-16 01:00:00 stop:2026-10-16 08:00:00",
+            family="league_event", category="|NA| USA MLB",
+        )
+        self.assertIsNone(unmarked.start_epoch)
+        unknown = self.parse(
+            "AU: Red x Blue start:2026-10-16 01:00:00 stop:2026-10-16 08:00:00"
+        )
+        self.assertIsNone(unknown.start_epoch)
+        self.assertEqual(unknown.timing_evidence, "unknown_timezone")
+
     def test_nfl_clock_without_a_date_never_gets_a_scheduled_epoch(self):
         result = self.parse("NFL |01-TNF 8:15pm Eagles at Bears", family="league_event", category="NFL")
         self.assertEqual(result.name, "TNF 8:15pm Eagles at Bears")

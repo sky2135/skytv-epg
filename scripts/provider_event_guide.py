@@ -49,6 +49,7 @@ _END_CLOCK_12 = re.compile(
     rf"^\s*(?:[-–—]|to|until|->)\s*{_CLOCK_12}{_OPTIONAL_ZONE}(?=$|\s|[)\]])", re.I
 )
 _RANGE_SEPARATOR = re.compile(r"^\s*[)\]]?\s*(?:[-–—]|to|until|->)\s*[(\[]?\s*$", re.I)
+_LABELED_RANGE_SEPARATOR = re.compile(r"^\s*[)\]]?\s*(?:stop|end)\b\s*:?\s*[(\[]?\s*$", re.I)
 _UNSUPPORTED_ZONE = re.compile(r"^\s*(?:PST|PDT|MST|MDT|CST|CDT|PT|MT|CT|CET|CEST|BST|IST|AEST|AEDT|(?:ET|EST|EDT|GMT|UTC)[A-Z0-9_:+-]+)(?!\w)", re.I)
 _COUNTRY = r"US|USA|UK|GB|CA|CAN|CANADA|IN|INDIA|FR|DE|ES|NL|BR|LAT|PK|AU|NZ|UAE"
 _PREFIXES = (
@@ -57,7 +58,7 @@ _PREFIXES = (
     re.compile(r"^\(\s*(?:FLSP|FLO)\s+\d{1,4}\s*\)\s*[|:\-–—]*\s*", re.I),
     re.compile(rf"^(?:\[\s*(?:{_COUNTRY})\s*\]\s*|(?:{_COUNTRY})\s*(?:[|:]|\s[-–—])\s*)", re.I),
     re.compile(r"^(?:(?:US|USA)\s+)?ESPN\s*(?:\+|PLAY)?\s*\d{1,4}\s*[|:\-–—]\s*", re.I),
-    re.compile(r"^(?:NFL|NBA|WNBA|NHL|MLB|MLS|UEFA|CFL|CHL|UFC|WWE)\s*(?:\|\s*)?\d{1,3}\s*[-–—:]\s*", re.I),
+    re.compile(r"^(?:NFL|NBA|WNBA|NHL|MLB|MLS|UEFA|CFL|CHL|UFC|WWE)\s*(?:\|\s*)?\d{1,3}\s*[-–—:|]\s*", re.I),
     re.compile(r"^(?:DAZN\+?|NETFLIX)\s+PPV\s+\d{1,3}\s*[-–—:]\s*", re.I),
     re.compile(r"^BTN\+\s*\d{1,3}\s+(?:4K|UHD|FHD|HD|SD)\s*(?:\(D\))?\s*:\s*(?:B1G\+\s*\|\s*)?", re.I),
     re.compile(r"^(?:FLO\s+\d{1,4}|(?:PPV\s+)?(?:LIVE\s+)?EVENT(?:\s*(?:NO\.?|#)?\s*\d+)?)\s*[|:\-–—]*\s*", re.I),
@@ -237,7 +238,20 @@ def parse_provider_event(
     if len(matches) == 1:
         tail = text[matches[0][0].end():]
         clock_end = _END_CLOCK.match(tail) or _END_CLOCK_12.match(tail)
-    is_range = len(matches) == 2 and _RANGE_SEPARATOR.fullmatch(text[matches[0][0].end():matches[1][0].start()]) is not None
+    has_start_label = bool(matches and re.search(
+        r"\bstart\s*:\s*$", text[:matches[0][0].start()], re.I
+    ))
+    labeled_range = bool(
+        len(matches) == 2 and has_start_label
+        and _LABELED_RANGE_SEPARATOR.fullmatch(
+            text[matches[0][0].end():matches[1][0].start()]
+        )
+    )
+    is_range = bool(len(matches) == 2 and (
+        labeled_range or _RANGE_SEPARATOR.fullmatch(
+            text[matches[0][0].end():matches[1][0].start()]
+        )
+    ))
     name_text = text
     if clock_end is not None:
         name_text = name_text[:matches[0][0].end()] + " " + name_text[matches[0][0].end() + clock_end.end():]
@@ -247,6 +261,8 @@ def parse_provider_event(
     else:
         for match, _kind in reversed(matches):
             prefix = re.sub(r"\bstart\s*:\s*$", "", name_text[:match.start()], flags=re.I)
+            if has_start_label and match is not matches[0][0]:
+                prefix = re.sub(r"\b(?:stop|end)\s*:?\s*$", "", prefix, flags=re.I)
             name_text = prefix + " " + name_text[match.end():]
     name = _clean_name(name_text, had_date=bool(matches))
     normalized_name = name.casefold()
@@ -270,7 +286,7 @@ def parse_provider_event(
     league_eastern = family == "league_event" and bool(re.match(r"^(?:NFL|NBA|WNBA|NHL|MLB|MLS|CFL|CHL)\b", name_text, re.I))
     decoded = []
     for match, kind in matches:
-        if _unknown_zone_after(text[match.end():]):
+        if not (labeled_range and match is matches[0][0]) and _unknown_zone_after(text[match.end():]):
             return ProviderEventGuide(name, timing_evidence="unknown_timezone")
         legacy_parenthesized = kind == "short" or (kind == "iso" and text[:match.start()].rstrip().endswith("(") and text[match.end():].lstrip().startswith(")"))
         allow_eastern = not australian_play and (legacy_parenthesized or route_eastern or category_eastern or league_eastern or family in _KNOWN_EASTERN_FAMILIES)
