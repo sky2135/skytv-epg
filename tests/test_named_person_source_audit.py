@@ -229,39 +229,36 @@ class NamedPersonSourceAuditTests(unittest.TestCase):
                 self.assertIn(subject, by_name)
                 self.assertEqual(by_name[subject]["role"], role)
 
-    def test_current_inventory_people_are_all_covered_by_the_audit(self) -> None:
-        classified: list[tuple[str, str]] = []
-        reviewed_exact: list[tuple[str, str]] = []
-        for path in sorted((REPO_ROOT / "mappings").glob("*_final_mapping.csv")):
-            with path.open(encoding="utf-8-sig", newline="") as handle:
-                for row in csv.DictReader(handle):
-                    role, raw_subject = subjects.classify_person_subject(
-                        row["category_name"], row["channel_name"]
-                    )
-                    if not raw_subject:
-                        continue
-                    subject = subjects.canonical_name(raw_subject)
-                    subject_key = subjects.slugify(subject)
-                    classified.append((role, subject_key))
-                    exact_key = (
-                        subjects.clean(row["category_name"]).casefold(),
-                        subjects.clean(row["channel_name"]).casefold(),
-                    )
-                    if exact_key in subjects.REVIEWED_EXACT_PERSON_CHANNELS:
-                        reviewed_exact.append((role, subject_key))
-
-        self.assertEqual(len(classified), 231)
-        self.assertEqual(len({subject_key for _role, subject_key in classified}), 220)
-        self.assertEqual(len(reviewed_exact), 42)
-        self.assertEqual(
-            len({subject_key for _role, subject_key in reviewed_exact}), 33
+    def test_synthetic_subject_examples_resolve_to_reviewed_audit_identities(self) -> None:
+        # Invented labels exercise the supported syntax and exact corrections.
+        # The public portrait audit must not require provider inventory exports.
+        examples = (
+            ("Bollywood Singers 24/7", "HINDI-SINGER ARJIT SINGH SONGS HD", "singer", "Arijit Singh"),
+            ("PUNJABI SINGERS 24/7", "PUNJABI-SINGER GURUR RANDHAWA HD", "singer", "Guru Randhawa"),
+            ("PAKISTANI SINGERS 24/7", "PAKISTANI SINGER | ALI FAZAR HD", "singer", "Ali Zafar"),
+            ("Bollywood Movies/Actors 24/7", "HINDI-ACTOR HRTHIK ROSHAN MOVIES HD", "actor", "Hrithik Roshan"),
         )
-
         audit_by_key = {row["subject_key"]: row for row in self.rows}
-        for role, subject_key in classified:
-            with self.subTest(subject_key=subject_key):
+        for category, channel, expected_role, expected_name in examples:
+            with self.subTest(subject=expected_name):
+                role, raw_subject = subjects.classify_person_subject(category, channel)
+                self.assertEqual(role, expected_role)
+                canonical = subjects.canonical_name(raw_subject)
+                self.assertEqual(canonical, expected_name)
+                subject_key = subjects.slugify(canonical)
                 self.assertIn(subject_key, audit_by_key)
                 self.assertEqual(audit_by_key[subject_key]["role"], role)
+
+    def test_unreviewed_synthetic_person_has_no_approved_portrait_identity(self) -> None:
+        role, raw_subject = subjects.classify_person_subject(
+            "Bollywood Movies/Actors 24/7", "HINDI-ACTOR UNREVIEWED EXAMPLE PERSON MOVIES HD"
+        )
+        self.assertEqual(role, "actor")
+        unknown_key = subjects.slugify(subjects.canonical_name(raw_subject))
+        self.assertNotIn(unknown_key, {row["subject_key"] for row in self.rows})
+        with CATALOG_PATH.open(encoding="utf-8-sig", newline="") as handle:
+            portraits = [row for row in csv.DictReader(handle) if row["asset_kind"] == "person_photo"]
+        self.assertNotIn(unknown_key, {subjects.slugify(row["subject_name"]) for row in portraits})
 
 
 if __name__ == "__main__":
