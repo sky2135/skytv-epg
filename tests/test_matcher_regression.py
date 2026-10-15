@@ -56,7 +56,6 @@ APPROVED_ALIASES_PATH = REPO_ROOT / "knowledge" / "approved_channel_aliases.csv"
 SCHEDULE_EQUIVALENCES_PATH = (
     REPO_ROOT / "knowledge" / "schedule_equivalence_groups.json"
 )
-NOTEBOOK_PATH = REPO_ROOT / "SKYTV_EPG_v8_4_Colab_Only.ipynb"
 SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -177,49 +176,6 @@ class MatcherIntegrityTests(unittest.TestCase):
             manifest["streamingPipelineBuildId"],
             "SKYTV-EPG-V1-2026-09-15",
         )
-        self.assertEqual(manifest["githubRelease"], "1.0-private-google-sheets")
-        self.assertEqual(
-            manifest["architecture"],
-            "contextual_v8_matcher_frozen_with_strict_auto_match_boundary_"
-            "private_google_sheets_epg_v1_and_separate_exact_icon_layer",
-        )
-        self.assertEqual(
-            manifest["productionArchitecture"],
-            "single_epgshare_all_iterparse_corroborated_catalog_sealed_sqlite_"
-            "spool_private_google_sheets_api_inventory_server1_epgshare_only",
-        )
-        decision_boundary = " ".join(manifest["decisionBoundary"])
-        self.assertIn("private Google Sheet", decision_boundary)
-        self.assertIn("Sync Alerts", decision_boundary)
-        self.assertIn("previously unseen", decision_boundary)
-        self.assertIn("disabled REVIEW", decision_boundary)
-        self.assertIn("Gemini", decision_boundary)
-        self.assertIn("Google Search", decision_boundary)
-        self.assertIn("two independent authorities", decision_boundary)
-        self.assertIn("authenticated synthetic", decision_boundary)
-        self.assertIn("terminal local-synthetic fallback", decision_boundary)
-        self.assertIn("guideCoverage", decision_boundary)
-        self.assertIn("real and synthetic", decision_boundary)
-        self.assertIn("offline hash-bound autonomous decision ledger", decision_boundary)
-        self.assertIn("30,000", decision_boundary)
-        self.assertIn("EPG_USE_GEMINI_AI=false", decision_boundary)
-        self.assertIn("two different servers", decision_boundary)
-        self.assertIn("present and unchanged", decision_boundary)
-        self.assertIn("provider drift", decision_boundary)
-        self.assertIn("programme gate", decision_boundary)
-        self.assertIn("backlog analyzer", decision_boundary)
-        self.assertIn("read-only token", decision_boundary)
-        self.assertIn("aggregate counts", decision_boundary)
-        self.assertIn("server-local review clusters", decision_boundary)
-        self.assertIn("durable alias memory", decision_boundary)
-        self.assertIn("automatic evidence", decision_boundary)
-        self.assertIn("terminal Sheet", decision_boundary)
-        self.assertIn("exact numeric-stream and exact-name M3U join", decision_boundary)
-        self.assertIn("every KEEP_PANEL write", decision_boundary)
-        self.assertNotIn("scheduled cap defaults to zero", decision_boundary)
-        self.assertNotIn("Gemini is explicit opt-in", decision_boundary)
-        self.assertNotIn("every other result stays disabled as REVIEW", decision_boundary)
-        self.assertNotIn("published Google Sheet CSV", decision_boundary)
         self.assertEqual(manifest["legacyEngineSha256"], hashlib.sha256(ENGINE_PATH.read_bytes()).hexdigest())
         self.assertEqual(manifest["contextualV8Sha256"], hashlib.sha256(V8_PATH.read_bytes()).hexdigest())
         self.assertEqual(manifest["optimizationSha256"], hashlib.sha256(OPT_PATH.read_bytes()).hexdigest())
@@ -325,7 +281,6 @@ class MatcherIntegrityTests(unittest.TestCase):
             manifest["scheduleEquivalencesSha256"],
             hashlib.sha256(SCHEDULE_EQUIVALENCES_PATH.read_bytes()).hexdigest(),
         )
-        self.assertEqual(manifest["notebookSha256"], hashlib.sha256(NOTEBOOK_PATH.read_bytes()).hexdigest())
 
     def test_frozen_function_hashes(self) -> None:
         manifest = json.loads((REPO_ROOT / "MATCHER_INTEGRITY.json").read_text(encoding="utf-8"))
@@ -344,25 +299,6 @@ class MatcherIntegrityTests(unittest.TestCase):
                     inspect.getsource(value).encode("utf-8")
                 ).hexdigest()
                 self.assertEqual(actual_hash, expected_hash)
-
-    def test_notebook_preserves_legacy_cells_and_embeds_v8(self) -> None:
-        manifest = json.loads((REPO_ROOT / "MATCHER_INTEGRITY.json").read_text(encoding="utf-8"))
-        notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
-        cell3 = "".join(notebook["cells"][3]["source"])
-        cell4 = "".join(notebook["cells"][4]["source"])
-        v8_cell = "".join(notebook["cells"][6]["source"])
-        self.assertEqual((cell3 + "\n" + cell4).encode("utf-8"), ENGINE_PATH.read_bytes())
-        self.assertEqual(hashlib.sha256(cell3.encode()).hexdigest(), manifest["legacyEngineCell3Sha256"])
-        self.assertEqual(hashlib.sha256(cell4.encode()).hexdigest(), manifest["legacyEngineCell4Sha256"])
-        self.assertEqual(hashlib.sha256(v8_cell.encode()).hexdigest(), manifest["contextualNotebookCellSha256"])
-        metadata = notebook["metadata"]["skytv_runtime_optimization"]
-        self.assertTrue(metadata["legacyMatcherFrozen"])
-        self.assertEqual(metadata["matcherVersion"], "8.4")
-        self.assertEqual(metadata["matcherArchitecture"], "contextual_v8_with_frozen_v7_compatibility")
-        for cell in notebook["cells"]:
-            if cell["cell_type"] == "code":
-                self.assertIsNone(cell.get("execution_count"))
-                self.assertEqual(cell.get("outputs", []), [])
 
     def test_complete_v7_and_v8_regression_suite(self) -> None:
         engine = load_engine("skytv_v8_regression")

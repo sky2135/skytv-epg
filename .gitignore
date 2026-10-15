@@ -17,3 +17,6 @@ public/logos/
 public/index.html
 public/.nojekyll
 /assets/logos/generated/people/*.tmp
+/mappings/*_final_mapping.csv
+/state/last_success.json
+/SKYTV_EPG_v8_4_Colab_Only.ipynb
