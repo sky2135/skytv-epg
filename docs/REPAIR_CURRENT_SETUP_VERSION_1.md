@@ -78,6 +78,46 @@ cause XML/text catalog comparison to fail. A credential problem is reported
 separately as HTTP 401 or invalid credentials. Ask the provider for HTTPS when
 available, but do not rotate a password merely to fix this catalog error.
 
+## If the build reports an unsafe panel redirect
+
+An error immediately after `server_2 native panel transport is unencrypted`
+comes from the Server 2 native XMLTV download. It is separate from the snapshot
+row guards and the EPGShare selection spool. The HTTP warning alone does not
+cause the failure.
+
+The builder follows redirects on the configured panel hostname (including port
+changes) unless they downgrade HTTPS to HTTP. It also permits HTTPS
+`epg.irathomas08.com` and `epg-xml.treertt.xyz` through a separate session without
+account parameters, cookies, or inherited authentication. Other external destinations, external HTTP,
+embedded URL credentials, and malformed redirects are rejected.
+`ALLOW_INSECURE_PANEL_HTTP=true` does not extend that redirect permission.
+
+The October 15, 2026 Server 2 failure used commit `f0c6edd`. Its provider now
+redirects XMLTV to HTTPS `epg-xml.treertt.xyz`, which was absent from that commit's
+exact-host list. A credential-free request to the provider confirmed the redirect;
+a separate credential-free request to the destination returned HTTP 200 and an
+XMLTV prefix. Adding only that exact hostname repairs this rejection. The full
+authenticated production build must still pass its normal XMLTV and publication
+validation after the change reaches `main`.
+
+The current builder reports the server, redirect hop, HTTP status, and a fixed
+rejection reason without printing the destination URL. For a failure from an
+older commit that says only `Panel returned an unsafe redirect`, first capture
+the rejection reason using the updated builder. Re-running the old commit keeps
+the old diagnostics; use a new run on the commit containing the change.
+
+Check the provider's current base address against `SERVER_2_BASE_URL` in the
+repository's Actions secrets. A changed provider endpoint needs a verified
+address; a separate public guide host needs review before an exact-host
+exception is added. Do not disable redirect or TLS checks, or turn redirect
+rejections into temporary-outage synthetic fallbacks.
+
+For investigation, retain the failed run link, commit SHA, and rejection reason.
+If needed, share only the configured and destination origins (scheme, hostname,
+and port), privately. Never post raw `Location` headers, URL paths, query strings,
+usernames, passwords, or tokens: providers can reflect account credentials in
+those values. This failure alone is not evidence that a password needs rotation.
+
 ## Install the repaired files
 
 1. Download and extract the repaired Version 1 ZIP.

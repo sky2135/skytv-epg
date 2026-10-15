@@ -3305,6 +3305,9 @@ PANEL_CREDENTIALLESS_REDIRECT_HOSTS = frozenset(
         # HTTPS and serves the feed without account parameters.  Keep this
         # explicit rather than trusting arbitrary cross-host redirects.
         "epg.irathomas08.com",
+        # Server 2's current public XMLTV location, verified on 2026-10-15
+        # to return XMLTV over HTTPS without account credentials.
+        "epg-xml.treertt.xyz",
     }
 )
 PANEL_ACCEPT_HEADER = (
@@ -3321,6 +3324,13 @@ class PanelCredentiallessAuth(requests.auth.AuthBase):
         return request
 
 
+class UnsafePanelRedirect(BuildError):
+    """A fixed diagnostic reason, never provider-controlled URL text."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"Panel returned an unsafe redirect ({reason}).")
+
+
 def panel_hostname_key(value: object) -> str:
     """Return a DNS-safe comparison key without Unicode case folding."""
 
@@ -3328,8 +3338,10 @@ def panel_hostname_key(value: object) -> str:
     # Requests converts Unicode hostnames to IDNA before connecting.  Unicode
     # casefolding here would conflate distinct DNS names (for example, ``ss``
     # and a sharp-s label) before that conversion and could leak credentials.
-    if not host or not host.isascii():
-        raise BuildError("Panel returned an unsafe redirect.")
+    if not host:
+        raise UnsafePanelRedirect("missing hostname")
+    if not host.isascii():
+        raise UnsafePanelRedirect("non-ASCII hostname")
     return host.lower()
 
 
@@ -3350,13 +3362,16 @@ def panel_redirect_target(
     """
 
     if not str(location or "").strip():
-        raise BuildError("Panel returned an unsafe redirect.")
+        raise UnsafePanelRedirect("missing Location header")
     try:
         parsed = urlparse(urljoin(current_url, str(location).strip()))
+    except (TypeError, ValueError):
+        raise UnsafePanelRedirect("malformed URL or authority") from None
+    try:
         # Accessing ``port`` validates malformed or out-of-range port text.
         _port = parsed.port
     except (TypeError, ValueError):
-        raise BuildError("Panel returned an unsafe redirect.") from None
+        raise UnsafePanelRedirect("invalid port") from None
 
     scheme = parsed.scheme.casefold()
     host = panel_hostname_key(parsed.hostname)
@@ -3364,19 +3379,20 @@ def panel_redirect_target(
     # Xtream providers commonly redirect between service ports on one exact
     # hostname.  That hostname already received the authenticated request, so
     # its ports share the panel trust boundary; another hostname never does.
-    if scheme not in {"http", "https"} or parsed.username or parsed.password:
-        raise BuildError("Panel returned an unsafe redirect.")
+    if scheme not in {"http", "https"}:
+        raise UnsafePanelRedirect("unsupported scheme")
+    if parsed.username or parsed.password:
+        raise UnsafePanelRedirect("embedded credentials")
     same_host = host == trusted_host
     if same_host:
         if original_scheme.casefold() == "https" and scheme != "https":
-            raise BuildError("Panel returned an unsafe redirect.")
-    elif (
-        scheme != "https"
-        or host not in PANEL_CREDENTIALLESS_REDIRECT_HOSTS
-    ):
+            raise UnsafePanelRedirect("HTTPS downgrade")
+    elif scheme != "https":
         # Credentials and cookies are withheld even from an HTTPS external
         # target.  Never follow an external redirect over plaintext HTTP.
-        raise BuildError("Panel returned an unsafe redirect.")
+        raise UnsafePanelRedirect("external HTTP redirect is forbidden")
+    elif host not in PANEL_CREDENTIALLESS_REDIRECT_HOSTS:
+        raise UnsafePanelRedirect("unapproved external hostname")
     return parsed._replace(query="", fragment="").geturl(), same_host
 
 
@@ -3434,12 +3450,22 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                     if response.status_code not in PANEL_REDIRECT_STATUSES:
                         break
                     location = response.headers.get("Location", "")
-                    next_url, send_credentials = panel_redirect_target(
-                        request_url,
-                        location,
-                        original_host=original_host,
-                        original_scheme=original_scheme,
-                    )
+                    try:
+                        next_url, send_credentials = panel_redirect_target(
+                            request_url,
+                            location,
+                            original_host=original_host,
+                            original_scheme=original_scheme,
+                        )
+                    except UnsafePanelRedirect as exc:
+                        # The exception contains only a fixed reason. Never add
+                        # Location or any parsed URL component: even a hostname
+                        # or path can contain reflected panel credentials.
+                        raise BuildError(
+                            f"{server_id} panel redirect hop "
+                            f"{_redirect_number + 1} "
+                            f"(HTTP {response.status_code}): {exc}"
+                        ) from None
                     close_panel_transport(response)
                     response = None
                     request_url = next_url

@@ -694,6 +694,73 @@ class MappingContractTests(unittest.TestCase):
         panel_session.close.assert_called_once()
         clean_session.close.assert_called_once()
 
+    def test_panel_download_follows_current_server_2_public_xmltv_without_credentials(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "http://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+            "ALLOW_INSECURE_PANEL_HTTP": "TRUE",
+        }
+        payload = b'<?xml version="1.0"?><tv/>'
+        redirected = mock.MagicMock()
+        redirected.status_code = 302
+        redirected.headers = {
+            "Location": (
+                "https://epg-xml.treertt.xyz/xmltv.php"
+                "?username=reflected&password=reflected#discarded"
+            )
+        }
+        downloaded = mock.MagicMock()
+        downloaded.status_code = 200
+        downloaded.headers = {}
+        downloaded.iter_content.return_value = [payload]
+        panel_session = mock.MagicMock()
+        panel_session.headers = {}
+        panel_session.get.return_value = redirected
+        clean_session = mock.MagicMock()
+        clean_session.headers = {}
+        clean_session.get.return_value = downloaded
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests,
+                "Session",
+                side_effect=[panel_session, clean_session],
+            ), mock.patch("builtins.print"):
+                returned, details = runner.download_panel_xmltv(
+                    "server_2", destination
+                )
+            self.assertEqual(returned, destination)
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(details["bytes"], len(payload))
+
+        panel_session.get.assert_called_once()
+        self.assertEqual(
+            panel_session.get.call_args.args[0],
+            "http://panel.example/provider/xmltv.php",
+        )
+        self.assertEqual(
+            panel_session.get.call_args.kwargs["params"],
+            {"username": "fixture-user", "password": "fixture-password"},
+        )
+        clean_session.get.assert_called_once()
+        self.assertEqual(
+            clean_session.get.call_args.args[0],
+            "https://epg-xml.treertt.xyz/xmltv.php",
+        )
+        self.assertIsNone(clean_session.get.call_args.kwargs["params"])
+        self.assertFalse(clean_session.get.call_args.kwargs["allow_redirects"])
+        self.assertIsInstance(clean_session.auth, runner.PanelCredentiallessAuth)
+        self.assertNotIn("Cookie", clean_session.headers)
+        self.assertNotIn("Authorization", clean_session.headers)
+        redirected.close.assert_called_once()
+        downloaded.close.assert_called_once()
+        panel_session.close.assert_called_once()
+        clean_session.close.assert_called_once()
+
     def test_panel_download_rejects_unapproved_host_and_https_downgrade_redirects(self) -> None:
         cases = (
             (
@@ -748,6 +815,165 @@ class MappingContractTests(unittest.TestCase):
                 self.assertEqual(session.get.call_count, 1)
             response.close.assert_called_once()
             session.close.assert_called_once()
+
+    def test_panel_redirect_diagnostics_classify_rejections_without_url_text(self) -> None:
+        private_suffix = (
+            "/fixture-path?username=fixture-user&password=fixture-password"
+            "&fixture-query=value#fixture-fragment"
+        )
+        cases = (
+            ("", "missing Location header"),
+            (" \t", "missing Location header"),
+            (
+                "https://[fixture-password" + private_suffix,
+                "malformed URL or authority",
+            ),
+            (
+                "https://fixture-host:fixture-password" + private_suffix,
+                "invalid port",
+            ),
+            ("https://fixture-host:65536" + private_suffix, "invalid port"),
+            ("https://:8443" + private_suffix, "missing hostname"),
+            ("https://straße.de" + private_suffix, "non-ASCII hostname"),
+            ("ftp://panel.example" + private_suffix, "unsupported scheme"),
+            (
+                "https://fixture-user:fixture-password@panel.example"
+                + private_suffix,
+                "embedded credentials",
+            ),
+            ("http://panel.example" + private_suffix, "HTTPS downgrade"),
+            (
+                "http://epg.irathomas08.com" + private_suffix,
+                "external HTTP redirect is forbidden",
+            ),
+            (
+                "http://epg-xml.treertt.xyz" + private_suffix,
+                "external HTTP redirect is forbidden",
+            ),
+            (
+                "https://fixture-user.fixture-password.example" + private_suffix,
+                "unapproved external hostname",
+            ),
+            (
+                "https://epg.irathomas08.com.fixture-host.example" + private_suffix,
+                "unapproved external hostname",
+            ),
+            (
+                "https://epg-xml.treertt.xyz.fixture-host.example" + private_suffix,
+                "unapproved external hostname",
+            ),
+        )
+        credentials = {
+            "SERVER_2_BASE_URL": "https://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+        }
+        for location, reason in cases:
+            with self.subTest(reason=reason, location=location):
+                response = mock.MagicMock()
+                response.status_code = 302
+                response.headers = {"Location": location}
+                session = mock.MagicMock()
+                session.headers = {}
+                session.get.return_value = response
+                with tempfile.TemporaryDirectory() as temporary:
+                    destination = Path(temporary) / "panel.xmltv"
+                    with mock.patch.dict(
+                        runner.os.environ, credentials, clear=True
+                    ), mock.patch.object(
+                        runner.requests, "Session", return_value=session
+                    ), mock.patch.object(runner.time, "sleep") as sleep:
+                        with self.assertRaises(runner.BuildError) as caught:
+                            runner.download_panel_xmltv("server_2", destination)
+                    self.assertEqual(
+                        str(caught.exception),
+                        "server_2 panel redirect hop 1 (HTTP 302): "
+                        f"Panel returned an unsafe redirect ({reason}).",
+                    )
+                    self.assertNotIsInstance(
+                        caught.exception, runner.PanelSourceUnavailable
+                    )
+                    self.assertFalse(destination.exists())
+                    self.assertFalse(
+                        destination.with_suffix(destination.suffix + ".part").exists()
+                    )
+                    sleep.assert_not_called()
+                # Reject the first response before another request or retry can
+                # transmit credentials, and close the original transport.
+                session.get.assert_called_once()
+                response.close.assert_called_once()
+                session.close.assert_called_once()
+
+    def test_panel_redirect_diagnostics_report_the_rejected_hop(self) -> None:
+        credentials = {
+            "SERVER_3_BASE_URL": "https://panel.example/provider",
+            "SERVER_3_USERNAME": "fixture-user",
+            "SERVER_3_PASSWORD": "fixture-password",
+        }
+        first = mock.MagicMock()
+        first.status_code = 301
+        first.headers = {"Location": "/fixture-path"}
+        rejected = mock.MagicMock()
+        rejected.status_code = 307
+        rejected.headers = {
+            "Location": (
+                "https://fixture-user.fixture-password.example/fixture-path"
+                "?username=fixture-user&password=fixture-password#fixture-fragment"
+            )
+        }
+        session = mock.MagicMock()
+        session.headers = {}
+        session.get.side_effect = [first, rejected]
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests, "Session", return_value=session
+            ):
+                with self.assertRaises(runner.BuildError) as caught:
+                    runner.download_panel_xmltv("server_3", destination)
+            self.assertEqual(
+                str(caught.exception),
+                "server_3 panel redirect hop 2 (HTTP 307): "
+                "Panel returned an unsafe redirect (unapproved external hostname).",
+            )
+            self.assertFalse(destination.exists())
+        self.assertEqual(session.get.call_count, 2)
+        first.close.assert_called_once()
+        rejected.close.assert_called_once()
+        session.close.assert_called_once()
+
+    def test_panel_http_opt_in_cannot_authorize_external_http_redirect(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "http://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+            "ALLOW_INSECURE_PANEL_HTTP": "TRUE",
+        }
+        response = mock.MagicMock()
+        response.status_code = 302
+        response.headers = {
+            "Location": "http://epg-xml.treertt.xyz/fixture-path"
+        }
+        session = mock.MagicMock()
+        session.headers = {}
+        session.get.return_value = response
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests, "Session", return_value=session
+            ), mock.patch("builtins.print"):
+                with self.assertRaisesRegex(
+                    runner.BuildError, "external HTTP redirect is forbidden"
+                ):
+                    runner.download_panel_xmltv("server_2", destination)
+            self.assertFalse(destination.exists())
+        session.get.assert_called_once()
+        response.close.assert_called_once()
+        session.close.assert_called_once()
 
     def test_panel_download_stops_after_bounded_same_host_redirects(self) -> None:
         credentials = {

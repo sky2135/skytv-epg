@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "createdUtc": "2026-07-21T22:16:51.259933Z",
-  "updatedUtc": "2026-10-01T02:35:30Z",
+  "updatedUtc": "2026-10-15T14:29:43.762Z",
   "matcherVersion": "8.4",
   "matcherBuildId": "SKYTV-CONTEXTUAL-RULES-8.4-2026-07-19",
   "builderVersion": "7.1",
@@ -17,7 +17,7 @@
   "iconLayerSha256": "c42f1e651603d4cf57fbb5520995bb01f55d2139bc174d311abfbb52052bc285",
   "productionRunnerSha256": "56dbadde8360bd177adfebcbcbe4fecd80044b8c9d6dded3bb06ef9da4a49ea3",
   "legacyProductionRunnerSha256": "56dbadde8360bd177adfebcbcbe4fecd80044b8c9d6dded3bb06ef9da4a49ea3",
-  "streamingRunnerSha256": "48ccb63b22efd680d10794229194497a1301b3126671f4d29ba3a454c7040010",
+  "streamingRunnerSha256": "c316101f443b508ad6464b35a4cfdbc2dd2764700be3a215073716ee454bb88e",
   "providerEventSlotsSha256": "b92ac33aaa089a9d3890d17683e0b417ff2362ae54885dd182b1458a8d1cb2af",
   "iconOverrideGeneratorSha256": "18eaeb5a5d9a1645267675d53c9693b616df8141cbd64fb6f172bcea40fee58e",
   "brandLogoCatalogSha256": "6db26647eb234a13795a6432c6ec36605f60441c8c203b2de6d53a920c1ea833",
