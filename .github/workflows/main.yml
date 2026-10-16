@@ -1,13 +1,14 @@
 name: 2 - Build and publish EPG
+run-name: "Isolated VOD ingestion validation (${{ github.run_number }})"
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   probe:
-    name: Diagnose Server 2 VOD transport
+    name: Validate all provider VOD and app catalogs
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
     steps:
       - name: Check out diagnostic branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -20,10 +21,48 @@ jobs:
       - name: Install request library
         run: |
           python -m pip install --only-binary=:all: requests==2.32.5
-      - name: Check provider response status and schema only
+      - name: Build and validate all three live provider catalogs
+        shell: bash
         env:
+          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
           SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
           SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
           SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
+          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
           ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
-        run: python -u scripts/probe_provider_transport.py
+          PYTHONUNBUFFERED: '1'
+        run: |
+          set -euo pipefail
+          http_args=()
+          if [[ "$ALLOW_INSECURE_PANEL_HTTP" == "true" ]]; then
+            http_args+=(--allow-insecure-http)
+          fi
+          python -u scripts/build_vod_catalogs.py \
+            --output-dir .build/probe-public/VOD \
+            --snapshot-dir .build/probe-inputs \
+            "${http_args[@]}"
+          python -u scripts/build_vod_catalogs.py \
+            --output-dir .build/probe-public/VOD --validate-only \
+            --expected-server server_1 --expected-server server_2 --expected-server server_3
+          python -u scripts/build_skytvplayer_catalog.py \
+            --input-dir .build/probe-inputs \
+            --output-dir .build/probe-public/skytvplayer \
+            --cache-dir .build/probe-cache \
+            --fetch-series-details --max-series-requests 6 --max-tmdb-requests 60 \
+            "${http_args[@]}"
+          python -u scripts/build_skytvplayer_catalog.py \
+            --output-dir .build/probe-public/skytvplayer --validate-only \
+            --server server_1 --server server_2 --server server_3
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for name in ('VOD', 'skytvplayer'):
+              index = json.loads((Path('.build/probe-public') / name / 'index.json').read_text())
+              for server in index['servers']:
+                  print(f"{name} {server['serverId']}: {server['movieCount']:,} movies; {server['seriesCount']:,} series")
+          PY
