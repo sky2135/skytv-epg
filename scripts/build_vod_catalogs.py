@@ -46,6 +46,13 @@ MAX_CATALOG_DECOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_TEXT_LENGTH = 500
 MAX_ARTWORK_URL_LENGTH = 2_048
 REQUEST_TIMEOUT = (15, 90)
+# Use the same application identity as the existing EPG publisher. Some panels
+# reject the generic python-requests identity with HTTP 461, even for valid
+# accounts. Set this per request so catalog and episode-detail callers agree.
+PROVIDER_HEADERS = {
+    "User-Agent": "SKYTV-EPG-Builder/2.0",
+    "Accept": "application/json,text/plain,application/x-mpegURL,*/*",
+}
 
 SERVER_ID_RE = re.compile(r"server_([1-9][0-9]?)\Z")
 SAFE_ITEM_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,119}\Z")
@@ -342,7 +349,7 @@ def request_panel_json(
             response = session.get(
                 endpoint,
                 params=params,
-                headers={"Accept": "application/json"},
+                headers=dict(PROVIDER_HEADERS),
                 timeout=REQUEST_TIMEOUT,
                 allow_redirects=False,
                 stream=True,
@@ -366,7 +373,7 @@ def request_panel_json(
             )
         if response.status_code != 200:
             raise CatalogBuildError(
-                f"{config.server_id}: provider returned HTTP {response.status_code}."
+                f"{config.server_id}: {action} provider returned HTTP {response.status_code}."
             )
         header_length = response.headers.get("Content-Length", "")
         if header_length.isdigit() and int(header_length) > response_limit:
