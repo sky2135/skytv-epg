@@ -28,7 +28,7 @@
   "epgCatalogStreamSha256": "fa689355911de105f600952332daea25e75ae21db953339917533363abdfbd38",
   "epgSelectionSpoolSha256": "79dcc3ab6ac2c9c443e823d6b4188558b26835deec5c076a3ca831e24c1cdbd9",
   "sheetSeedExporterSha256": "c5530d0a2dd63c62b8ffafed102651859e0155fe9ba5b731d5ced1ab6e17d80b",
-  "workflowSha256": "7a2c7deed709879ddad8d37368e1fec7de340a6e4a3b8a6d6dbbb1e1aeafa26e",
+  "workflowSha256": "f4dd5e51011ddfd636fe29d4c6c0dfe82e594a80cef0b1b23e9202cdf311f949",
   "channelInventoryRunnerSha256": "9ab5071dbe4d1eecd395ad9b398e7b7b9a112d3d5db51a6968f3ffe31fef75bf",
   "channelInventoryWorkflowSha256": "4bbb9c036dad193e2a9e623bfbd8a88b63088769a06ce5181746d7ab8a16c160",
   "channelInventoryRequirementsSha256": "cb80ac4377fa3656ea135c65273fdc1b6ba7f5ce198f1f14ccb13de0e3ed593f",
@@ -61,7 +61,7 @@
   "providerPresentationSha256": "42a8153dde8eb1f7657cecdbd0a547339f54c52b2984b0765322d11c0a7eb9ff",
   "channelMetadataEnrichmentSha256": "cbfacb58c89a30be85840e70dcf330a47115cfa9a99e76fb95bd8de8afb2d854",
   "registryScheduleAliasesSha256": "168c00ed6d38b94bf8bb52676aa2ae7b7318b92bf0c0e38870af9d64a269f4a6",
-  "logoEnrichmentSha256": "9b64146850fedb247bd78b038836e2caf39ba8a9215172f07e83d6387d0a1466",
+  "logoEnrichmentSha256": "3232aaecf75fd6528baa3bf2bbf52f1513a104469be80cdda9912cecbdc359c6",
   "programmeDetailsSha256": "b815e7bfb69395b384f9726bc144814cea60b04a913f21f1b0d00200c13eab3b",
   "liveEnrichmentAuditSha256": "57679d496c58470729d081b43ad77e8d66a2b8712212c839070ad1d347fae6fe"
 }

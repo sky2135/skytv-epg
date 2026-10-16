@@ -775,6 +775,7 @@ jobs:
         shell: bash
         run: |
           python scripts/logo_enrichment.py \
+            --mapping-csv .build/channel-sync/effective_mapping.csv \
             --source-icon-catalog "$RUNNER_TEMP/skytv-epg-v1/source_icons.json" \
             --icon-config .build/channel-sync/channel_icons.csv \
             --cache .build/logo-cache/verification.json \

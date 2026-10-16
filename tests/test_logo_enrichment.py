@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import tempfile
@@ -85,6 +86,43 @@ class LogoEnrichmentTests(unittest.TestCase):
             results = logos.verify_logo_urls(["https://images.test/one.png"], max_checks=0)
         check.assert_not_called()
         self.assertEqual(results["https://images.test/one.png"]["status"], "unchecked")
+
+    def test_verification_budget_respects_input_priority_after_deduplication(self):
+        first, second = "https://images.test/z-selected.png", "https://images.test/a-source.png"
+        with mock.patch.object(logos, "check_logo_image", return_value={"status": "valid_image", "checkedAt": 100}) as check:
+            records = logos.verify_logo_urls([first, second, first], max_checks=1)
+        self.assertEqual(check.call_args.args[0], first)
+        self.assertEqual(records[first]["status"], "valid_image")
+        self.assertEqual(records[second]["status"], "unchecked")
+
+    def test_cli_inputs_prioritize_selected_overrides_and_filter_unused_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mapping, config, catalog = (root / name for name in ("mapping.csv", "config.csv", "source.json"))
+            with mapping.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=("server_id", "stream_id", "enabled", "action", "source", "epg_id", "channel_name", "logo_url"))
+                writer.writeheader()
+                writer.writerows([
+                    {"server_id": "server_1", "stream_id": "1", "enabled": "true", "action": "APPROVED", "source": "epgshare01", "epg_id": "Selected.us", "channel_name": "Selected", "logo_url": "https://images.test/y-mapping.png"},
+                    {"server_id": "server_2", "stream_id": "2", "enabled": "true", "action": "KEEP_PANEL", "source": "panel", "epg_id": "Panel.us", "channel_name": "Panel"},
+                    {"server_id": "server_1", "stream_id": "3", "enabled": "false", "action": "APPROVED", "source": "epgshare01", "epg_id": "Disabled.us"},
+                ])
+            with config.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=("enabled", "server_id", "stream_id", "icon_url", "local_file"))
+                writer.writeheader()
+                writer.writerows([
+                    {"enabled": "true", "server_id": "server_1", "stream_id": "1", "icon_url": "https://images.test/z-override.png"},
+                    {"enabled": "true", "server_id": "server_2", "stream_id": "2", "local_file": "generated/new-art.png"},
+                    {"enabled": "true", "server_id": "server_1", "stream_id": "3", "icon_url": "https://images.test/disabled.png"},
+                ])
+            catalog.write_text(json.dumps({"channel_records": [
+                {"epg_id": "Unused.us", "icon_url": "https://images.test/unused.png"},
+                {"epg_id": "Selected.us", "icon_url": "https://images.test/a-source.png"},
+                {"epg_id": "Panel.us", "icon_url": "https://images.test/wrong-panel.png"},
+            ]}))
+            urls = logos.collect_logo_verification_urls(catalog, icon_config=config, mapping_csv=mapping)
+        self.assertEqual(urls, ["https://images.test/z-override.png",
+                                "https://images.test/y-mapping.png", "https://images.test/a-source.png"])
 
     def test_temporary_dns_and_http_failures_do_not_discard_public_images(self):
         url = "https://images.test/channel.png"

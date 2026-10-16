@@ -339,7 +339,7 @@ def verify_logo_urls(
 ) -> dict[str, dict]:
     """Check each distinct public image once, reusing bounded positive/negative TTLs."""
     now = int(now_epoch if now_epoch is not None else time.time())
-    wanted = sorted({clean for url in urls if (clean := normalize_logo_url(url))})
+    wanted = list(dict.fromkeys(clean for url in urls if (clean := normalize_logo_url(url))))
     cached = load_logo_verification(cache_path)
     results, pending = {}, []
     for url in wanted:
@@ -375,20 +375,79 @@ def verify_logo_urls(
     return results
 
 
+def collect_logo_verification_urls(
+    source_icon_catalog: Path, *, icon_config: Path | None = None,
+    mapping_csv: Path | None = None,
+) -> list[str]:
+    """Prioritize selected external overrides and omit unused source channels."""
+    import csv
+    from collections import defaultdict
+    def enabled(row):
+        return str(row.get("enabled", "")).strip().casefold() in {"", "1", "true", "yes", "y", "on", "enabled"}
+    def source(row):
+        value = str(row.get("source", "")).strip().casefold()
+        feed = str(row.get("epg_feed", "")).strip().casefold()
+        return value or ("panel" if feed in {"panel", "server xmltv.php"}
+                         else "dummy" if feed == "dummy_channels" else "epgshare01")
+    selected = None
+    by_stream, by_epg, by_name = defaultdict(list), defaultdict(list), defaultdict(list)
+    source_ids: set[str] = set()
+    mapping_urls = []
+    if mapping_csv is not None:
+        with mapping_csv.open(encoding="utf-8-sig", newline="") as handle:
+            selected = [row for row in csv.DictReader(handle) if enabled(row)
+                        and str(row.get("action", "")).strip().upper() not in {
+                            "REVIEW", "UNMATCHED", "NO_EPG", "UNRESOLVED", "SKIP", "IGNORE", "REJECTED"}
+                        and str(row.get("epg_id", "")).strip()
+                        and not (str(row.get("server_id", "")).strip() == "server_1" and source(row) == "panel")]
+        for row in selected:
+            by_stream[str(row.get("stream_id", "")).strip()].append(row)
+            by_epg[str(row.get("epg_id", "")).strip().casefold()].append(row)
+            by_name[str(row.get("channel_name", "")).strip().casefold()].append(row)
+            mapping_urls.append(row.get("logo_url") or row.get("stream_icon") or "")
+            if source(row) in {"epgshare01", "epgshare"}:
+                source_ids.add(str(row["epg_id"]).strip())
+    urls = []
+    if icon_config is not None:
+        with icon_config.open(encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                if not enabled(row) or not row.get("icon_url", "").strip():
+                    # Local-file artwork is staged by this build and must not
+                    # be rejected because its public URL is not deployed yet.
+                    continue
+                if selected is not None:
+                    stream = str(row.get("stream_id", "")).strip()
+                    epg = str(row.get("epg_id", "")).strip().casefold()
+                    name = str(row.get("channel_name", "")).strip().casefold()
+                    server = str(row.get("server_id", "*")).strip() or "*"
+                    candidates = by_stream[stream] if stream else by_epg[epg] if epg else by_name[name]
+                    if not any(
+                        (server == "*" or server == candidate.get("server_id", "").strip())
+                        and (not stream or stream == candidate.get("stream_id", "").strip())
+                        and (not epg or epg == candidate.get("epg_id", "").strip().casefold())
+                        and (not name or name == candidate.get("channel_name", "").strip().casefold())
+                        for candidate in candidates
+                    ):
+                        continue
+                urls.append(row["icon_url"])
+    urls.extend(mapping_urls)
+    catalog = json.loads(source_icon_catalog.read_text(encoding="utf-8"))
+    urls.extend(record.get("icon_url", "") for record in catalog.get("channel_records", [])
+                if selected is None or record.get("epg_id") in source_ids)
+    return list(dict.fromkeys(clean for url in urls if (clean := normalize_logo_url(url))))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-icon-catalog", type=Path, required=True)
     parser.add_argument("--icon-config", type=Path)
+    parser.add_argument("--mapping-csv", type=Path)
     parser.add_argument("--cache", type=Path, required=True)
     parser.add_argument("--max-checks", type=int, default=2_000)
     parser.add_argument("--deadline-seconds", type=float, default=180)
     args = parser.parse_args()
-    catalog = json.loads(args.source_icon_catalog.read_text(encoding="utf-8"))
-    urls = [record.get("icon_url", "") for record in catalog.get("channel_records", [])]
-    if args.icon_config:
-        import csv
-        with args.icon_config.open(encoding="utf-8-sig", newline="") as handle:
-            urls.extend(row.get("icon_url", "") for row in csv.DictReader(handle))
+    urls = collect_logo_verification_urls(args.source_icon_catalog,
+        icon_config=args.icon_config, mapping_csv=args.mapping_csv)
     records = verify_logo_urls(urls, cache_path=args.cache, max_checks=args.max_checks,
                                deadline_seconds=args.deadline_seconds)
     from collections import Counter
