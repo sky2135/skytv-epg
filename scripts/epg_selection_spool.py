@@ -29,9 +29,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Sequence
 
+if __package__:
+    from .epg_programme_details import parse_details_json
+else:
+    from epg_programme_details import parse_details_json
 
-SPOOL_SCHEMA_VERSION = "1"
-SPOOL_WRITER_VERSION = "1.0"
+
+SPOOL_SCHEMA_VERSION = "2"
+SPOOL_WRITER_VERSION = "2.0"
 SPOOL_SOURCE_KEY = "epgshare01"
 MAX_SPOOL_BYTES = 6 * 1024 * 1024 * 1024
 MINIMUM_FREE_BYTES_AFTER_COPY = 512 * 1024 * 1024
@@ -64,6 +69,7 @@ CORE_TABLE_COLUMNS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "description",
             "categories_json",
             "quality",
+            "details_json",
         ),
         "epg_spool_requests": (
             "channel_key",
@@ -99,6 +105,7 @@ EXPECTED_TABLE_SIGNATURES: Mapping[
             ("description", "TEXT", 1, 0, 0),
             ("categories_json", "TEXT", 1, 0, 0),
             ("quality", "INTEGER", 1, 0, 0),
+            ("details_json", "TEXT", 1, 0, 0),
         ),
         "epg_spool_requests": (
             ("channel_key", "TEXT", 1, 1, 0),
@@ -160,6 +167,7 @@ def _schema_sql() -> str:
             description TEXT NOT NULL,
             categories_json TEXT NOT NULL,
             quality INTEGER NOT NULL,
+            details_json TEXT NOT NULL DEFAULT '{}',
             PRIMARY KEY (source_key, channel_key, start_epoch, stop_epoch, title)
         ) WITHOUT ROWID;
         CREATE TABLE epg_spool_requests (
@@ -272,7 +280,7 @@ def _logical_sha256(
         (
             "programme",
             "SELECT source_key, channel_key, start_epoch, stop_epoch, title, "
-            "subtitle, description, categories_json, quality FROM programmes "
+            "subtitle, description, categories_json, quality, details_json FROM programmes "
             "ORDER BY source_key COLLATE BINARY, channel_key COLLATE BINARY, "
             "start_epoch, stop_epoch, title COLLATE BINARY",
         ),
@@ -380,6 +388,11 @@ class EpgSelectionSpoolWriter:
         )
         if len(categories_json.encode("utf-8")) > MAX_TEXT_BYTES:
             raise SpoolError("Programme sink contains oversized categories.")
+        details_text = getattr(record, "details_json", "{}")
+        try:
+            parse_details_json(details_text)
+        except (TypeError, ValueError) as exc:
+            raise SpoolError("Programme sink contains invalid programme details.") from exc
         self._programme_batch.append(
             (
                 SPOOL_SOURCE_KEY,
@@ -391,6 +404,7 @@ class EpgSelectionSpoolWriter:
                 description,
                 categories_json,
                 quality,
+                details_text,
                 source_channel_id,
             )
         )
@@ -403,24 +417,29 @@ class EpgSelectionSpoolWriter:
         rows = [row[:-1] for row in self._programme_batch]
         self._connection.executemany(
             """
-            INSERT INTO programmes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO programmes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (
                 source_key, channel_key, start_epoch, stop_epoch, title
             ) DO UPDATE SET
                 subtitle = excluded.subtitle,
                 description = excluded.description,
                 categories_json = excluded.categories_json,
-                quality = excluded.quality
+                quality = excluded.quality,
+                details_json = excluded.details_json
             WHERE (
                 excluded.quality,
                 excluded.subtitle,
                 excluded.description,
-                excluded.categories_json
+                excluded.categories_json,
+                length(excluded.details_json),
+                excluded.details_json
             ) > (
                 programmes.quality,
                 programmes.subtitle,
                 programmes.description,
-                programmes.categories_json
+                programmes.categories_json,
+                length(programmes.details_json),
+                programmes.details_json
             )
             """,
             rows,
@@ -723,6 +742,7 @@ def _reject_invalid_cell_shapes(connection: sqlite3.Connection) -> None:
            OR typeof(title) != 'text' OR typeof(subtitle) != 'text'
            OR typeof(description) != 'text' OR typeof(categories_json) != 'text'
            OR typeof(quality) != 'integer'
+           OR typeof(details_json) != 'text'
            OR length(CAST(source_key AS BLOB)) NOT BETWEEN 1 AND 32
            OR length(CAST(channel_key AS BLOB)) NOT BETWEEN 1 AND 1200
            OR start_epoch NOT BETWEEN 0 AND 253402300799
@@ -732,6 +752,7 @@ def _reject_invalid_cell_shapes(connection: sqlite3.Connection) -> None:
            OR length(CAST(subtitle AS BLOB)) > 8000
            OR length(CAST(description AS BLOB)) > 16000
            OR length(CAST(categories_json AS BLOB)) > 32768
+           OR length(CAST(details_json AS BLOB)) > 32768
         """,
     )
     for query in checks:
@@ -880,7 +901,7 @@ def _validate_database_content(
         _clean_text(row[1], label="spool channel display name", maximum_bytes=8_000)
         _clean_text(row[2], label="spool channel icon URL", maximum_bytes=8_000)
     for row in connection.execute(
-        "SELECT title, subtitle, description, categories_json, quality FROM programmes"
+        "SELECT title, subtitle, description, categories_json, quality, details_json FROM programmes"
     ):
         title = _clean_text(row[0], label="spool programme title", maximum_bytes=8_000)
         if not title:
@@ -905,6 +926,10 @@ def _validate_database_content(
             raise SpoolError("The selection spool contains invalid categories.")
         if isinstance(row[4], bool) or not isinstance(row[4], int) or not 0 <= row[4] <= 10_000:
             raise SpoolError("The selection spool contains an invalid quality score.")
+        try:
+            parse_details_json(row[5])
+        except (TypeError, ValueError) as exc:
+            raise SpoolError("The selection spool contains invalid programme details.") from exc
 
     expected_requests = _bounded_int(
         manifest["requested_count"],

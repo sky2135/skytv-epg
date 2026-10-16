@@ -305,10 +305,10 @@ def write_episode_files(output: Path, server_id: str, series: list[dict], now: s
 def epg_references(epg_dir: Path | None, server_id: str) -> dict:
     result = {}
     if epg_dir:
-        for name, suffix in (("programme", "epg_v2"), ("metadata", "metadata")):
+        for name, suffix in (("programme", "epg"), ("metadata", "metadata"), ("programmeRich", "epg_v2")):
             path = epg_dir / f"{server_id}_{suffix}.json.gz"
-            if name == "programme" and not path.is_file():
-                path = epg_dir / f"{server_id}_epg.json.gz"
+            if name == "programmeRich" and not path.is_file():
+                continue
             if not path.is_file():
                 raise vod.CatalogBuildError(f"{server_id}: app EPG input is missing.")
             result[name] = {"file": f"../EPG/{path.name}", "sha256": vod.sha256_file(path),

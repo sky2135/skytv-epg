@@ -116,7 +116,7 @@ class SkytvPlayerCatalogTests(unittest.TestCase):
             source = app_source()
             source["get_vod_streams"][0]["name"] = f"Server {number} Film"
             sources.append((server_id, source, None))
-            for suffix in ("epg_v2", "metadata"):
+            for suffix in ("epg", "epg_v2", "metadata"):
                 (epg_dir / f"{server_id}_{suffix}.json.gz").write_bytes(gzip.compress(json.dumps({"serverId": server_id}).encode(), mtime=0))
         index = self.build(sources=sources, epg_dir=epg_dir)
         self.assertEqual(index["serverCount"], 3)
@@ -125,6 +125,8 @@ class SkytvPlayerCatalogTests(unittest.TestCase):
         all_ids = set()
         for number, entry in enumerate(index["servers"], 1):
             self.assertEqual(entry["serverId"], f"server_{number}")
+            self.assertEqual(entry["epg"]["programme"]["file"], f"../EPG/server_{number}_epg.json.gz")
+            self.assertEqual(entry["epg"]["programmeRich"]["file"], f"../EPG/server_{number}_epg_v2.json.gz")
             movies, manifest = self.catalog(entry, "movies")
             series, _ = self.catalog(entry, "series")
             self.assertEqual(movies[0]["title"], f"Server {number} Film")

@@ -225,8 +225,9 @@ The index's explicit EPG sibling references may point to `../EPG/`; resolve
 these through a separate constrained rule that permits only the same repository
 origin, `/skytv-epg/EPG/` prefix, and the selected server's exact
 `server_N_epg_v2.json.gz`, existing-format `server_N_epg.json.gz`, or
-`server_N_metadata.json.gz` filename. The publisher prefers the v2 programme
-file when available and otherwise references the existing format. Do not
+`server_N_metadata.json.gz` filename. `epg.programme` retains the compatible
+schema v1 programme file. Optional `epg.programmeRich` advertises the rich
+schema v2 object-row feed for clients that explicitly support it. Do not
 weaken the VOD shard resolver to
 accept arbitrary `..` paths.
 

@@ -29,7 +29,7 @@ import time
 import unicodedata
 import xml.parsers.expat as expat
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from itertools import chain
 from pathlib import Path
@@ -40,10 +40,16 @@ import requests
 from lxml import etree
 
 if __package__:
+    from .channel_metadata_enrichment import ChannelRegistry, RegistryError, enrich_metadata
+    from .logo_enrichment import normalize_logo_url, logo_provenance, load_logo_verification
     from .epg_selection_spool import SpoolError, copy_and_open_verified_spool
+    from .epg_programme_details import details_json, parse_details_json, xmltv_programme_details
     from . import provider_event_guide, provider_event_slots, provider_presentation
 else:
+    from channel_metadata_enrichment import ChannelRegistry, RegistryError, enrich_metadata
+    from logo_enrichment import normalize_logo_url, logo_provenance, load_logo_verification
     from epg_selection_spool import SpoolError, copy_and_open_verified_spool
+    from epg_programme_details import details_json, parse_details_json, xmltv_programme_details
     import provider_event_guide
     import provider_event_slots
     import provider_presentation
@@ -52,8 +58,9 @@ else:
 PIPELINE_VERSION = "1.0"
 PIPELINE_BUILD_ID = "SKYTV-EPG-V1-2026-09-15"
 APP_SCHEMA_VERSION = 1
+RICH_APP_SCHEMA_VERSION = 2
 METADATA_SCHEMA_VERSION = 1
-LOGO_POLICY = "SHEET_OR_EXACT_CONFIG_SOURCE_NAME_BRAND_OR_EPGSHARE_SOURCE"
+LOGO_POLICY = "SHEET_OR_EXACT_SOURCE_REGISTRY_REVIEWED_BRAND_WITH_DISCLOSED_ARTWORK_FALLBACK"
 MAPPING_SNAPSHOT_MANIFEST_SCHEMA = "skytv-private-mapping-snapshot-v1"
 MAX_MAPPING_SNAPSHOT_MANIFEST_BYTES = 256 * 1024
 EFFECTIVE_QUARANTINE_REASON = (
@@ -311,6 +318,7 @@ class MappingRow:
     runtime_synthetic_reason: str = ""
     provider_name_aliases: tuple[str, ...] = ()
     provider_epg_id_aliases: tuple[str, ...] = ()
+    metadata_evidence: dict[str, Any] = field(default_factory=dict)
 
     @property
     def uses_local_synthetic(self) -> bool:
@@ -1084,6 +1092,7 @@ def parse_mapping_csv(
     selected_servers: set[str],
     *,
     require_enabled_servers: bool = True,
+    channel_registry: ChannelRegistry | None = None,
 ) -> list[MappingRow]:
     if len(content) > MAX_MAPPING_BYTES:
         raise BuildError(
@@ -1196,6 +1205,9 @@ def parse_mapping_csv(
             raise BuildError(f"Row {row_number}: sort_priority must be an integer.") from exc
 
         metadata = build_metadata(raw, row_number)
+        metadata_evidence: dict[str, Any] = {}
+        if channel_registry is not None:
+            metadata, metadata_evidence = enrich_metadata(raw, metadata, channel_registry)
         row = MappingRow(
             row_number=row_number,
             server_id=server_id,
@@ -1214,11 +1226,12 @@ def parse_mapping_csv(
             effective_source=effective_source,
             epg_feed=epg_feed,
             epg_id=epg_id,
-            logo_url=valid_http_url(raw.get("logo_url", "")),
+            logo_url=normalize_logo_url(raw.get("logo_url", "")),
             sort_priority=sort_priority,
             reason=clean_text(raw.get("reason", ""), 500),
             notes=clean_text(raw.get("notes", ""), 500),
             metadata=metadata,
+            metadata_evidence=metadata_evidence,
         )
         if row.enabled and action not in REJECTED_ACTIONS and not row.epg_id:
             raise BuildError(
@@ -2468,8 +2481,8 @@ def insert_synthetic_guides(
     insert_sql = (
         "INSERT INTO programmes "
         "(source_key, channel_key, start_epoch, stop_epoch, title, subtitle, "
-        "description, categories_json, quality) "
-        "VALUES (?, ?, ?, ?, ?, '', ?, ?, 1000)"
+        "description, categories_json, quality, details_json) "
+        "VALUES (?, ?, ?, ?, ?, '', ?, ?, 1000, '{}')"
     )
     for row in synthetic_rows:
         categories_json = json_compact(synthetic_programme_categories(row))
@@ -2579,6 +2592,7 @@ def create_database(path: Path) -> sqlite3.Connection:
             description TEXT NOT NULL,
             categories_json TEXT NOT NULL,
             quality INTEGER NOT NULL,
+            details_json TEXT NOT NULL DEFAULT '{}',
             PRIMARY KEY (source_key, channel_key, start_epoch, stop_epoch, title)
         ) WITHOUT ROWID;
         """
@@ -2892,7 +2906,7 @@ def first_channel_icon(element: etree._Element, base_url: str) -> str:
     for child in element:
         if local_name(child.tag) != "icon":
             continue
-        value = valid_http_url(child.get("src") or "", base_url=base_url)
+        value = normalize_logo_url(child.get("src") or "", base_url=base_url)
         if value:
             return value
     return ""
@@ -2961,25 +2975,30 @@ def ingest_xmltv_source(
             """
             INSERT INTO programmes (
                 source_key, channel_key, start_epoch, stop_epoch, title,
-                subtitle, description, categories_json, quality
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                subtitle, description, categories_json, quality, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (
                 source_key, channel_key, start_epoch, stop_epoch, title
             ) DO UPDATE SET
                 subtitle = excluded.subtitle,
                 description = excluded.description,
                 categories_json = excluded.categories_json,
-                quality = excluded.quality
+                quality = excluded.quality,
+                details_json = excluded.details_json
             WHERE (
                 excluded.quality,
                 excluded.subtitle,
                 excluded.description,
-                excluded.categories_json
+                excluded.categories_json,
+                length(excluded.details_json),
+                excluded.details_json
             ) > (
                 programmes.quality,
                 programmes.subtitle,
                 programmes.description,
-                programmes.categories_json
+                programmes.categories_json,
+                length(programmes.details_json),
+                programmes.details_json
             )
             """,
             programme_batch,
@@ -3124,7 +3143,8 @@ def ingest_xmltv_source(
                         elif not title:
                             stats.blank_title += 1
                         else:
-                            if stop_epoch is None or stop_epoch <= start_epoch:
+                            stop_inferred = stop_epoch is None or stop_epoch <= start_epoch
+                            if stop_inferred:
                                 stop_epoch = start_epoch + 3600
                                 stats.synthesized_stop += 1
                             if stop_epoch <= window_start:
@@ -3133,6 +3153,12 @@ def ingest_xmltv_source(
                                 subtitle = preferred_child_text(element, "sub-title")
                                 description = preferred_child_text(element, "desc")
                                 categories = child_texts(element, "category")
+                                programme_details = xmltv_programme_details(
+                                    element,
+                                    allow_icons=allow_source_icons,
+                                    source_base_url=source_base_url,
+                                    stop_inferred=stop_inferred,
+                                )
                                 programme_batch.append(
                                     (
                                         source_key,
@@ -3146,6 +3172,7 @@ def ingest_xmltv_source(
                                         programme_quality(
                                             title, subtitle, description, categories
                                         ),
+                                        details_json(programme_details),
                                     )
                                 )
                                 stats.selected_programmes += 1
@@ -3550,6 +3577,7 @@ class IconOverride:
     channel_name: str
     icon_url: str
     priority: int
+    notes: str = ""
 
 
 @dataclass
@@ -3558,6 +3586,7 @@ class IconOverrides:
     by_stream: dict[tuple[str, str], list[IconOverride]]
     by_epg_id: dict[tuple[str, str], list[IconOverride]]
     by_channel_name: dict[tuple[str, str], list[IconOverride]]
+    verification: dict[str, dict] = field(default_factory=dict)
 
 
 SUPPORTED_LOGO_EXTENSIONS = frozenset(
@@ -3598,7 +3627,7 @@ def load_icon_overrides(
             if server_id != "*":
                 server_id = normalize_server_id(server_id)
             stream_id = clean_identifier(row.get("stream_id", ""), 120)
-            icon_url = valid_http_url(row.get("icon_url", ""))
+            icon_url = normalize_logo_url(row.get("icon_url", ""))
             local_file = clean_text(row.get("local_file", ""), 500)
             # A reviewed direct URL wins when both fields are present, matching
             # the documented configuration contract. A local file is copied
@@ -3648,6 +3677,7 @@ def load_icon_overrides(
                 channel_name=channel_name,
                 icon_url=icon_url,
                 priority=priority,
+                notes=clean_text(row.get("notes", ""), 1_200),
             )
             result.rows.append(item)
             for value, index in (
@@ -3667,14 +3697,15 @@ def load_icon_overrides(
 
 
 def configured_icon(
-    overrides: IconOverrides | Sequence[IconOverride], row: MappingRow
-) -> str:
+    overrides: IconOverrides | Sequence[IconOverride], row: MappingRow,
+    *, with_notes: bool = False,
+) -> str | tuple[str, str]:
     # Keep the earlier public helper contract: callers that do not configure
     # icons may still pass an empty sequence. Production uses the indexed
     # IconOverrides form so per-row lookup remains bounded.
     if not isinstance(overrides, IconOverrides):
         if not overrides:
-            return ""
+            return ("", "") if with_notes else ""
         indexed = empty_icon_overrides()
         for item in overrides:
             indexed.rows.append(item)
@@ -3709,7 +3740,7 @@ def configured_icon(
         )
     ]
     if not eligible:
-        return ""
+        return ("", "") if with_notes else ""
     chosen = max(
         eligible,
         key=lambda item: (
@@ -3721,7 +3752,7 @@ def configured_icon(
             item.icon_url,
         ),
     )
-    return chosen.icon_url
+    return (chosen.icon_url, chosen.notes) if with_notes else chosen.icon_url
 
 
 @dataclass(frozen=True)
@@ -3931,11 +3962,7 @@ def build_xml_entries(
         source_name, source_icon = source_channel_info(
             connection, row.source_key, row.epg_id
         )
-        icon_url = (
-            row.logo_url
-            or configured_icon(icon_overrides, row)
-            or source_icon
-        )
+        icon_url = resolve_row_icon(row, connection, icon_overrides)
         register(
             row.channel_name,
             [row.channel_name, row.canonical_name],
@@ -3991,16 +4018,18 @@ def iter_schedule_rows(
     *,
     window_start: int,
     window_end: int | None,
-) -> Iterator[tuple[int, int, str, str, str, str]]:
+    include_details: bool = False,
+) -> Iterator[tuple[Any, ...]]:
     upper_clause = "AND start_epoch < ?" if window_end is not None else ""
     parameters: list[Any] = [source_key, channel_key, int(window_start)]
     if window_end is not None:
         parameters.append(int(window_end))
     query = f"""
-        SELECT start_epoch, stop_epoch, title, subtitle, description, categories_json
+        SELECT start_epoch, stop_epoch, title, subtitle, description, categories_json,
+               details_json
         FROM (
             SELECT start_epoch, stop_epoch, title, subtitle, description,
-                   categories_json, quality,
+                   categories_json, quality, details_json,
                    ROW_NUMBER() OVER (
                      PARTITION BY start_epoch, stop_epoch
                      ORDER BY quality DESC, title COLLATE NOCASE, title
@@ -4013,10 +4042,11 @@ def iter_schedule_rows(
         ORDER BY start_epoch, stop_epoch, title COLLATE NOCASE, title
     """
     for row in connection.execute(query, parameters):
-        yield (
+        basic = (
             int(row[0]), int(row[1]), str(row[2]), str(row[3]),
             str(row[4]), str(row[5]),
         )
+        yield basic + (str(row[6]),) if include_details else basic
 
 
 _UNAVAILABLE_OUTPUT_TITLE_RE = re.compile(
@@ -4183,7 +4213,16 @@ def resolve_row_icon(
     _source_name, source_icon = source_channel_info(
         connection, row.source_key, row.epg_id
     )
-    return row.logo_url or configured_icon(overrides, row) or source_icon
+    candidates = [row.logo_url, configured_icon(overrides, row), source_icon]
+    for candidate in candidates:
+        url = normalize_logo_url(candidate)
+        if not url:
+            continue
+        status = getattr(overrides, "verification", {}).get(url, {}).get("status")
+        if status in {"http_error", "invalid_image"}:
+            continue
+        return url
+    return ""
 
 
 def write_app_epg(
@@ -4195,7 +4234,10 @@ def write_app_epg(
     window_start: int,
     window_end: int,
     icon_overrides: IconOverrides,
+    schema_version: int = APP_SCHEMA_VERSION,
 ) -> dict[str, Any]:
+    if schema_version not in {APP_SCHEMA_VERSION, RICH_APP_SCHEMA_VERSION}:
+        raise BuildError("Unsupported app EPG schema version.")
     runtime_rows = sorted(
         (row for row in rows if row.runtime_eligible),
         key=lambda item: stream_sort_key(item.stream_id),
@@ -4211,10 +4253,11 @@ def write_app_epg(
     schedules_with_programmes = 0
     streams_with_programmes = 0
     available_schedule_keys: set[str] = set()
+    rich_field_counts: Counter[str] = Counter()
     try:
         output.write("{")
         scalar_fields = (
-            ("schemaVersion", APP_SCHEMA_VERSION),
+            ("schemaVersion", schema_version),
             ("serverId", rows[0].server_id),
             ("generatedAt", generated_at),
             ("windowStart", window_start),
@@ -4226,6 +4269,8 @@ def write_app_epg(
                 output.write(",")
             first_field = False
             output.write(json_compact(key) + ":" + json_compact(value))
+        if schema_version == RICH_APP_SCHEMA_VERSION:
+            output.write(',"programmeRowFormat":"object"')
 
         output.write(',"streamToEpg":{')
         for index, row in enumerate(runtime_rows):
@@ -4246,6 +4291,7 @@ def write_app_epg(
                 channel_key,
                 window_start=window_start,
                 window_end=window_end,
+                include_details=schema_version == RICH_APP_SCHEMA_VERSION,
             )
             first_row = next(iterator, None)
             if first_row is None:
@@ -4259,17 +4305,14 @@ def write_app_epg(
             for row_index, item in enumerate(chain((first_row,), iterator)):
                 if row_index:
                     output.write(",")
-                output.write(
-                    json_compact(
-                        [
-                            item[0],
-                            item[1],
-                            output_programme_title(
-                                item[2], schedule_names.get(schedule_key, "")
-                            ),
-                        ]
-                    )
-                )
+                title = output_programme_title(item[2], schedule_names.get(schedule_key, ""))
+                if schema_version == RICH_APP_SCHEMA_VERSION:
+                    rich = rich_programme_payload(item, title=title, source_key=source_key)
+                    rich_field_counts.update(key for key, value in rich.items()
+                                             if value and key not in {"start", "stop", "title", "sourceType"})
+                    output.write(json_compact(rich))
+                else:
+                    output.write(json_compact([item[0], item[1], title]))
                 programme_count += 1
             output.write("]")
         output.write("}")
@@ -4290,7 +4333,7 @@ def write_app_epg(
             + json_compact(
                 {
                     "mappingOverridesPreferred": True,
-                    "source": "EPGShare channel metadata or approved exact override",
+                    "source": "EPGShare, exact iptv-org channel registry, reviewed overrides, or disclosed project artwork",
                     "policy": LOGO_POLICY,
                     "panelSourceIconsUsed": False,
                 }
@@ -4315,7 +4358,7 @@ def write_app_epg(
     coverage_streams = sum(
         1 for row in coverage_rows if row.schedule_key in available_schedule_keys
     )
-    return {
+    result = {
         "mappedStreams": len(runtime_rows),
         "streamsWithProgrammes": streams_with_programmes,
         "groupHeaderStreams": len(runtime_rows) - len(coverage_rows),
@@ -4330,6 +4373,42 @@ def write_app_epg(
         "programmeRows": programme_count,
         "logoStreams": len(stream_logos),
     }
+    if schema_version == RICH_APP_SCHEMA_VERSION:
+        result["programmeRowFormat"] = "object"
+        result["programmeFieldCounts"] = dict(sorted(rich_field_counts.items()))
+    return result
+
+
+def rich_programme_payload(item: Sequence[Any], *, title: str, source_key: str) -> dict[str, Any]:
+    """Build and validate one bounded v2 row before it reaches public output."""
+    if len(item) != 7 or type(item[0]) is not int or type(item[1]) is not int:
+        raise BuildError("Rich programme has invalid timing data.")
+    if item[0] < 0 or item[1] <= item[0] or not isinstance(title, str) or not title.strip():
+        raise BuildError("Rich programme has invalid timing or title data.")
+    for value, maximum_bytes in ((title, 8_000), (item[3], 8_000), (item[4], 16_000)):
+        if (not isinstance(value, str) or "\x00" in value
+                or len(value.encode("utf-8")) > maximum_bytes):
+            raise BuildError("Rich programme has invalid or oversized text.")
+    try:
+        details = parse_details_json(item[6])
+        categories = json.loads(item[5])
+    except (TypeError, ValueError) as exc:
+        raise BuildError("Rich programme has invalid source details.") from exc
+    if (not isinstance(categories, list) or len(categories) > MAX_CATEGORY_VALUES
+            or any(not isinstance(value, str) or len(value) > 1_200 for value in categories)):
+        raise BuildError("Rich programme has invalid categories.")
+    result = {
+        "start": item[0], "stop": item[1], "title": title,
+        "sourceType": ("synthetic" if source_key.startswith("synthetic:")
+                       else "panel" if source_key.startswith("panel:") else "epgshare"),
+        "categories": categories,
+        **details,
+    }
+    if item[3]:
+        result["subtitle"] = str(item[3])
+    if item[4]:
+        result["description"] = str(item[4])
+    return result
 
 
 def write_metadata_json(
@@ -4405,6 +4484,16 @@ def write_metadata_json(
             }
             if row.runtime_synthetic_reason:
                 payload["guideFallbackReason"] = row.runtime_synthetic_reason
+            if row.metadata_evidence:
+                payload["metadataEvidence"] = row.metadata_evidence
+            _source_name, source_icon = source_channel_info(connection, row.source_key, row.epg_id)
+            configured_url, configured_notes = configured_icon(icon_overrides, row, with_notes=True)
+            payload["logoProvenance"] = logo_provenance(
+                payload["logoUrl"], mapping_url=row.logo_url,
+                override_notes=configured_notes if configured_url == payload["logoUrl"] else "",
+                source_icon=source_icon,
+                verification=getattr(icon_overrides, "verification", {}),
+            )
             output.write(json_compact(row.stream_id) + ":" + json_compact(payload))
         output.write("}}")
         finish_deterministic_gzip(
@@ -5135,6 +5224,20 @@ def build_server(
         icon_overrides=icon_overrides,
     )
     validate_gzip(app_path)
+    rich_app_path = staging_public / "EPG" / f"{server_id}_epg_v2.json.gz"
+    rich_app_result = write_app_epg(
+        destination=rich_app_path,
+        rows=server_rows,
+        connection=connection,
+        generated_at=generated_at,
+        window_start=app_window_start,
+        window_end=app_window_end,
+        icon_overrides=icon_overrides,
+        schema_version=RICH_APP_SCHEMA_VERSION,
+    )
+    validate_gzip(rich_app_path)
+    if any(rich_app_result[key] != app_result[key] for key in app_result):
+        raise BuildError("Rich and legacy app EPG coverage/counts do not agree.")
     metadata_path = staging_public / "EPG" / f"{server_id}_metadata.json.gz"
     mapping_sha = server_mapping_sha256(server_rows)
     metadata_result = write_metadata_json(
@@ -5359,6 +5462,7 @@ def build_server(
             "serverId": server_id,
             "xmltv": xml_validation,
             "app": app_result,
+            "appV2": rich_app_result,
             "metadata": metadata_result,
             "reports": report_counts,
             "guideCoverage": guide_coverage,
@@ -5379,6 +5483,12 @@ def build_server(
         "dataSha256": sha256_file(app_path),
         "mappingSha256": mapping_sha,
         "compressedBytes": app_path.stat().st_size,
+        "richSchemaVersion": RICH_APP_SCHEMA_VERSION,
+        "richDataFile": rich_app_path.name,
+        "richDataSha256": sha256_file(rich_app_path),
+        "richCompressedBytes": rich_app_path.stat().st_size,
+        "richManifestFile": f"{server_id}_epg_v2_manifest.json",
+        "programmeDetailFieldCounts": rich_app_result["programmeFieldCounts"],
         **app_result,
         "metadataFile": metadata_path.name,
         "metadataSha256": sha256_file(metadata_path),
@@ -5410,6 +5520,20 @@ def build_server(
         staging_public / "EPG" / f"{server_id}_epg_manifest.json",
         app_manifest,
     )
+    rich_manifest = {
+        key: value for key, value in app_manifest.items()
+        if not key.startswith("rich") and key != "programmeDetailFieldCounts"
+    }
+    rich_manifest.update({
+        "schemaVersion": RICH_APP_SCHEMA_VERSION,
+        "dataFile": rich_app_path.name,
+        "dataSha256": sha256_file(rich_app_path),
+        "compressedBytes": rich_app_path.stat().st_size,
+        "legacyDataFile": app_path.name,
+        "legacyManifestFile": f"{server_id}_epg_manifest.json",
+        **rich_app_result,
+    })
+    write_json(staging_public / "EPG" / f"{server_id}_epg_v2_manifest.json", rich_manifest)
     write_json(
         staging_public / "EPG" / f"{server_id}_metadata_manifest.json",
         {
@@ -5696,6 +5820,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="epgshare-only",
     )
     parser.add_argument("--icon-config", type=Path, default=Path("config/channel_icons.csv"))
+    parser.add_argument("--channel-registry-dir", type=Path)
+    parser.add_argument("--logo-verification-cache", type=Path)
     parser.add_argument("--public-base-url", default=os.environ.get("EPG_PUBLIC_BASE_URL", ""))
     parser.add_argument("--panel-file", action="append", default=[])
     parser.add_argument(
@@ -5811,7 +5937,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     app_window_end = generated_at + int(args.app_future_hours) * 3600
 
     mapping_content = mapping_bytes_from_args(args, work_dir)
-    rows = parse_mapping_csv(mapping_content, selected_servers)
+    channel_registry = None
+    if args.channel_registry_dir is not None:
+        try:
+            channel_registry = ChannelRegistry.from_directory(args.channel_registry_dir)
+        except (OSError, ValueError) as exc:
+            raise BuildError("Channel metadata registry failed validation.") from exc
+    rows = parse_mapping_csv(mapping_content, selected_servers, channel_registry=channel_registry)
+    if channel_registry is not None:
+        facet_counts = Counter(
+            facet for row in rows for facet in row.metadata_evidence.get("facets", {})
+        )
+        print("Channel metadata enrichment: " + json_compact(dict(facet_counts)), flush=True)
     minimum_rows = parse_server_minimums(args.minimum_server_rows)
     unknown_minimums = sorted(set(minimum_rows) - selected_servers)
     if unknown_minimums:
@@ -6223,6 +6360,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             staging_public=staging_public,
             public_base_url=public_base_url,
         )
+        if args.logo_verification_cache is not None:
+            try:
+                icon_overrides.verification = load_logo_verification(args.logo_verification_cache)
+            except (OSError, ValueError) as exc:
+                raise BuildError("Logo verification cache failed validation.") from exc
         tivimate_builds: list[dict[str, Any]] = []
         app_builds: list[dict[str, Any]] = []
         for server_id in sorted(selected_servers):
@@ -6281,6 +6423,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "serverId": server_id,
                     "dataFile": f"EPG/{app_manifest['dataFile']}",
                     "manifestFile": f"EPG/{server_id}_epg_manifest.json",
+                    "richSchemaVersion": RICH_APP_SCHEMA_VERSION,
+                    "richDataFile": f"EPG/{app_manifest['richDataFile']}",
+                    "richManifestFile": f"EPG/{app_manifest['richManifestFile']}",
+                    "richDataSha256": app_manifest["richDataSha256"],
+                    "richCompressedBytes": app_manifest["richCompressedBytes"],
                     "metadataFile": f"EPG/{app_manifest['metadataFile']}",
                     "generatedAtIso": app_manifest["generatedAtIso"],
                     "mappedStreams": app_manifest["mappedStreams"],

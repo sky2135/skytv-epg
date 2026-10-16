@@ -422,7 +422,7 @@ class SelectionSpoolTests(unittest.TestCase):
             )
             provenance = manifest["sourceProvenance"]["epgshare01"]
             self.assertTrue(provenance["selectionSpoolReused"])
-            self.assertEqual(provenance["selectionSpoolSchemaVersion"], "1")
+            self.assertEqual(provenance["selectionSpoolSchemaVersion"], "2")
             self.assertEqual(provenance["url"], "local-fixture")
             self.assertEqual(provenance["inputMode"], "local-fixture")
             self.assertEqual(provenance["originEvidence"], "none")
