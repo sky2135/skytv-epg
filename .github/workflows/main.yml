@@ -157,6 +157,9 @@ jobs:
           python -m pip check
 
       - name: Run regression tests
+        env:
+          # Offline tests must not load a production cache restored later.
+          SKYTV_CHANNEL_REGISTRY_DIR: ""
         run: python -m unittest discover -s tests -v
 
       - name: Restore public channel enrichment cache
