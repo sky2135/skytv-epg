@@ -170,6 +170,34 @@ class MetadataEnrichmentTests(unittest.TestCase):
         self.assertEqual(result.audiences, ["adults"])
         self.assertEqual(result.content_rating, "adult")
 
+    def test_registry_nsfw_strengthens_existing_automatic_nonadult_classification(self):
+        for genre in ("entertainment", "sports", "religion"):
+            with self.subTest(genre=genre):
+                raw = {"channel_name": "Explicit Channel", "genre": genre,
+                       "content_rating": "general", "audience_codes": "general",
+                       "sport_codes": "multi_sport" if genre == "sports" else "",
+                       "religion_codes": "general_spirituality" if genre == "religion" else "",
+                       "metadata_source": "provider_category", "metadata_status": "auto"}
+                before = runner.build_metadata(raw, 2)
+                self.assertEqual(before.genre, genre)
+                result, evidence = enrichment.enrich_metadata(raw, before, self.registry)
+                self.assertEqual(result.genre, "adult")
+                self.assertEqual(result.content_rating, "adult")
+                self.assertEqual(result.audiences, ["adults"])
+                self.assertEqual(result.sports, [])
+                self.assertEqual(result.religions, [])
+                self.assertEqual(evidence["facets"]["genre"], "registry_nsfw_identity")
+
+    def test_registry_nsfw_preserves_manual_and_locked_classification(self):
+        for authority in ({"metadata_source": "manual"}, {"metadata_locked": "TRUE"}):
+            with self.subTest(authority=authority):
+                raw = {"channel_name": "Explicit Channel", "genre": "entertainment",
+                       "content_rating": "general", "audience_codes": "general", **authority}
+                before = runner.build_metadata(raw, 2)
+                result, evidence = enrichment.enrich_metadata(raw, before, self.registry)
+                self.assertEqual(result, before)
+                self.assertEqual(evidence, {})
+
 
 class Response:
     status_code = 200

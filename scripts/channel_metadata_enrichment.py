@@ -346,9 +346,19 @@ def enrich_metadata(raw: Mapping[str, Any], metadata: Any, registry: ChannelRegi
         updates["primary_language"] = languages[0] if len(languages) == 1 else "mul"
         facets["languages"] = "provider_language_prefix" if _provider_language(raw) else "registry_broadcast_feed"
     if record:
-        if not _known(raw.get("genre")) and metadata.genre == "unknown":
+        if record.is_nsfw:
+            # Exact adult identity strengthens an automatic classification even
+            # when a broad provider category already supplied a nonadult genre.
+            # Manual/locked rows have returned above and retain their authority.
+            adult = {"genre": "adult", "audiences": ["adults"], "content_rating": "adult",
+                     "sports": [], "religions": []}
+            changed = {key: value for key, value in adult.items() if getattr(metadata, key) != value}
+            if changed:
+                updates.update(changed)
+                facets["genre"] = "registry_nsfw_identity"
+        elif not _known(raw.get("genre")) and metadata.genre == "unknown":
             genres = [CATEGORY_GENRES[category] for category in record.categories if category in CATEGORY_GENRES]
-            genre = "adult" if record.is_nsfw else (genres[0] if genres else "")
+            genre = genres[0] if genres else ""
             if genre:
                 updates["genre"] = genre
                 facets["genre"] = "registry_channel_category"
