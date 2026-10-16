@@ -26,6 +26,7 @@ MAX_SHARD_RECORDS = 500
 MAX_SHARD_BYTES = 512 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
 HOME_ROW_LIMIT = 20
+NEW_SERIES_WINDOW_DAYS = 30
 MAX_INLINE_EPISODE_BYTES = 256 * 1024
 SAFE_EXTENSION = re.compile(r"[A-Za-z0-9]{1,8}\Z")
 ARTIFACT_NAME = re.compile(r"[a-z0-9_.-]+\.[0-9a-f]{16}\.json(?:\.gz)?\Z")
@@ -170,11 +171,32 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
     return result
 
 
+def has_series_inventory(item: Mapping[str, Any]) -> bool:
+    """Observed provider inventory is evidence of availability, not playback QA."""
+    count = item.get("availableEpisodeCount")
+    return (item.get("episodesStatus") in {"available", "stale"}
+            and type(count) is int and count > 0)
+
+
+def recent_series_release(item: Mapping[str, Any], now: str) -> bool:
+    """A catalog upload/observation never establishes a show's premiere date."""
+    value = item.get("releaseDate")
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return False
+    try:
+        released = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    today = datetime.fromisoformat(now.replace("Z", "+00:00")).date()
+    return today - timedelta(days=NEW_SERIES_WINDOW_DAYS) <= released <= today
+
+
 def make_home(server_id: str, movies: list[dict], series: list[dict],
               trends: Mapping[str, Mapping[str, int]], now: str) -> dict[str, Any]:
     recent_cutoff = (datetime.fromisoformat(now.replace("Z", "+00:00")) - timedelta(days=30)).isoformat().replace("+00:00", "Z")
     def safe(items):
-        return [item for item in items if item["adult"] is False]
+        return [item for item in items if item["adult"] is False
+                and ("providerSeriesId" not in item or has_series_inventory(item))]
     def recent(items, key):
         return sorted([item for item in safe(items) if item.get(key) and recent_cutoff <= item[key] <= now],
                       key=lambda item: (item[key], item["contentId"]), reverse=True)
@@ -207,7 +229,11 @@ def make_home(server_id: str, movies: list[dict], series: list[dict],
                   row("browseAll", "Browse All", dataset="vod-movies")]
     series_rows = [row("upNext", "Up Next", source="local"),
                    row("newEpisodes", "New Episodes", recent(series, "latestEpisodeAddedAt")),
-                   row("newSeries", "New Series", recent(series, "addedAt")),
+                   row("newSeries", "New Series",
+                       sorted([item for item in safe(series) if recent_series_release(item, now)],
+                              key=lambda item: (item["releaseDate"], item["contentId"]), reverse=True),
+                       dateField="releaseDate", windowDays=NEW_SERIES_WINDOW_DAYS,
+                       availabilityEvidence="provider_episode_inventory"),
                    row("trendingTv", "Trending TV", tv_trending),
                    row("languages", "Languages", rows=list(by_language(safe(series), "language").values())),
                    row("browseAll", "Browse All", dataset="vod-series")]
@@ -220,9 +246,16 @@ def make_home(server_id: str, movies: list[dict], series: list[dict],
 def home_preview(item: Mapping[str, Any]) -> dict:
     keys = ("id", "contentId", "providerStreamId", "providerSeriesId", "title", "category",
             "language", "languages", "genres", "adult", "tmdbId", "artwork", "releaseDate",
-            "rating", "containerExtension", "addedAt", "latestEpisodeAddedAt", "episodesStatus")
-    return {**{key: item[key] for key in keys if key in item},
-            "overview": (item.get("overview") or "")[:500] or None}
+            "rating", "containerExtension", "addedAt", "firstSeenAt", "lastAirDate", "status",
+            "latestEpisodeAddedAt", "episodesStatus")
+    preview = {**{key: item[key] for key in keys if key in item},
+               "overview": (item.get("overview") or "")[:500] or None}
+    if "providerSeriesId" in item and has_series_inventory(item):
+        # Legacy Android readers require the full inventory when the top-level
+        # availableEpisodeCount is positive. Home intentionally omits it.
+        preview["discoveryAvailability"] = {"evidence": "provider_episode_inventory",
+                                             "episodeCount": item["availableEpisodeCount"]}
+    return preview
 
 
 def write_artifact(output: Path, prefix: str, payload: Any, *, compressed=True, count=0) -> dict[str, Any]:
@@ -527,6 +560,11 @@ def validate(output: Path, *, epg_dir=None, expected_servers=vod.DEFAULT_SERVERS
                 for content_id in row["itemIds"]:
                     if content_id not in home["items"] or home["items"][content_id]["adult"] is not False:
                         raise vod.CatalogBuildError("App Home contains an invalid discovery title.")
+                    item = all_items[content_id]
+                    if "providerSeriesId" in item and not has_series_inventory(item):
+                        raise vod.CatalogBuildError("App Home series lacks provider episode inventory.")
+                    if row["id"] == "newSeries" and not recent_series_release(item, home["generatedAt"]):
+                        raise vod.CatalogBuildError("App New Series lacks a recent premiere date.")
                 check_rows(row.get("rows", []))
                 check_rows(row.get("byLanguage", {}).values())
         check_rows(home["movieRows"] + home["seriesRows"])

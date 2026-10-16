@@ -141,6 +141,10 @@ it must not make an entire undated library appear newly added. Keep the
 incremental publisher cache so later observations can distinguish additions
 and newly available episodes.
 
+These observation and upload timestamps describe catalog changes. They do not
+establish when a show premiered. A provider library addition may be an older
+work, and `lastAirDate` may refer to an episode the provider does not offer.
+
 ## Movies and TV shelves
 
 The `home` artifact contains `movieRows`, `seriesRows`, and preview records in
@@ -157,7 +161,14 @@ Preview records contain these common keys when present: `id`, `contentId`,
 `title`, `category`, `language`, `languages`, `genres`, `adult`, `tmdbId`,
 `artwork`, `releaseDate`, `rating`, and `addedAt`. Movies add `providerStreamId`
 and `containerExtension`; series add `providerSeriesId`,
-`latestEpisodeAddedAt`, and `episodesStatus`. `overview` is included with at
+`latestEpisodeAddedAt`, and `episodesStatus`. Previews can also retain
+`firstSeenAt`, `lastAirDate`, and `status` from the full record. Eligible series
+previews add `discoveryAvailability: {"evidence": "provider_episode_inventory",
+"episodeCount": N}` for a positive observed provider episode count. This
+compact evidence does not claim a playback test or include episode details.
+Do not copy it into the full-record `availableEpisodeCount` field: existing
+readers require the complete inline or sharded inventory with that field.
+`overview` is included with at
 most 500 characters. Cast, directors, trailers, complete episode inventories,
 and episode-file references belong to full records.
 
@@ -179,7 +190,7 @@ the viewer has no viewing history.
 | --- | --- |
 | Up Next | The viewer's next playable episode, calculated from local progress and available provider episodes |
 | New Episodes | Newly observed provider episodes, not future TMDB air dates or series upload dates |
-| New Series | Provider additions or post-baseline first observations of a series |
+| New Series | Known premieres within the preceding 30 calendar days, with observed provider episodes |
 | Trending TV | Safe trending series available on the selected server |
 | Language rows | Known provider language versions, filtered by viewer preferences |
 | Browse All | Complete server TV library, subject to parental and visibility controls |
@@ -187,6 +198,25 @@ the viewer has no viewing history.
 Automatic discovery shelves require `adult: false`. Unclassified titles remain
 browsable under the app's parental policy. Do not convert missing classification
 into a safe default or replace publisher fields with title-name guesses.
+Every automatic TV shelf also requires `episodesStatus: available` or `stale`
+and a positive `availableEpisodeCount` in the full catalog. This works for both
+inline and sharded episode inventories. Pending, unavailable and empty observed
+inventories remain in Browse All for private selected-show resolution, rather
+than being promoted as available recommendations. Stale inventory is cached
+provider evidence; it is not a promise of successful playback.
+
+The `newSeries` row keeps its schema-v1 identity and adds `dateField:
+releaseDate`, `windowDays: 30`, and `availabilityEvidence:
+provider_episode_inventory`. Select and sort by the show's `releaseDate`,
+newest first, rather than `addedAt`, `firstSeenAt`, or provider modification
+time. A complete, valid `YYYY-MM-DD` date must fall from 30 days before the
+publication's UTC calendar date through that date, inclusive. Unknown dates,
+year/month precision, impossible dates and future premieres are excluded.
+Recent premieres can qualify even on an initial baseline import. A client
+which additionally filters this row must apply the same release-date rule;
+an upload-date filter can incorrectly hide a valid premiere. `newEpisodes`
+continues to describe newly observed provider episodes using
+`latestEpisodeAddedAt`; it does not claim a recent broadcast or premiere.
 Personalization further filters the published candidates using language,
 category visibility, interests, and parental settings. Hide an automatic shelf
 that has no eligible titles.
