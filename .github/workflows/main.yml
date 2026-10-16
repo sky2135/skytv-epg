@@ -18,7 +18,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install request library
-        run: python -m pip install --only-binary=:all: requests==2.32.5
+        run: |
+          python -m pip install --only-binary=:all: requests==2.32.5
       - name: Check provider response status and schema only
         env:
           SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
