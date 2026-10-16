@@ -53,7 +53,8 @@ jobs:
     name: Stream, validate, and package EPG outputs
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 210
+    # Preserve the existing inventory/EPG budgets and allow 30m for VOD/app output.
+    timeout-minutes: 240
 
     steps:
       - name: Check out repository
@@ -845,6 +846,71 @@ jobs:
               print("::warning::Guides passed publication validation, but provider discovery or native guide availability was degraded.")
           PY
 
+      - name: Build separate movie and series catalogs
+        shell: bash
+        env:
+          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
+          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
+          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
+          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
+          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+        run: |
+          set -euo pipefail
+          vod_command=(
+            python -u scripts/build_vod_catalogs.py
+              --output-dir public/VOD
+              --snapshot-dir .build/vod-inputs
+          )
+          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
+            vod_command+=(--allow-insecure-http)
+            echo "::warning::Provider VOD credentials may be sent over unencrypted HTTP."
+          fi
+          timeout --signal=TERM --kill-after=30s 15m "${vod_command[@]}"
+
+      - name: Restore incremental SKYTVPlayer metadata cache
+        id: vod_cache_restore
+        continue-on-error: true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .build/vod-cache
+          key: skytvplayer-vod-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            skytvplayer-vod-v1-${{ runner.os }}-
+
+      - name: Build SKYTVPlayer movie and TV home database
+        id: skytvplayer_catalog
+        shell: bash
+        env:
+          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
+          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
+          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
+          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
+          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          set -euo pipefail
+          app_command=(
+            python -u scripts/build_skytvplayer_catalog.py
+              --input-dir .build/vod-inputs
+              --output-dir public/skytvplayer
+              --cache-dir .build/vod-cache
+              --epg-dir public/EPG
+              --fetch-series-details
+          )
+          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
+            app_command+=(--allow-insecure-http)
+          fi
+          timeout --signal=TERM --kill-after=30s 15m "${app_command[@]}"
+
       - name: Verify files contain no passwords, private URLs, or credential fields
         id: public_secret_scan
         if: always()
@@ -861,6 +927,8 @@ jobs:
           SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
           SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: |
           set -euo pipefail
           if [[ -d public ]]; then
@@ -1006,6 +1074,12 @@ jobs:
                   google_values.append(value)
           for value in google_values:
               raw_tokens.update(encoded_variants(value))
+
+          # Include external metadata API secrets in the public-file gate.
+          for name in ("TMDB_READ_ACCESS_TOKEN", "TMDB_API_KEY"):
+              value = os.environ.get(name, "").strip()
+              if value:
+                  raw_tokens.update(encoded_variants(value))
 
           maximum_structured_value = 0
           for number in (1, 2, 3):
@@ -1209,6 +1283,8 @@ jobs:
           test -s public/epg/index.json
           test -s public/EPG/index.json
           test -s public/EPG/taxonomy.json
+          test -s public/VOD/index.json
+          test -s public/skytvplayer/index.json
 
           for server in server_1 server_2 server_3; do
             test -s "public/epg/${server}_tivimate.xml.gz"
@@ -1232,6 +1308,18 @@ jobs:
             done
           done
 
+          python scripts/build_vod_catalogs.py \
+            --validate-only \
+            --expected-server server_1 \
+            --expected-server server_2 \
+            --expected-server server_3 \
+            --output-dir public/VOD
+
+          python scripts/build_skytvplayer_catalog.py \
+            --validate-only \
+            --output-dir public/skytvplayer \
+            --epg-dir public/EPG
+
           python - <<'PY'
           import json
           from pathlib import Path
@@ -1241,6 +1329,8 @@ jobs:
               Path("public/epg/index.json"),
               Path("public/EPG/index.json"),
               Path("public/EPG/taxonomy.json"),
+              Path("public/VOD/index.json"),
+              Path("public/skytvplayer/index.json"),
           ]
           for server in ("server_1", "server_2", "server_3"):
               paths.extend(
@@ -1284,6 +1374,13 @@ jobs:
             exit 1
           fi
 
+      - name: Save incremental SKYTVPlayer metadata cache
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .build/vod-cache
+          key: skytvplayer-vod-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Add successful-build summary
         shell: bash
         run: |
@@ -1307,6 +1404,8 @@ jobs:
             public/health.json
             public/epg/index.json
             public/EPG/index.json
+            public/VOD/index.json
+            public/skytvplayer/index.json
             public/reports/
           include-hidden-files: true
           if-no-files-found: warn

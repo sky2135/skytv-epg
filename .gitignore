@@ -13,6 +13,8 @@ public/reports/
 public/health.json
 public/epg/index.json
 public/EPG/
+public/VOD/
+public/skytvplayer/
 public/logos/
 public/index.html
 public/.nojekyll
