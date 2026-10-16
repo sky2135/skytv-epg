@@ -28,7 +28,7 @@
   "epgCatalogStreamSha256": "1f5e347a655443ab0167193e0707af333ede542b6caef79deed7986f6933db03",
   "epgSelectionSpoolSha256": "c0ad4e485972b206515f2205e37cf056593cb1105035a6031ef95b5371cd1336",
   "sheetSeedExporterSha256": "c5530d0a2dd63c62b8ffafed102651859e0155fe9ba5b731d5ced1ab6e17d80b",
-  "workflowSha256": "da0f04e75fa7f33f1be8dc9d70ba2ccdd3d872ef142da16ce84c80a9de64ae20",
+  "workflowSha256": "80fffb4ac9e8db813533e4cd21d3c9af066c792d17185abbb53a0e1472f99133",
   "channelInventoryRunnerSha256": "9ab5071dbe4d1eecd395ad9b398e7b7b9a112d3d5db51a6968f3ffe31fef75bf",
   "channelInventoryWorkflowSha256": "4bbb9c036dad193e2a9e623bfbd8a88b63088769a06ce5181746d7ab8a16c160",
   "channelInventoryRequirementsSha256": "cb80ac4377fa3656ea135c65273fdc1b6ba7f5ce198f1f14ccb13de0e3ed593f",
