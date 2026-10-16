@@ -647,6 +647,7 @@ class ProgrammeRecord:
     description: str
     categories: tuple[str, ...]
     quality: int
+    details_json: str = "{}"
 
 
 @dataclass(frozen=True)
@@ -1395,6 +1396,13 @@ def stream_catalog_and_programmes_once(
                                     categories=categories,
                                     quality=streaming.programme_quality(
                                         title, subtitle, description, categories
+                                    ),
+                                    details_json=streaming.details_json(
+                                        streaming.xmltv_programme_details(
+                                            element,
+                                            source_base_url=source_base_url,
+                                            stop_inferred=not original_stop_is_valid,
+                                        )
                                     ),
                                 )
                                 if programme_sink is not None:

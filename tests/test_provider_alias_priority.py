@@ -45,7 +45,7 @@ def add_schedule(connection, row, *, hours):
         (row.source_key, row.epg_id, row.epg_id, row.channel_name),
     )
     connection.execute(
-        "INSERT INTO programmes VALUES (?, ?, ?, ?, 'Fixture programme', '', '', '[]', 1)",
+        "INSERT INTO programmes VALUES (?, ?, ?, ?, 'Fixture programme', '', '', '[]', 1, '{}')",
         (row.source_key, row.epg_id, NOW, NOW + hours * 3600),
     )
 

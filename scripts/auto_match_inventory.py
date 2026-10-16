@@ -56,6 +56,7 @@ from skytv_epg_auto_match_v1 import (  # noqa: E402
     propose_new_channel_matches,
 )
 from skytv_epg_contextual_v8 import (  # noqa: E402
+    _normalize_key_v8,
     _is_decorative_heading_v84 as _matcher_is_decorative_heading,
     install_contextual_v8,
     parse_candidate_context_v8,
@@ -1002,6 +1003,17 @@ def prepare_matcher_runtime(
         resolver = install_contextual_v8(engine)
         resolver.load_approved_aliases(APPROVED_ALIASES_PATH)
         resolver.load_schedule_equivalences(SCHEDULE_EQUIVALENCES_PATH)
+        registry_path = os.environ.get("SKYTV_CHANNEL_REGISTRY_DIR", "").strip()
+        if registry_path:
+            from channel_metadata_enrichment import ChannelRegistry
+            from registry_schedule_aliases import registry_schedule_aliases
+            registry = ChannelRegistry.from_directory(Path(registry_path))
+            aliases = registry_schedule_aliases(
+                real_candidates, registry, existing_aliases=resolver.approved_aliases,
+                matcher_normalizer=_normalize_key_v8,
+            )
+            registered = resolver.register_approved_aliases(aliases)
+            print(f"Exact public registry schedule aliases: {registered:,} (programme gates remain required).", flush=True)
         identity = MatcherIdentity.from_resolver(
             resolver, CONTEXTUAL_SOURCE_PATH, ENGINE_SOURCE_PATH
         )

@@ -31,6 +31,8 @@ from urllib.parse import urljoin, urlparse
 
 from lxml import etree
 
+from logo_enrichment import normalize_logo_url, RegistryLogoIndex
+
 from epg_catalog_stream import (
     ICON_CATALOG_MAX_BYTES, ICON_CATALOG_MAX_TEXT_BYTES,
     ICON_CATALOG_MAX_RECORDS, ICON_CATALOG_MAX_NAMES_PER_RECORD,
@@ -88,6 +90,7 @@ NAMED_PORTRAIT_NOTE_PREFIX = "NAMED_PORTRAIT:"
 NAMED_SYMBOL_NOTE_PREFIX = "NAMED_SYMBOL:"
 BRAND_LOGO_NOTE_PREFIX = "BRAND_LOGO:"
 SOURCE_NAME_LOGO_NOTE_PREFIX = "SOURCE_NAME_LOGO:"
+REGISTRY_LOGO_NOTE_PREFIX = "REGISTRY_LOGO:"
 EPHEMERAL_NOTE_PREFIXES = (
     GENERATED_NOTE_PREFIX,
     NAMED_FALLBACK_NOTE_PREFIX,
@@ -95,6 +98,7 @@ EPHEMERAL_NOTE_PREFIXES = (
     NAMED_SYMBOL_NOTE_PREFIX,
     BRAND_LOGO_NOTE_PREFIX,
     SOURCE_NAME_LOGO_NOTE_PREFIX,
+    REGISTRY_LOGO_NOTE_PREFIX,
 )
 TRUE_VALUES = frozenset({"1", "true", "yes", "y", "on", "enabled"})
 FALSE_VALUES = frozenset({"0", "false", "no", "n", "off", "disabled"})
@@ -144,7 +148,13 @@ def folded_identifier(value: object) -> str:
 
 _MARKET_PREFIX_RE = re.compile(
     r"^(?:US|USA|UK|CA|CAN|SP|LAT|BR|AU|NZ|IE|FR|DE|ES|IT|PT|NL|BE|"
-    r"SE|NO|DK|FI|IN|ZA|AF|AR|MX)\s*[-:|]\s*",
+    r"SE|NO|DK|FI|IN|ZA|AF|AR|MX|PK|BD|LK|NP|PH|TH|VN|MY|ID|SG|"
+    r"KR|JP|CN|HK|TW|TR|GR|CY|PL|CZ|SK|HU|RO|BG|HR|RS|BA|AL|"
+    r"MK|SI|UA|RU|IL|AE|SA|QA|KW|BH|OM|JO|LB|EG|MA|DZ|TN|NG|KE)\s*[-:|]\s*",
+    re.IGNORECASE,
+)
+_QUALITY_PREFIX_RE = re.compile(
+    r"^(?:SD|HD|FHD|UHD|4K|8K|HEVC|H\.?(?:264|265)|1080P|720P)\s*[:|]\s*",
     re.IGNORECASE,
 )
 _QUALITY_SUFFIX_RE = re.compile(
@@ -166,10 +176,11 @@ def exact_logo_name_key(value: object) -> str:
     text = unicodedata.normalize("NFKC", str(value or ""))
     text = re.sub(r"^[#*_\s]+|[#*_\s]+$", "", text)
     text = re.sub(r"^\[\s*[A-Z]{2,3}\s*\]\s*", "", text, flags=re.IGNORECASE)
-    text = _MARKET_PREFIX_RE.sub("", text.strip())
     previous = ""
     while text != previous:
         previous = text
+        text = _MARKET_PREFIX_RE.sub("", text.strip())
+        text = _QUALITY_PREFIX_RE.sub("", text.strip())
         text = _QUALITY_SUFFIX_RE.sub("", text).strip()
     return " ".join(text.casefold().split())
 
@@ -184,18 +195,8 @@ def is_enabled(value: object) -> bool:
 
 
 def safe_http_url(value: object, *, base_url: str = "") -> str:
-    """Match the production builder's public icon URL safety boundary."""
-    text = " ".join(str(value or "").split())[:2_000]
-    if not text:
-        return ""
-    if base_url:
-        text = urljoin(base_url, text)
-    parsed = urlparse(text)
-    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
-        return ""
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        return ""
-    return text
+    """Use the icon-specific public URL policy, including known resize repair."""
+    return normalize_logo_url(value, base_url=base_url)
 
 
 def requested_source(row: Mapping[str, str]) -> str:
@@ -316,6 +317,18 @@ def exact_brand_id(row: Mapping[str, str]) -> str:
             "NFKC", str(row.get("category_name", "") or "")
         ).upper().split()
     )
+
+    # These are complete channel identities after presentation wrappers are
+    # removed. Do not use substring matches (e.g. CBS Justice is not US CBS).
+    exact_name = exact_logo_name_key(raw_name)
+    if re.fullmatch(r"tsn\s*[1-5]", exact_name):
+        return "tsn"
+    if re.fullmatch(r"espn(?:\s*[1-8])?(?:\s+(?:deportes|news|classic|university|u|extra))?", exact_name):
+        return "espn"
+    if exact_name in {"nfl network", "nfl redzone", "nfl red zone"}:
+        return "nfl"
+    if exact_name in {"flosports", "flo sports"}:
+        return "flosports"
 
     if re.fullmatch(
         r"(?:SP|CA)\s*-\s*(?:VIP\s+)?TSN\s+[1-5]"
@@ -700,6 +713,7 @@ def generate(
     brand_catalog: Path | None = None,
     source_base_url: str = "",
     source_icon_catalog: Path | None = None,
+    channel_registry_dir: Path | None = None,
     category_extension: str = "png",
 ) -> dict[str, object]:
     if base_config.resolve() == output_config.resolve():
@@ -745,6 +759,7 @@ def generate(
     brands = brand_logo_index(
         brand_catalog or Path("config/brand_logos.csv")
     )
+    registry_logos = RegistryLogoIndex.from_directory(channel_registry_dir) if channel_registry_dir else None
 
     wanted_source_ids = {
         identifier(row.get("epg_id", ""))
@@ -820,6 +835,72 @@ def generate(
             covered_by["manual_override"] += 1
             continue
 
+        # Exact broadcaster identity takes priority over inferred content or
+        # person artwork, even when the schedule itself is locally generated.
+        source = requested_source(row)
+        epg_id = identifier(row.get("epg_id", ""))
+        if source == "epgshare01" and usable_source_icon(
+            epg_id, source_icons, source_variants
+        ):
+            covered_by["source_xmltv"] += 1
+            continue
+
+        source_name_icon = usable_exact_name_icon(row, source_name_icons)
+        if source_name_icon:
+            ephemeral_rows.append(
+                {
+                    "enabled": "true",
+                    "server_id": server_id,
+                    "stream_id": stream_id,
+                    "epg_id": "",
+                    "channel_name": identifier(row.get("channel_name", "")),
+                    "icon_url": source_name_icon,
+                    "local_file": "",
+                    "priority": "350",
+                    "notes": (
+                        f"{SOURCE_NAME_LOGO_NOTE_PREFIX} unique exact "
+                        "EPGShare display-name match"
+                    ),
+                }
+            )
+            covered_by["source_name_xmltv"] += 1
+            continue
+
+        registry_logo = registry_logos.lookup(row) if registry_logos else None
+        if registry_logo:
+            registry_channel, registry_url = registry_logo
+            ephemeral_rows.append({
+                "enabled": "true", "server_id": server_id, "stream_id": stream_id,
+                "epg_id": "", "channel_name": identifier(row.get("channel_name", "")),
+                "icon_url": registry_url, "local_file": "", "priority": "325",
+                "notes": (f"{REGISTRY_LOGO_NOTE_PREFIX} {registry_channel}; "
+                          "unique exact current channel; https://iptv-org.github.io/api/logos.json"),
+            })
+            covered_by["registry_logo"] += 1
+            continue
+
+        brand_id = exact_brand_id(row)
+        brand = brands.get(brand_id)
+        if brand is not None:
+            ephemeral_rows.append(
+                {
+                    "enabled": "true",
+                    "server_id": server_id,
+                    "stream_id": stream_id,
+                    "epg_id": "",
+                    "channel_name": identifier(row.get("channel_name", "")),
+                    "icon_url": brand["icon_url"],
+                    "local_file": "",
+                    "priority": "300",
+                    "notes": (
+                        f"{BRAND_LOGO_NOTE_PREFIX} {brand_id}; exact anchored "
+                        f"brand family; source {brand['source_page_url']}"
+                    ),
+                }
+            )
+            covered_by["brand_logo"] += 1
+            continue
+
         role, raw_subject = classify_person_subject(
             row.get("category_name", ""), row.get("channel_name", "")
         )
@@ -878,57 +959,6 @@ def generate(
             covered_by["named_symbol"] += 1
             named_counts[f"{role}_symbol"] += 1
             category_counts[asset_name] += 1
-            continue
-
-        source = requested_source(row)
-        epg_id = identifier(row.get("epg_id", ""))
-        if source == "epgshare01" and usable_source_icon(
-            epg_id, source_icons, source_variants
-        ):
-            covered_by["source_xmltv"] += 1
-            continue
-
-        source_name_icon = usable_exact_name_icon(row, source_name_icons)
-        if source_name_icon:
-            ephemeral_rows.append(
-                {
-                    "enabled": "true",
-                    "server_id": server_id,
-                    "stream_id": stream_id,
-                    "epg_id": "",
-                    "channel_name": identifier(row.get("channel_name", "")),
-                    "icon_url": source_name_icon,
-                    "local_file": "",
-                    "priority": "350",
-                    "notes": (
-                        f"{SOURCE_NAME_LOGO_NOTE_PREFIX} unique exact "
-                        "EPGShare display-name match"
-                    ),
-                }
-            )
-            covered_by["source_name_xmltv"] += 1
-            continue
-
-        brand_id = exact_brand_id(row)
-        brand = brands.get(brand_id)
-        if brand is not None:
-            ephemeral_rows.append(
-                {
-                    "enabled": "true",
-                    "server_id": server_id,
-                    "stream_id": stream_id,
-                    "epg_id": "",
-                    "channel_name": identifier(row.get("channel_name", "")),
-                    "icon_url": brand["icon_url"],
-                    "local_file": "",
-                    "priority": "300",
-                    "notes": (
-                        f"{BRAND_LOGO_NOTE_PREFIX} {brand_id}; exact anchored "
-                        f"brand family; source {brand['source_page_url']}"
-                    ),
-                }
-            )
-            covered_by["brand_logo"] += 1
             continue
 
         if (
@@ -991,6 +1021,7 @@ def generate(
         "named_portrait_rows": covered_by["named_portrait"],
         "named_symbol_rows": covered_by["named_symbol"],
         "brand_logo_rows": covered_by["brand_logo"],
+        "registry_logo_rows": covered_by["registry_logo"],
         "named_fallback_rows": 0,
         "final_private_config_rows": len(base_rows) + len(ephemeral_rows),
         "coverage": dict(sorted(covered_by.items())),
@@ -1006,6 +1037,7 @@ def main() -> int:
     parser.add_argument("--source-xmltv", type=Path, required=True)
     parser.add_argument("--source-base-url", default="")
     parser.add_argument("--source-icon-catalog", type=Path)
+    parser.add_argument("--channel-registry-dir", type=Path)
     parser.add_argument(
         "--base-config", type=Path, default=Path("config/channel_icons.csv")
     )
@@ -1035,6 +1067,7 @@ def main() -> int:
         brand_catalog=args.brand_catalog,
         source_base_url=args.source_base_url,
         source_icon_catalog=args.source_icon_catalog,
+        channel_registry_dir=args.channel_registry_dir,
         category_extension=args.category_extension,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))

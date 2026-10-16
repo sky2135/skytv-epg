@@ -41,6 +41,7 @@ env:
   EPG_ALL_CATALOG_URL: >-
     https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.txt
   EPG_PUBLIC_BASE_URL: ${{ vars.EPG_PUBLIC_BASE_URL }}
+  SKYTV_CHANNEL_REGISTRY_DIR: .build/channel-registry
   EPG_MINIMUM_COVERAGE: ${{ vars.EPG_MINIMUM_COVERAGE || '80' }}
   EPG_COVERAGE_FALLBACK_LIMIT: ${{ vars.EPG_COVERAGE_FALLBACK_LIMIT || '30000' }}
   REVIEW_APPLY_LIMIT: ${{ vars.EPG_REVIEW_APPLY_LIMIT || '30000' }}
@@ -157,6 +158,20 @@ jobs:
 
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
+
+      - name: Restore public channel enrichment cache
+        continue-on-error: true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            .build/channel-registry
+            .build/logo-cache
+          key: live-enrichment-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            live-enrichment-v1-${{ runner.os }}-
+
+      - name: Refresh verified public channel identity catalog
+        run: python scripts/channel_metadata_enrichment.py fetch --destination "$SKYTV_CHANNEL_REGISTRY_DIR"
 
       - name: Download the combined EPG guide and its official ID catalog once
         shell: bash
@@ -747,10 +762,20 @@ jobs:
             --source-icon-catalog \
               "$RUNNER_TEMP/skytv-epg-v1/source_icons.json" \
             --source-base-url https://epgshare01.online/epgshare01/ \
+            --channel-registry-dir "$SKYTV_CHANNEL_REGISTRY_DIR" \
             --base-config config/channel_icons.csv \
             --output-config .build/channel-sync/channel_icons.csv \
             --asset-catalog assets/logos/icon_catalog.csv \
             --brand-catalog config/brand_logos.csv
+
+      - name: Validate channel logo image responses
+        shell: bash
+        run: |
+          python scripts/logo_enrichment.py \
+            --source-icon-catalog "$RUNNER_TEMP/skytv-epg-v1/source_icons.json" \
+            --icon-config .build/channel-sync/channel_icons.csv \
+            --cache .build/logo-cache/verification.json \
+            --max-checks 6000 --deadline-seconds 240
 
       - name: Build XMLTV, app JSON, and personalization metadata
         shell: bash
@@ -809,6 +834,8 @@ jobs:
               --minimum-server-rows server_2=10500 \
               --minimum-server-rows server_3=9400 \
               --icon-config .build/channel-sync/channel_icons.csv \
+              --channel-registry-dir "$SKYTV_CHANNEL_REGISTRY_DIR" \
+              --logo-verification-cache .build/logo-cache/verification.json \
               --public-base-url "$EPG_PUBLIC_BASE_URL" \
               --minimum-coverage "$EPG_MINIMUM_COVERAGE"
           )
@@ -823,6 +850,9 @@ jobs:
             timeout --signal=TERM --kill-after=60s 95m \
               "${build_command[@]}"
           fi
+
+      - name: Audit enriched live metadata and rich programme parity
+        run: python scripts/audit_live_enrichment.py --public-dir public --output public/reports/live_enrichment.json
 
       - name: Check local publication freshness
         shell: bash
@@ -1289,8 +1319,10 @@ jobs:
           for server in server_1 server_2 server_3; do
             test -s "public/epg/${server}_tivimate.xml.gz"
             test -s "public/EPG/${server}_epg.json.gz"
+            test -s "public/EPG/${server}_epg_v2.json.gz"
             test -s "public/EPG/${server}_metadata.json.gz"
             test -s "public/EPG/${server}_epg_manifest.json"
+            test -s "public/EPG/${server}_epg_v2_manifest.json"
             test -s "public/EPG/${server}_metadata_manifest.json"
           done
 
@@ -1302,7 +1334,7 @@ jobs:
           # checks complete JSON syntax without loading a potentially large
           # programme guide into memory.
           for server in server_1 server_2 server_3; do
-            for kind in epg metadata; do
+            for kind in epg epg_v2 metadata; do
               gzip -cd -- "public/EPG/${server}_${kind}.json.gz" \
                 | jq --stream empty
             done
@@ -1336,6 +1368,7 @@ jobs:
               paths.extend(
                   (
                       Path(f"public/EPG/{server}_epg_manifest.json"),
+                      Path(f"public/EPG/{server}_epg_v2_manifest.json"),
                       Path(f"public/EPG/{server}_metadata_manifest.json"),
                       Path(
                           f"public/reports/{server}/"
@@ -1373,6 +1406,15 @@ jobs:
             echo "::error::Pages payload exceeds the 900 MiB safety ceiling."
             exit 1
           fi
+
+      - name: Save public channel enrichment cache
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            .build/channel-registry
+            .build/logo-cache
+          key: live-enrichment-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save incremental SKYTVPlayer metadata cache
         continue-on-error: true

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +58,10 @@ class MissingIconOverrideTests(unittest.TestCase):
         self.assertEqual(production.valid_http_url(query_icon), "")
 
     def test_exact_brand_catalog_precedes_generic_category_fallback(self) -> None:
+        self.assertEqual(generator.exact_brand_id({"channel_name": "FHD | ESPN 2"}), "espn")
+        self.assertEqual(generator.exact_brand_id({"channel_name": "CA: TSN1 HD"}), "tsn")
+        self.assertEqual(generator.exact_brand_id({"channel_name": "ESPN MOVIES 24/7"}), "")
+        self.assertEqual(generator.exact_brand_id({"channel_name": "CBS Justice"}), "")
         self.assertEqual(
             generator.exact_brand_id(
                 {
@@ -527,6 +532,89 @@ class MissingIconOverrideTests(unittest.TestCase):
         self.assertTrue(
             configured[0]["notes"].startswith("SOURCE_NAME_LOGO:")
         )
+
+    def test_source_resize_repair_recovers_exact_names_and_discards_generic_icons(self):
+        xml = '''<tv>
+          <channel id="T.Sports.bd"><display-name>T Sports</display-name>
+            <icon src="http://dtil.tmsimg.com/assets/sports.png?w=360&amp;h=270"/></channel>
+          <channel id="Placeholder.us"><display-name>Placeholder</display-name>
+            <icon src="http://dtil.tmsimg.com/sources/generic/generic_sources_h3.png"/></channel>
+        </tv>'''
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.xml"
+            source.write_text(xml, encoding="utf-8")
+            icons, _, names = generator.extract_source_icon_catalog(
+                source, ["T.Sports.bd", "Placeholder.us"], ["FHD | T SPORTS", "Placeholder"])
+        expected = "https://dtil.tmsimg.com/assets/sports.png"
+        self.assertEqual(icons, {"T.Sports.bd": expected})
+        self.assertEqual(generator.usable_exact_name_icon(
+            {"channel_name": "BD: FHD | T SPORTS HD"}, names), expected)
+        self.assertNotIn("placeholder", names)
+
+    def test_exact_channel_logo_precedes_named_person_artwork(self):
+        row = {
+            "server_id": "server_1", "stream_id": "1", "enabled": "TRUE",
+            "channel_name": "HINDI-LATA MANGESHKAR SONGS HD",
+            "category_name": "Bollywood Singers 24/7", "genre": "music",
+            "channel_role": "virtual", "action": "AUTO_DUMMY", "source": "dummy",
+            "epg_feed": "DUMMY_CHANNELS", "epg_id": "Local.Lata",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logos = root / "logos"
+            logos.mkdir()
+            mapping, base, catalog = (root / item for item in ("mapping.csv", "base.csv", "catalog.csv"))
+            source, output = root / "source.xml", root / "output.csv"
+            with mapping.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MAPPING_COLUMNS)
+                writer.writeheader()
+                writer.writerow(row)
+            with base.open("w", encoding="utf-8", newline="") as handle:
+                csv.DictWriter(handle, fieldnames=generator.CONFIG_COLUMNS).writeheader()
+            catalog.write_text("subject_type,subject_name,asset_kind,review_status,license_id,local_file\n")
+            source.write_text('<tv><channel id="Source.Lata"><display-name>HINDI-LATA MANGESHKAR SONGS</display-name>'
+                              '<icon src="https://logos.test/exact-lata-channel.png"/></channel></tv>')
+            summary = generator.generate(mapping_csv=mapping, source_xmltv=source,
+                base_config=base, output_config=output, logo_root=logos, asset_catalog=catalog)
+            with output.open(encoding="utf-8", newline="") as handle:
+                configured = list(csv.DictReader(handle))
+        self.assertEqual(summary["coverage"]["source_name_xmltv"], 1)
+        self.assertEqual(summary["named_symbol_rows"], 0)
+        self.assertEqual(configured[0]["icon_url"], "https://logos.test/exact-lata-channel.png")
+
+    def test_registry_logo_precedes_generated_artwork(self):
+        row = {
+            "server_id": "server_1", "stream_id": "1", "enabled": "TRUE",
+            "channel_name": "US: Real Sports", "genre": "sports",
+            "channel_role": "virtual", "action": "AUTO_DUMMY", "source": "dummy",
+            "epg_feed": "DUMMY_CHANNELS", "epg_id": "Real.Sports.local",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logos = root / "logos"
+            logos.mkdir()
+            mapping, base, catalog = (root / item for item in ("mapping.csv", "base.csv", "catalog.csv"))
+            source, output = root / "source.xml", root / "output.csv"
+            with mapping.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=MAPPING_COLUMNS)
+                writer.writeheader()
+                writer.writerow(row)
+            with base.open("w", encoding="utf-8", newline="") as handle:
+                csv.DictWriter(handle, fieldnames=generator.CONFIG_COLUMNS).writeheader()
+            catalog.write_text("subject_type,subject_name,asset_kind,review_status,license_id,local_file\n")
+            source.write_text("<tv/>")
+            registry = mock.Mock()
+            registry.lookup.return_value = ("RealSports.us", "https://logos.test/real-sports.png")
+            with mock.patch.object(generator.RegistryLogoIndex, "from_directory", return_value=registry):
+                summary = generator.generate(mapping_csv=mapping, source_xmltv=source,
+                    base_config=base, output_config=output, logo_root=logos, asset_catalog=catalog,
+                    channel_registry_dir=root / "registry")
+            with output.open(encoding="utf-8", newline="") as handle:
+                configured = list(csv.DictReader(handle))
+        self.assertEqual(summary["registry_logo_rows"], 1)
+        self.assertEqual(summary["generated_fallback_rows"], 0)
+        self.assertEqual(configured[0]["icon_url"], "https://logos.test/real-sports.png")
+        self.assertTrue(configured[0]["notes"].startswith("REGISTRY_LOGO: RealSports.us"))
 
 
 if __name__ == "__main__":

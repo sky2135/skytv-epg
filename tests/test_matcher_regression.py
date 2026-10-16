@@ -269,6 +269,11 @@ class MatcherIntegrityTests(unittest.TestCase):
             ("freshnessCheckerSha256", "scripts/check_epg_freshness.py"),
             ("freshnessWorkflowSha256", ".github/workflows/epg-health.yml"),
             ("ciWorkflowSha256", ".github/workflows/ci.yml"),
+            ("channelMetadataEnrichmentSha256", "scripts/channel_metadata_enrichment.py"),
+            ("registryScheduleAliasesSha256", "scripts/registry_schedule_aliases.py"),
+            ("logoEnrichmentSha256", "scripts/logo_enrichment.py"),
+            ("programmeDetailsSha256", "scripts/epg_programme_details.py"),
+            ("liveEnrichmentAuditSha256", "scripts/audit_live_enrichment.py"),
         ):
             with self.subTest(protected_file=relative_path):
                 self.assertEqual(

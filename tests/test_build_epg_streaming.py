@@ -1822,7 +1822,7 @@ class MappingContractTests(unittest.TestCase):
                         ("epgshare01", epg_id, epg_id, title),
                     )
                     connection.execute(
-                        "INSERT INTO programmes VALUES (?, ?, ?, ?, ?, '', '', '[]', ?)",
+                        "INSERT INTO programmes VALUES (?, ?, ?, ?, ?, '', '', '[]', ?, '{}')",
                         (
                             "epgshare01",
                             epg_id,
@@ -1879,7 +1879,7 @@ class MappingContractTests(unittest.TestCase):
                         (row.source_key, row.epg_id, row.epg_id, row.epg_id),
                     )
                     connection.execute(
-                        "INSERT INTO programmes VALUES (?, ?, ?, ?, ?, '', '', '[]', ?)",
+                        "INSERT INTO programmes VALUES (?, ?, ?, ?, ?, '', '', '[]', ?, '{}')",
                         (
                             row.source_key,
                             row.epg_id,
@@ -1967,7 +1967,7 @@ class MappingContractTests(unittest.TestCase):
                         ("epgshare01", epg_id, epg_id, epg_id, icon),
                     )
                     connection.execute(
-                        "INSERT INTO programmes VALUES (?, ?, ?, ?, ?, '', '', '[]', ?)",
+                        "INSERT INTO programmes VALUES (?, ?, ?, ?, ?, '', '', '[]', ?, '{}')",
                         (
                             "epgshare01",
                             epg_id,
@@ -2928,7 +2928,7 @@ class ProviderPlaylistLinkingTests(unittest.TestCase):
                 )
                 connection.execute("INSERT INTO channels VALUES ('epgshare01', 'Real.Sports.test', 'Real.Sports.test', 'Real Sports', '')")
                 connection.execute(
-                    "INSERT INTO programmes VALUES ('epgshare01', 'Real.Sports.test', ?, ?, 'Real match', '', '', '[]', 1)",
+                    "INSERT INTO programmes VALUES ('epgshare01', 'Real.Sports.test', ?, ?, 'Real match', '', '', '[]', 1, '{}')",
                     (FIXED_NOW, FIXED_NOW + 3600),
                 )
                 connection.commit()
@@ -3490,7 +3490,7 @@ class SyntheticGuideTests(unittest.TestCase):
                     ),
                 )
                 connection.execute(
-                    "INSERT INTO programmes VALUES (?, ?, ?, ?, ?, '', '', '[]', ?)",
+                    "INSERT INTO programmes VALUES (?, ?, ?, ?, ?, '', '', '[]', ?, '{}')",
                     (
                         real.source_key,
                         real.epg_id,
@@ -4241,6 +4241,8 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
             "epg/server_2_tivimate.xml.gz",
             "EPG/server_1_epg.json.gz",
             "EPG/server_2_epg.json.gz",
+            "EPG/server_1_epg_v2.json.gz",
+            "EPG/server_2_epg_v2.json.gz",
             "EPG/server_1_metadata.json.gz",
             "EPG/server_2_metadata.json.gz",
         )
@@ -4273,6 +4275,29 @@ class StreamingBuildIntegrationTests(unittest.TestCase):
             server_1_manifest["dataSha256"],
             hashlib.sha256(server_1_xml.read_bytes()).hexdigest(),
         )
+
+    def test_rich_programmes_have_verified_manifests_and_legacy_projection(self) -> None:
+        public = self.public_dirs[0]
+        index = json.loads((public / "EPG/index.json").read_text(encoding="utf-8"))
+        for build in index["builds"]:
+            server_id = build["serverId"]
+            legacy = _read_gzip_json(public / build["dataFile"])
+            rich_path = public / build["richDataFile"]
+            rich = _read_gzip_json(rich_path)
+            manifest = json.loads((public / build["richManifestFile"]).read_text(encoding="utf-8"))
+            with self.subTest(server=server_id):
+                self.assertEqual(rich["schemaVersion"], 2)
+                self.assertEqual(rich["programmeRowFormat"], "object")
+                self.assertEqual(rich["streamToEpg"], legacy["streamToEpg"])
+                self.assertEqual(rich["streamLogos"], legacy["streamLogos"])
+                self.assertEqual({key: [[row["start"], row["stop"], row["title"]] for row in values]
+                                  for key, values in rich["programmes"].items()}, legacy["programmes"])
+                self.assertEqual(manifest["schemaVersion"], 2)
+                self.assertEqual(manifest["dataSha256"], hashlib.sha256(rich_path.read_bytes()).hexdigest())
+                self.assertEqual(manifest["compressedBytes"], rich_path.stat().st_size)
+                self.assertEqual(manifest["programmeRows"], sum(map(len, rich["programmes"].values())))
+                self.assertEqual(build["richDataSha256"], manifest["dataSha256"])
+                self.assertIn("programmeFieldCounts", manifest)
 
     def test_public_indexes_retain_schema_v1_compatibility_fields(self) -> None:
         public = self.public_dirs[0]
