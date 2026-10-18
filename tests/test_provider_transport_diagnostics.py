@@ -193,6 +193,21 @@ class ProviderTransportDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("Sensitive-Panel-Password", json.dumps(report))
         self.assertNotIn("private-stream-id", json.dumps(report))
 
+    def test_actual_server_two_inventory_uses_its_own_identity_and_label(self):
+        server_two = config("server_2")
+        value = SimpleNamespace(source="player_api", categories=[], channels=[], quarantined_stream_ids=())
+        with mock.patch.object(diagnostics, "clean_session", return_value=session()), mock.patch.object(
+            diagnostics.inventory, "fetch_panel_inventory", return_value=value
+        ) as fetch:
+            report = diagnostics.actual_inventory_probe(server_two, False)
+        sync_config = fetch.call_args.args[1]
+        self.assertEqual(sync_config.server_id, "server_2")
+        self.assertEqual(sync_config.server_label, "Server 2")
+        self.assertEqual((sync_config.base_url, sync_config.username, sync_config.password),
+                         (server_two.base_url, server_two.username, server_two.password))
+        self.assertEqual(report["serverId"], "server_2")
+        self.assertTrue(report["ok"])
+
     def test_actual_inventory_failure_classification_never_returns_exception_text(self):
         private_url = "https://panel.example/?username=bob&password=Sensitive-Panel-Password"
         for message, code in (
@@ -218,24 +233,33 @@ class ProviderTransportDiagnosticsTests(unittest.TestCase):
     def test_server_two_request_failure_preserves_server_one_results_without_exception_text(self):
         output = io.StringIO()
         configs = [config("server_1"), config("server_2")]
-        inventory_result = {"serverId": "server_1", "checks": [{"httpStatus": 200, "rowCount": 3}]}
+        inventory_results = [
+            {"serverId": server, "checks": [{"httpStatus": 200, "rowCount": 3}]}
+            for server in ("server_1", "server_1", "server_2", "server_2")
+        ]
         actual_result = {"serverId": "server_1", "ok": True, "channelCount": 3}
+        additional_result = {"serverId": "server_2", "ok": False, "errorCode": "auth_rejected"}
         private_error = "https://panel.example/xmltv.php?username=bob&password=Sensitive-Panel-Password"
         with mock.patch.object(diagnostics.vod, "load_server_config", side_effect=configs), mock.patch.object(
-            diagnostics, "inventory_probe", return_value=inventory_result
+            diagnostics, "inventory_probe", side_effect=inventory_results
         ) as probe, mock.patch.object(
-            diagnostics, "actual_inventory_probe", return_value=actual_result
+            diagnostics, "actual_inventory_probe", side_effect=[actual_result, additional_result]
         ) as actual, mock.patch.object(
             diagnostics, "redirect_probe", side_effect=requests.ConnectionError(private_error)
         ), redirect_stdout(output):
             self.assertEqual(diagnostics.main(), 0)
         report = json.loads(output.getvalue())
-        self.assertEqual(report["inventory"], [inventory_result, inventory_result])
+        self.assertEqual(report["inventory"], inventory_results)
         self.assertEqual(report["actualInventory"], actual_result)
-        actual.assert_called_once()
+        self.assertEqual(report["additionalInventory"], [additional_result])
+        self.assertEqual([call.args[0].server_id for call in actual.call_args_list], ["server_1", "server_2"])
         self.assertEqual(report["redirect"], {"serverId": "server_2", "issue": "request_failed"})
         self.assertEqual(probe.call_args_list[0].args[1], f"SKYTV-Channel-Inventory/{diagnostics.inventory.SYNC_VERSION}")
         self.assertEqual(probe.call_args_list[1].args[1], diagnostics.vod.PROVIDER_HEADERS["User-Agent"])
+        self.assertEqual([call.args[0].server_id for call in probe.call_args_list],
+                         ["server_1", "server_1", "server_2", "server_2"])
+        self.assertEqual(probe.call_args_list[2].args[1], f"SKYTV-Channel-Inventory/{diagnostics.inventory.SYNC_VERSION}")
+        self.assertEqual(probe.call_args_list[3].args[1], diagnostics.vod.PROVIDER_HEADERS["User-Agent"])
         self.assertNotIn("Sensitive-Panel-Password", output.getvalue())
         self.assertNotIn(private_error, output.getvalue())
 
