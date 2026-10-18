@@ -119,6 +119,33 @@ def actual_inventory_probe(config, allow_http: bool) -> dict:
     return result
 
 
+def production_session_inventory_probe(configs: list, allow_http: bool) -> list[dict]:
+    """Repeat production's ordered inventory fetches using its default session."""
+    results = []
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": f"SKYTV-Channel-Inventory/{inventory.SYNC_VERSION}",
+        "Accept": vod.PROVIDER_HEADERS["Accept"],
+    })
+    try:
+        for config in configs:
+            result = {"serverId": config.server_id}
+            try:
+                value = inventory.fetch_panel_inventory(session, config, allow_insecure_http=allow_http)
+                result.update(ok=True, source=value.source, categoryCount=len(value.categories),
+                              channelCount=len(value.channels),
+                              quarantinedRowCount=len(value.quarantined_stream_ids))
+            except inventory.SyncError as error:
+                result.update(ok=False, errorCode=inventory_error_code(error))
+                result["httpStatusesInSafeDiagnostics"] = sorted({
+                    int(value) for value in re.findall(r"HTTP ([1-5][0-9]{2})\b", str(error))
+                })
+            results.append(result)
+    finally:
+        session.close()
+    return results
+
+
 def clean_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
@@ -261,6 +288,8 @@ def main() -> int:
     allow_http = os.environ.get("ALLOW_INSECURE_PANEL_HTTP", "").casefold() == "true"
     configs = [vod.load_server_config("server_"+str(number),allow_insecure_http=allow_http) for number in (1,2)]
     report = {"schemaVersion":1,"inventory":[],"redirect":{}}
+    production_configs = inventory.load_server_configs([config.server_id for config in configs])
+    report["productionSessionInventory"] = production_session_inventory_probe(production_configs, allow_http)
     for config in configs:
         for identity in (f"SKYTV-Channel-Inventory/{inventory.SYNC_VERSION}", vod.PROVIDER_HEADERS["User-Agent"]):
             report["inventory"].append(inventory_probe(config,identity))

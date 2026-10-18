@@ -230,6 +230,40 @@ class ProviderTransportDiagnosticsTests(unittest.TestCase):
             self.assertNotIn(private_url, json.dumps(report))
             self.assertNotIn("Sensitive-Panel-Password", json.dumps(report))
 
+    def test_production_probe_reuses_default_session_closes_once_and_sanitizes_failures(self):
+        configs = [
+            diagnostics.inventory.ServerConfig(server, server.replace("_", " ").title(),
+                                               "https://panel.example", "bob", "Sensitive-Panel-Password")
+            for server in ("server_1", "server_2")
+        ]
+        shared = requests.Session()
+        value = SimpleNamespace(source="player_api", categories=[{"name": "Private category"}],
+                                channels=[{"name": "Private channel"}], quarantined_stream_ids=("private-stream",))
+        failure = diagnostics.inventory.SyncError(
+            "No valid live inventory; HTTP 522 https://panel.example/?password=Sensitive-Panel-Password"
+        )
+        with mock.patch.object(diagnostics.requests, "Session", return_value=shared) as factory, \
+                mock.patch.object(shared, "close", wraps=shared.close) as close, \
+                mock.patch.object(diagnostics.inventory, "fetch_panel_inventory", side_effect=[value, failure]) as fetch:
+            report = diagnostics.production_session_inventory_probe(configs, True)
+        factory.assert_called_once_with()
+        close.assert_called_once_with()
+        self.assertTrue(shared.trust_env)
+        self.assertIsNone(shared.auth)
+        self.assertEqual(shared.headers["User-Agent"], f"SKYTV-Channel-Inventory/{diagnostics.inventory.SYNC_VERSION}")
+        self.assertEqual(shared.headers["Accept"], diagnostics.vod.PROVIDER_HEADERS["Accept"])
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], configs)
+        self.assertTrue(all(call.args[0] is shared for call in fetch.call_args_list))
+        self.assertTrue(all(call.kwargs["allow_insecure_http"] for call in fetch.call_args_list))
+        self.assertEqual(report, [
+            {"serverId": "server_1", "ok": True, "source": "player_api", "categoryCount": 1,
+             "channelCount": 1, "quarantinedRowCount": 1},
+            {"serverId": "server_2", "ok": False, "errorCode": "no_valid_inventory",
+             "httpStatusesInSafeDiagnostics": [522]},
+        ])
+        for private in ("panel.example", "Sensitive-Panel-Password", "Private category", "Private channel", "private-stream"):
+            self.assertNotIn(private, json.dumps(report))
+
     def test_server_two_request_failure_preserves_server_one_results_without_exception_text(self):
         output = io.StringIO()
         configs = [config("server_1"), config("server_2")]
@@ -239,8 +273,13 @@ class ProviderTransportDiagnosticsTests(unittest.TestCase):
         ]
         actual_result = {"serverId": "server_1", "ok": True, "channelCount": 3}
         additional_result = {"serverId": "server_2", "ok": False, "errorCode": "auth_rejected"}
+        production_result = [actual_result, additional_result]
         private_error = "https://panel.example/xmltv.php?username=bob&password=Sensitive-Panel-Password"
         with mock.patch.object(diagnostics.vod, "load_server_config", side_effect=configs), mock.patch.object(
+            diagnostics.inventory, "load_server_configs", return_value=configs
+        ) as production_configs, mock.patch.object(
+            diagnostics, "production_session_inventory_probe", return_value=production_result
+        ) as production_probe, mock.patch.object(
             diagnostics, "inventory_probe", side_effect=inventory_results
         ) as probe, mock.patch.object(
             diagnostics, "actual_inventory_probe", side_effect=[actual_result, additional_result]
@@ -252,6 +291,10 @@ class ProviderTransportDiagnosticsTests(unittest.TestCase):
         self.assertEqual(report["inventory"], inventory_results)
         self.assertEqual(report["actualInventory"], actual_result)
         self.assertEqual(report["additionalInventory"], [additional_result])
+        self.assertEqual(report["productionSessionInventory"], production_result)
+        production_configs.assert_called_once_with(["server_1", "server_2"])
+        production_probe.assert_called_once()
+        self.assertEqual(production_probe.call_args.args[0], configs)
         self.assertEqual([call.args[0].server_id for call in actual.call_args_list], ["server_1", "server_2"])
         self.assertEqual(report["redirect"], {"serverId": "server_2", "issue": "request_failed"})
         self.assertEqual(probe.call_args_list[0].args[1], f"SKYTV-Channel-Inventory/{diagnostics.inventory.SYNC_VERSION}")
