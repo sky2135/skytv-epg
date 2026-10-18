@@ -3656,6 +3656,7 @@ def write_private_mapping_snapshot_bundle(
     table: MappingTable,
     changed_rows: Sequence[Mapping[str, str]] = (),
     persistent_quarantine_keys: Iterable[tuple[str, str]] = (),
+    observed_provider_quarantine_keys: Iterable[tuple[str, str]] = (),
 ) -> dict[str, Any]:
     """Atomically create and cross-check the private pre/post quarantine hand-off."""
     raw_paths = (
@@ -3687,7 +3688,11 @@ def write_private_mapping_snapshot_bundle(
             "quarantine reason. Remove that copied system-only reason and retry."
         )
 
-    persistent_keys = tuple(persistent_quarantine_keys)
+    # Re-intersect against this exact authoritative read, including identities
+    # added by a human after proposal generation. Unknown IDs never become
+    # fabricated mappings or orphan alerts.
+    provider_keys = set(observed_provider_quarantine_keys).intersection(table.keys)
+    persistent_keys = tuple(set(persistent_quarantine_keys).union(provider_keys))
     required_keys = snapshot_quarantine_keys(changed_rows, persistent_keys)
     orphan_keys = required_keys - table.keys
     if orphan_keys:
@@ -6823,7 +6828,8 @@ def _run_sync_review_mode(
             )
         )
 
-    provider_quarantine_keys = provider_inventory_quarantine_keys(inventories).intersection(
+    observed_provider_quarantine_keys = provider_inventory_quarantine_keys(inventories)
+    provider_quarantine_keys = observed_provider_quarantine_keys.intersection(
         authoritative_table.keys
     )
     discovered_rows, changed_rows, missing_rows = compare_inventory(
@@ -7496,6 +7502,7 @@ def _run_sync_review_mode(
             table=authoritative_table,
             changed_rows=changed_rows,
             persistent_quarantine_keys=persistent_quarantine_keys,
+            observed_provider_quarantine_keys=observed_provider_quarantine_keys,
         )
         add_snapshot_validation_to_summary(summary, snapshot_validation)
         persist_reports()
@@ -8079,6 +8086,7 @@ def _run_sync_review_mode(
         table=final_table,
         changed_rows=changed_rows,
         persistent_quarantine_keys=persistent_quarantine_keys,
+        observed_provider_quarantine_keys=observed_provider_quarantine_keys,
     )
     add_snapshot_validation_to_summary(summary, snapshot_validation)
     persist_reports()
@@ -8224,7 +8232,8 @@ def run_sync(
                 google_session, validate_sheet_id(sheet_id), alerts_tab
             )
         )
-    provider_quarantine_keys = provider_inventory_quarantine_keys(inventories).intersection(
+    observed_provider_quarantine_keys = provider_inventory_quarantine_keys(inventories)
+    provider_quarantine_keys = observed_provider_quarantine_keys.intersection(
         authoritative_table.keys
     )
     new_rows, changed_rows, missing_rows = compare_inventory(
@@ -8399,6 +8408,7 @@ def run_sync(
             table=authoritative_table,
             changed_rows=changed_rows,
             persistent_quarantine_keys=persistent_quarantine_keys,
+            observed_provider_quarantine_keys=observed_provider_quarantine_keys,
         )
         add_snapshot_validation_to_summary(summary, snapshot_validation)
         write_reports(
@@ -8615,6 +8625,7 @@ def run_sync(
                     table=final_table,
                     changed_rows=changed_rows,
                     persistent_quarantine_keys=persistent_quarantine_keys,
+                    observed_provider_quarantine_keys=observed_provider_quarantine_keys,
                 )
                 add_snapshot_validation_to_summary(summary, snapshot_validation)
             except SyncError:
@@ -8688,6 +8699,7 @@ def run_sync(
             table=final_table,
             changed_rows=changed_rows,
             persistent_quarantine_keys=persistent_quarantine_keys,
+            observed_provider_quarantine_keys=observed_provider_quarantine_keys,
         )
         add_snapshot_validation_to_summary(summary, snapshot_validation)
         write_reports(

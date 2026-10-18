@@ -2,11 +2,6 @@ name: Diagnose provider transport
 
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/fix-provider-transport]
-    paths:
-      - scripts/diagnose_provider_transport.py
-      - .github/workflows/provider-transport-diagnostics.yml
 
 permissions:
   contents: read
