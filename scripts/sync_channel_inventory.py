@@ -142,6 +142,10 @@ class SyncError(RuntimeError):
     """A controlled error whose text must never contain provider credentials."""
 
 
+class ProviderNetworkError(SyncError):
+    """A retryable transport failure, without the original credential URL."""
+
+
 class SheetWriteError(SyncError):
     """A Google Sheet write failure with conservative committed-row accounting."""
 
@@ -398,8 +402,19 @@ def safe_credentialed_get(
             current_url = next_url
         except SyncError:
             raise
+        except requests.exceptions.SSLError:
+            # Certificate and TLS-policy failures must not become transient
+            # retries or weaken the configured connection requirements.
+            raise SyncError("A provider secure connection failed.") from None
+        except (
+            requests.ConnectionError,
+            requests.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ):
+            raise ProviderNetworkError("A provider network request failed.") from None
         except Exception:
-            # Network exception strings commonly include the full credential URL.
+            # Unknown client/payload failures remain terminal. Exception text
+            # commonly contains the full credential URL and is never returned.
             raise SyncError("A provider network request failed.") from None
         finally:
             if response is not None:
@@ -736,27 +751,49 @@ def request_panel_json(
     *,
     allow_insecure_http: bool,
 ) -> PanelProbe:
-    try:
-        status, content = safe_credentialed_get(
-            session,
-            endpoint,
-            params={"username": username, "password": password, "action": action},
-            maximum_bytes=MAX_PANEL_JSON_BYTES,
-            timeout=(20, 180),
-            allow_insecure_http=allow_insecure_http,
-        )
-    except SyncError as exc:
-        return PanelProbe(issue=f"{action}: {exc}")
-    if status != 200:
-        suffix = " (credentials or API access rejected)" if status in {401, 403} else ""
-        return PanelProbe(issue=f"{action}: HTTP {status}{suffix}", status_code=status)
-    try:
-        payload = json.loads(content.decode("utf-8-sig", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return PanelProbe(
-            issue=f"{action}: panel returned non-JSON data", status_code=status
-        )
-    return PanelProbe(payload=payload, status_code=status)
+    for attempt in range(3):
+        try:
+            # Every retry starts at the original configured endpoint, so no
+            # redirect target becomes persistent retry or credential state.
+            status, content = safe_credentialed_get(
+                session,
+                endpoint,
+                params={"username": username, "password": password, "action": action},
+                maximum_bytes=MAX_PANEL_JSON_BYTES,
+                timeout=(20, 180),
+                allow_insecure_http=allow_insecure_http,
+            )
+        except ProviderNetworkError as exc:
+            if attempt < 2:
+                print(
+                    "WARNING: Provider inventory JSON transport failure; "
+                    f"retrying (attempt {attempt + 2}/3).",
+                    flush=True,
+                )
+                time.sleep(2**attempt)
+                continue
+            return PanelProbe(issue=f"{action}: {exc}")
+        except SyncError as exc:
+            return PanelProbe(issue=f"{action}: {exc}")
+        if (status == 429 or 500 <= status <= 599) and attempt < 2:
+            print(
+                f"WARNING: Provider inventory JSON request returned HTTP {status}; "
+                f"retrying (attempt {attempt + 2}/3).",
+                flush=True,
+            )
+            time.sleep(2**attempt)
+            continue
+        if status != 200:
+            suffix = " (credentials or API access rejected)" if status in {401, 403} else ""
+            return PanelProbe(issue=f"{action}: HTTP {status}{suffix}", status_code=status)
+        try:
+            payload = json.loads(content.decode("utf-8-sig", errors="strict"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return PanelProbe(
+                issue=f"{action}: panel returned non-JSON data", status_code=status
+            )
+        return PanelProbe(payload=payload, status_code=status)
+    raise AssertionError("Provider JSON retry loop exhausted without a result.")
 
 
 def derive_categories_from_channels(

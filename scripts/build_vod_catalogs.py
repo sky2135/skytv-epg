@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -46,6 +47,7 @@ MAX_CATALOG_DECOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_TEXT_LENGTH = 500
 MAX_ARTWORK_URL_LENGTH = 2_048
 REQUEST_TIMEOUT = (15, 90)
+PROVIDER_REQUEST_ATTEMPTS = 3
 # Use the same application identity as the existing EPG publisher. Some panels
 # reject the generic python-requests identity with HTTP 461, even for valid
 # accounts. Set this per request so catalog and episode-detail callers agree.
@@ -165,6 +167,14 @@ KNOWN_GENRES = {
 
 class CatalogBuildError(RuntimeError):
     """A safe error whose message must not include provider data or secrets."""
+
+
+class TransientPanelRequestError(CatalogBuildError):
+    """A read-only provider request failed for an explicitly retryable reason."""
+
+    def __init__(self, message: str, *, http_status: int | None = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
 
 
 @dataclass(frozen=True)
@@ -333,6 +343,55 @@ def request_panel_json(
     maximum_bytes: int | None = None,
     budget: DownloadBudget | None = None,
 ) -> Any:
+    """Retry only transient transport/status failures, keeping one byte budget."""
+    for attempt in range(PROVIDER_REQUEST_ATTEMPTS):
+        try:
+            return _request_panel_json_once(
+                session,
+                config,
+                action,
+                item_id=item_id,
+                maximum_bytes=maximum_bytes,
+                budget=budget,
+            )
+        except TransientPanelRequestError as exc:
+            if attempt == PROVIDER_REQUEST_ATTEMPTS - 1:
+                raise
+            failure = (
+                f"HTTP {exc.http_status}"
+                if exc.http_status is not None
+                else "transport failure"
+            )
+            print(
+                f"WARNING: {config.server_id}: {action} {failure}; "
+                f"retrying after attempt {attempt + 1}/{PROVIDER_REQUEST_ATTEMPTS}.",
+                file=sys.stderr,
+            )
+            time.sleep(2 ** attempt)
+
+
+def _transient_panel_transport_error(error: requests.RequestException) -> bool:
+    # A TLS verification failure is deterministic and must remain terminal,
+    # even though Requests classifies SSLError as a ConnectionError.
+    return not isinstance(error, requests.exceptions.SSLError) and isinstance(
+        error,
+        (
+            requests.Timeout,
+            requests.ConnectionError,
+            requests.exceptions.ChunkedEncodingError,
+        ),
+    )
+
+
+def _request_panel_json_once(
+    session: requests.Session,
+    config: ServerConfig,
+    action: str,
+    *,
+    item_id: str = "",
+    maximum_bytes: int | None = None,
+    budget: DownloadBudget | None = None,
+) -> Any:
     if action not in {*ACTION_FILE_NAMES, "get_vod_info", "get_series_info"}:
         raise CatalogBuildError(f"{config.server_id}: unsupported provider action.")
     response_limit = MAX_RESPONSE_BYTES if maximum_bytes is None else maximum_bytes
@@ -355,7 +414,12 @@ def request_panel_json(
                 stream=True,
             )
         except requests.RequestException as exc:
-            raise CatalogBuildError(f"{config.server_id}: provider request failed.") from exc
+            failure_type = (
+                TransientPanelRequestError
+                if _transient_panel_transport_error(exc)
+                else CatalogBuildError
+            )
+            raise failure_type(f"{config.server_id}: provider request failed.") from None
         if not (response.is_redirect or response.is_permanent_redirect):
             break
         try:
@@ -370,6 +434,11 @@ def request_panel_json(
         if response.status_code in {401, 403}:
             raise CatalogBuildError(
                 f"{config.server_id}: provider credentials were rejected."
+            )
+        if response.status_code == 429 or 500 <= response.status_code <= 599:
+            raise TransientPanelRequestError(
+                f"{config.server_id}: {action} provider returned HTTP {response.status_code}.",
+                http_status=response.status_code,
             )
         if response.status_code != 200:
             raise CatalogBuildError(
@@ -394,9 +463,14 @@ def request_panel_json(
                 )
             chunks.append(chunk)
     except requests.RequestException as exc:
-        raise CatalogBuildError(
+        failure_type = (
+            TransientPanelRequestError
+            if _transient_panel_transport_error(exc)
+            else CatalogBuildError
+        )
+        raise failure_type(
             f"{config.server_id}: provider response download failed."
-        ) from exc
+        ) from None
     finally:
         response.close()
     payload = _decode_json_bytes(b"".join(chunks), f"{config.server_id} provider response")
