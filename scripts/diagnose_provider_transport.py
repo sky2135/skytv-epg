@@ -73,7 +73,7 @@ def raw_stream_schema_summary(payload: list) -> dict:
 
 
 def actual_inventory_probe(config, allow_http: bool) -> dict:
-    sync_config = inventory.ServerConfig(config.server_id, "Server 1", config.base_url,
+    sync_config = inventory.ServerConfig(config.server_id, config.server_id.replace("_", " ").title(), config.base_url,
                                          config.username, config.password)
     result = {"serverId": config.server_id}
     with clean_session() as session:
@@ -261,9 +261,11 @@ def main() -> int:
     allow_http = os.environ.get("ALLOW_INSECURE_PANEL_HTTP", "").casefold() == "true"
     configs = [vod.load_server_config("server_"+str(number),allow_insecure_http=allow_http) for number in (1,2)]
     report = {"schemaVersion":1,"inventory":[],"redirect":{}}
-    for identity in (f"SKYTV-Channel-Inventory/{inventory.SYNC_VERSION}", vod.PROVIDER_HEADERS["User-Agent"]):
-        report["inventory"].append(inventory_probe(configs[0],identity))
+    for config in configs:
+        for identity in (f"SKYTV-Channel-Inventory/{inventory.SYNC_VERSION}", vod.PROVIDER_HEADERS["User-Agent"]):
+            report["inventory"].append(inventory_probe(config,identity))
     report["actualInventory"] = actual_inventory_probe(configs[0], allow_http)
+    report["additionalInventory"] = [actual_inventory_probe(config, allow_http) for config in configs[1:]]
     try:
         report["redirect"] = redirect_probe(configs[1],configs)
     except requests.RequestException:
