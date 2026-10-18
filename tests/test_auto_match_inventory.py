@@ -91,8 +91,8 @@ def inventory(
     stream_id: str = "new-1",
     name: str = "US: Good Channel",
     panel_id: str = "secret.panel.id",
-) -> SimpleNamespace:
-    return SimpleNamespace(
+) -> sync.PanelInventory:
+    return sync.PanelInventory(
         server_id=server_id,
         server_label=server_id.replace("_", " ").title(),
         source="player_api",
