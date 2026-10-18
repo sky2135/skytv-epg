@@ -64,8 +64,15 @@ LOGO_POLICY = "SHEET_OR_EXACT_SOURCE_REGISTRY_REVIEWED_BRAND_WITH_DISCLOSED_ARTW
 MAPPING_SNAPSHOT_MANIFEST_SCHEMA = "skytv-private-mapping-snapshot-v1"
 MAX_MAPPING_SNAPSHOT_MANIFEST_BYTES = 256 * 1024
 EFFECTIVE_QUARANTINE_REASON = (
+    "Effective snapshot quarantine: provider identity or schema review; "
+    "the Google Sheet Mappings row was not changed."
+)
+LEGACY_EFFECTIVE_QUARANTINE_REASON = (
     "Effective snapshot quarantine: OPEN Sync Alerts stream-ID reuse "
     "review; the Google Sheet Mappings row was not changed."
+)
+RESERVED_EFFECTIVE_QUARANTINE_REASONS = frozenset(
+    {EFFECTIVE_QUARANTINE_REASON, LEGACY_EFFECTIVE_QUARANTINE_REASON}
 )
 PROVIDER_EVENT_RUNTIME_REASON = "providerEventInventory"
 GROUP_HEADER_RUNTIME_REASON = "providerGroupHeader"
@@ -1492,7 +1499,7 @@ def validate_private_mapping_snapshots(
 
     The fixed row floors protect the final authoritative Google Sheet read.
     The effective snapshot remains the only input used for publication.  Every
-    difference between the two must be the exact, fail-closed OPEN-alert
+    difference between the two must be the exact, fail-closed safety
     quarantine transform; rows may never be added, dropped, reordered, or
     otherwise edited between these private hand-off files.
     """
@@ -1551,12 +1558,12 @@ def validate_private_mapping_snapshots(
         if effective != expected:
             raise BuildError(
                 "Private mapping snapshot pair contains a change other than "
-                "the exact OPEN-alert quarantine transform at "
+                "the exact safety quarantine transform at "
                 f"{authoritative.server_id} row {authoritative.row_number}."
             )
         if effective.runtime_eligible:
             raise BuildError(
-                "An OPEN-alert quarantine row remained runtime eligible."
+                "A safety-quarantined row remained runtime eligible."
             )
         stats["quarantined_rows"] += 1
         if authoritative.runtime_eligible:
@@ -3279,6 +3286,9 @@ PANEL_CREDENTIALLESS_REDIRECT_HOSTS = frozenset(
         # Server 2's current public XMLTV location, verified on 2026-10-15
         # to return XMLTV over HTTPS without account credentials.
         "epg-xml.treertt.xyz",
+        # Server 2's public XMLTV redirect target, verified on 2026-10-18
+        # to return XMLTV over HTTPS without account credentials.
+        "epg-xml.dunze.org",
     }
 )
 PANEL_ACCEPT_HEADER = (
@@ -5769,7 +5779,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--mapping-authoritative-file",
         type=Path,
         help=(
-            "Final authoritative private Sheet snapshot before OPEN-alert "
+            "Final authoritative private Sheet snapshot before safety "
             "quarantine. Required with row floors in production."
         ),
     )
@@ -6001,7 +6011,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"Snapshot guard {server_id}: "
                 f"{stats['effective_runnable_rows']:,} output-eligible; "
                 f"{stats['quarantined_authoritative_runnable_rows']:,} safely "
-                "excluded by OPEN alerts; "
+                "excluded by safety quarantine; "
                 f"{stats['authoritative_runnable_rows']:,} integrity rows.",
                 flush=True,
             )

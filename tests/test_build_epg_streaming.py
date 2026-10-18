@@ -233,7 +233,7 @@ class PrivateMappingSnapshotGuardTests(unittest.TestCase):
                 effective_row = _quarantined_snapshot_row(authoritative_row)
                 effective_row[field] = value
                 with self.assertRaisesRegex(
-                    runner.BuildError, "exact OPEN-alert quarantine transform"
+                    runner.BuildError, "exact safety quarantine transform"
                 ):
                     runner.validate_private_mapping_snapshots(
                         _snapshot_mapping_bytes([authoritative_row]),
@@ -761,6 +761,68 @@ class MappingContractTests(unittest.TestCase):
         panel_session.close.assert_called_once()
         clean_session.close.assert_called_once()
 
+    def test_panel_download_follows_verified_dunze_xmltv_without_credentials(self) -> None:
+        credentials = {
+            "SERVER_2_BASE_URL": "https://panel.example/provider",
+            "SERVER_2_USERNAME": "fixture-user",
+            "SERVER_2_PASSWORD": "fixture-password",
+        }
+        payload = b'<?xml version="1.0"?><tv/>'
+        redirected = mock.MagicMock()
+        redirected.status_code = 302
+        redirected.headers = {
+            "Location": (
+                "https://epg-xml.dunze.org/xmltv.php"
+                "?username=reflected&password=reflected#discarded"
+            )
+        }
+        downloaded = mock.MagicMock()
+        downloaded.status_code = 200
+        downloaded.headers = {}
+        downloaded.iter_content.return_value = [payload]
+        panel_session = mock.MagicMock()
+        panel_session.headers = {}
+        panel_session.get.return_value = redirected
+        clean_session = mock.MagicMock()
+        clean_session.headers = {}
+        clean_session.get.return_value = downloaded
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "panel.xmltv"
+            with mock.patch.dict(
+                runner.os.environ, credentials, clear=True
+            ), mock.patch.object(
+                runner.requests,
+                "Session",
+                side_effect=[panel_session, clean_session],
+            ):
+                returned, details = runner.download_panel_xmltv(
+                    "server_2", destination
+                )
+            self.assertEqual(returned, destination)
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertEqual(details["bytes"], len(payload))
+
+        panel_session.get.assert_called_once()
+        self.assertEqual(
+            panel_session.get.call_args.kwargs["params"],
+            {"username": "fixture-user", "password": "fixture-password"},
+        )
+        clean_session.get.assert_called_once()
+        self.assertEqual(
+            clean_session.get.call_args.args[0],
+            "https://epg-xml.dunze.org/xmltv.php",
+        )
+        self.assertIsNone(clean_session.get.call_args.kwargs["params"])
+        self.assertFalse(clean_session.get.call_args.kwargs["allow_redirects"])
+        self.assertIsInstance(clean_session.auth, runner.PanelCredentiallessAuth)
+        self.assertNotIn("Cookie", clean_session.headers)
+        self.assertNotIn("Authorization", clean_session.headers)
+        redirected.close.assert_called_once()
+        downloaded.close.assert_called_once()
+        panel_session.close.assert_called_once()
+        clean_session.close.assert_called_once()
+
     def test_panel_download_rejects_unapproved_host_and_https_downgrade_redirects(self) -> None:
         cases = (
             (
@@ -774,6 +836,14 @@ class MappingContractTests(unittest.TestCase):
             (
                 "https://panel.example/provider",
                 "http://epg.irathomas08.com/xmltv.php",
+            ),
+            (
+                "https://panel.example/provider",
+                "http://epg-xml.dunze.org/xmltv.php",
+            ),
+            (
+                "https://panel.example/provider",
+                "https://epg-xml.dunze.org.unapproved.example/xmltv.php",
             ),
             # Unicode casefolding must not make two distinct IDNA DNS names
             # look equal before Requests prepares the redirect target.
@@ -851,6 +921,10 @@ class MappingContractTests(unittest.TestCase):
                 "external HTTP redirect is forbidden",
             ),
             (
+                "http://epg-xml.dunze.org" + private_suffix,
+                "external HTTP redirect is forbidden",
+            ),
+            (
                 "https://fixture-user.fixture-password.example" + private_suffix,
                 "unapproved external hostname",
             ),
@@ -860,6 +934,10 @@ class MappingContractTests(unittest.TestCase):
             ),
             (
                 "https://epg-xml.treertt.xyz.fixture-host.example" + private_suffix,
+                "unapproved external hostname",
+            ),
+            (
+                "https://epg-xml.dunze.org.fixture-host.example" + private_suffix,
                 "unapproved external hostname",
             ),
         )

@@ -65,6 +65,7 @@ DEFAULT_SERVERS = ("server_1", "server_2", "server_3")
 MAX_PANEL_JSON_BYTES = 64 * 1024 * 1024
 MAX_M3U_BYTES = 128 * 1024 * 1024
 MAX_CHANNELS_PER_SERVER = 250_000
+MAX_BLANK_NAME_QUARANTINE_ROWS = 10
 MAX_SHEET_BYTES = 80 * 1024 * 1024
 MAX_GOOGLE_MAPPING_ROWS = 150_000
 MAX_SYNC_ALERT_ROWS = 10_000
@@ -173,6 +174,9 @@ class PanelInventory:
     channels: list[dict[str, Any]]
     source: str
     diagnostics: list[str] = field(default_factory=list)
+    # Authenticated, observed IDs whose blank names prevent safe matching.
+    # They are presence evidence only, never channels or invented identities.
+    quarantined_stream_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -645,6 +649,82 @@ def normalize_panel_action_rows(payload: Any, action: str) -> list[dict[str, Any
             if len(rows) > MAX_CHANNELS_PER_SERVER:
                 raise SyncError("A provider returned too many inventory rows.")
     return rows
+
+
+_STREAM_ID_FIELDS = (
+    "stream_id", "streamId", "channel_id", "channelId", "live_id", "liveId", "id",
+)
+_STREAM_NAME_FIELDS = (
+    "name", "stream_display_name", "streamDisplayName", "channel_name", "channelName", "title",
+)
+
+
+def _exact_numeric_stream_id(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return ""
+    text = str(value)
+    return text if re.fullmatch(r"[1-9][0-9]{0,119}", text) else ""
+
+
+def normalize_blank_name_quarantine(
+    payload: Any,
+    *,
+    reflection_policy: ProviderReflectionPolicy,
+) -> tuple[list[dict[str, Any]], tuple[str, ...]]:
+    """Recover only bounded, identified blank-name rows after strict rejection.
+
+    This adapter accepts the observed top-level player_api list shape only.
+    Every other item still passes the unchanged strict collection parser.
+    Quarantined IDs prove presence, but supply no name or matching evidence.
+    """
+    error = "Provider rows do not meet the bounded blank-name quarantine requirements."
+    if not isinstance(payload, list) or not payload or len(payload) > MAX_CHANNELS_PER_SERVER:
+        raise SyncError(error)
+    valid_rows: list[Mapping[str, Any]] = []
+    quarantined: set[str] = set()
+    for raw in payload:
+        if not isinstance(raw, Mapping) or not raw:
+            raise SyncError(error)
+        names_blank = all(
+            raw.get(key) is None
+            or (isinstance(raw.get(key), str) and not raw[key].strip())
+            for key in _STREAM_NAME_FIELDS
+        )
+        if not names_blank:
+            valid_rows.append(raw)
+            continue
+        stream_id = _exact_numeric_stream_id(raw.get("stream_id"))
+        if not stream_id or stream_id in quarantined:
+            raise SyncError(error)
+        for key in _STREAM_ID_FIELDS:
+            value = raw.get(key)
+            if value is None or value == "":
+                continue
+            if _exact_numeric_stream_id(value) != stream_id:
+                raise SyncError(error)
+        quarantined.add(stream_id)
+        if len(quarantined) > MAX_BLANK_NAME_QUARANTINE_ROWS:
+            raise SyncError(error)
+    if not quarantined or len(quarantined) * 100 > len(payload):
+        raise SyncError(error)
+    channels = normalize_panel_action_rows(valid_rows, "get_live_streams")
+    if len(channels) != len(valid_rows):
+        raise SyncError(error)
+    # An alternate or noncanonical spelling in a valid row must not obscure a
+    # collision with an ID excluded from matching.
+    for raw in valid_rows:
+        for key in _STREAM_ID_FIELDS:
+            value = raw.get(key)
+            if isinstance(value, bool) or not isinstance(value, (str, int)):
+                continue
+            text = str(value)
+            if re.fullmatch(r"[0-9]{1,120}", text) and (text.lstrip("0") or "0") in quarantined:
+                raise SyncError(error)
+    ids = tuple(sorted(quarantined, key=streaming.stream_sort_key))
+    validate_provider_inventory_secret_safe(
+        [], [{"stream_id": stream_id} for stream_id in ids], reflection_policy
+    )
+    return channels, ids
 
 
 def request_panel_json(
@@ -1387,6 +1467,7 @@ def fetch_panel_inventory(
             "get_live_streams",
             allow_insecure_http=allow_insecure_http,
         )
+        quarantined_stream_ids: tuple[str, ...] = ()
         if stream_probe.issue:
             diagnostics.append(f"API candidate {candidate_number}: {stream_probe.issue}")
             channels: list[dict[str, Any]] = []
@@ -1399,11 +1480,22 @@ def fetch_panel_inventory(
                     stream_probe.payload, "get_live_streams"
                 )
             except SyncError:
-                channels = []
-                diagnostics.append(
-                    f"API candidate {candidate_number}: live-stream schema validation "
-                    "failed; authenticated M3U fallback will be tried"
-                )
+                try:
+                    channels, quarantined_stream_ids = normalize_blank_name_quarantine(
+                        stream_probe.payload, reflection_policy=reflection_needles
+                    )
+                except SyncError:
+                    channels = []
+                    diagnostics.append(
+                        f"API candidate {candidate_number}: live-stream schema validation "
+                        "failed; authenticated M3U fallback will be tried"
+                    )
+                else:
+                    diagnostics.append(
+                        f"API candidate {candidate_number}: "
+                        f"{len(quarantined_stream_ids)} identified blank-name rows "
+                        "were quarantined from matching and publication."
+                    )
             if not channels:
                 diagnostics.append(
                     "API candidate "
@@ -1442,6 +1534,7 @@ def fetch_panel_inventory(
                 channels=channels,
                 source="player_api",
                 diagnostics=list(diagnostics),
+                quarantined_stream_ids=quarantined_stream_ids,
             )
 
     fallback = fetch_m3u_inventory(
@@ -1815,6 +1908,7 @@ def enrich_review_inventories_from_m3u(
             channels=[dict(row) for row in inventory.channels],
             source=inventory.source,
             diagnostics=list(inventory.diagnostics),
+            quarantined_stream_ids=inventory.quarantined_stream_ids,
         )
         for channel in copied.channels:
             # These proofs must be rebuilt from this authenticated fetch,
@@ -2533,6 +2627,7 @@ def compare_inventory(
     *,
     discovered_at: str,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+    observed_quarantine_keys = provider_inventory_quarantine_keys(inventories)
     existing = {
         (
             streaming.normalize_server_id(row.get("server_id", "")),
@@ -2611,7 +2706,11 @@ def compare_inventory(
     missing_rows: list[dict[str, str]] = []
     selected_servers = {inventory.server_id for inventory in inventories}
     for key, current in existing.items():
-        if key[0] not in selected_servers or key in inventory_by_key:
+        if (
+            key[0] not in selected_servers
+            or key in inventory_by_key
+            or key in observed_quarantine_keys
+        ):
             continue
         missing_rows.append(
             {
@@ -2634,6 +2733,42 @@ def compare_inventory(
         key=lambda row: (row["server_id"], streaming.stream_sort_key(row["stream_id"]))
     )
     return new_rows, changed_rows, missing_rows
+
+
+def provider_inventory_quarantine_keys(
+    inventories: Sequence[PanelInventory],
+) -> set[tuple[str, str]]:
+    """Return validated presence-only IDs; never accept an arbitrary skip list."""
+    keys: set[tuple[str, str]] = set()
+    for inventory in inventories:
+        ids = inventory.quarantined_stream_ids
+        if (
+            not isinstance(ids, tuple)
+            or any(not isinstance(value, str) for value in ids)
+            or len(set(ids)) != len(ids)
+        ):
+            raise SyncError("Provider blank-name quarantine identities are invalid.")
+        if (
+            len(ids) > MAX_BLANK_NAME_QUARANTINE_ROWS
+            or len(ids) * 100 > len(inventory.channels) + len(ids)
+        ):
+            raise SyncError("Provider blank-name quarantine exceeds its fixed limits.")
+        current_ids = {
+            str(channel.get("stream_id", "")).lstrip("0") or "0"
+            for channel in inventory.channels
+        }
+        for stream_id in ids:
+            if (
+                not isinstance(stream_id, str)
+                or _exact_numeric_stream_id(stream_id) != stream_id
+                or stream_id in current_ids
+            ):
+                raise SyncError("Provider blank-name quarantine identities are invalid.")
+            key = (streaming.normalize_server_id(inventory.server_id), stream_id)
+            if key in keys:
+                raise SyncError("Provider blank-name quarantine identities are duplicated.")
+            keys.add(key)
+    return keys
 
 
 def select_review_recheck_rows(
@@ -3458,7 +3593,7 @@ def write_mapping_snapshot(
     changed_rows: Sequence[Mapping[str, str]] = (),
     persistent_quarantine_keys: Iterable[tuple[str, str]] = (),
 ) -> None:
-    """Write the build snapshot, quarantining severe ID reuse without editing Sheet."""
+    """Write the build snapshot with safety quarantine, without editing Sheet."""
     quarantine_keys = snapshot_quarantine_keys(
         changed_rows, persistent_quarantine_keys
     )
@@ -3467,7 +3602,7 @@ def write_mapping_snapshot(
         row = dict(original)
         if (
             streaming.clean_text(row.get("reason", ""), 500)
-            == streaming.EFFECTIVE_QUARANTINE_REASON
+            in streaming.RESERVED_EFFECTIVE_QUARANTINE_REASONS
         ):
             raise SyncError(
                 "A Google Sheet row contains the reserved effective-snapshot "
@@ -3481,8 +3616,8 @@ def write_mapping_snapshot(
             # The builder intentionally includes every enabled row in its
             # metadata output, even when the mapping action is REVIEW.  Keep
             # the private Mappings tab untouched, but disable this row in the
-            # ephemeral build snapshot so a suspected recycled stream ID
-            # cannot leak stale metadata or an old schedule into publication.
+            # ephemeral build snapshot so a suspected recycled or currently
+            # invalid provider identity cannot publish stale metadata/guides.
             row["enabled"] = "FALSE"
             row["action"] = "REVIEW"
             row["metadata_status"] = "review"
@@ -3544,7 +3679,7 @@ def write_private_mapping_snapshot_bundle(
         )
     if any(
         streaming.clean_text(row.get("reason", ""), 500)
-        == streaming.EFFECTIVE_QUARANTINE_REASON
+        in streaming.RESERVED_EFFECTIVE_QUARANTINE_REASONS
         for row in table.rows
     ):
         raise SyncError(
@@ -3602,7 +3737,7 @@ def write_private_mapping_snapshot_bundle(
     if applied_digest != validation["quarantine_keys_sha256"]:
         raise SyncError(
             "The effective mapping snapshot did not quarantine exactly the "
-            "required current-risk and OPEN-alert identities."
+            "required runtime safety identities."
         )
     expected_counts = Counter(server_id for server_id, _stream_id in applied_keys)
     for server_id, stats in validation["servers"].items():
@@ -6665,7 +6800,10 @@ def _run_sync_review_mode(
         if config is not None:
             validate_provider_inventory_secret_safe(
                 provider_inventory.categories,
-                provider_inventory.channels,
+                [*provider_inventory.channels, *(
+                    {"stream_id": value}
+                    for value in provider_inventory.quarantined_stream_ids
+                )],
                 provider_reflection_needles(config, [config.base_url]),
             )
 
@@ -6685,6 +6823,9 @@ def _run_sync_review_mode(
             )
         )
 
+    provider_quarantine_keys = provider_inventory_quarantine_keys(inventories).intersection(
+        authoritative_table.keys
+    )
     discovered_rows, changed_rows, missing_rows = compare_inventory(
         authoritative_table, inventories, discovered_at=generated_at
     )
@@ -6692,7 +6833,9 @@ def _run_sync_review_mode(
     pending_alerts = pending_sync_alert_rows(
         changed_rows, existing_alerts, detected_at=generated_at
     )
-    persistent_quarantine_keys = open_alert_quarantine_keys(existing_alerts)
+    persistent_quarantine_keys = open_alert_quarantine_keys(existing_alerts).union(
+        provider_quarantine_keys
+    )
     pending_quarantine_keys = {_row_identity(row) for row in pending_alerts}
     # This exact set is part of the matcher input. Any added or removed OPEN
     # quarantine before a write invalidates not only target rows but also the
@@ -7017,7 +7160,7 @@ def _run_sync_review_mode(
             )
         )
         latest_open_keys = open_alert_quarantine_keys(latest_alerts).union(
-            pending_quarantine_keys
+            pending_quarantine_keys, provider_quarantine_keys
         )
         verified_rows, provider_stats = revalidate_provider_identity_updates(
             candidate_rows,
@@ -7269,6 +7412,7 @@ def _run_sync_review_mode(
         "review_recheck_servers": list(selected_servers),
         "review_apply_limit": review_apply_limit,
         "inventory_rows": sum(len(item.channels) for item in inventories),
+        "quarantined_provider_rows": sum(len(item.quarantined_stream_ids) for item in inventories),
         "new_rows": len(new_rows),
         "appended_rows": 0,
         "changed_rows": len(changed_rows),
@@ -7292,6 +7436,7 @@ def _run_sync_review_mode(
                 "source": item.source,
                 "channel_rows": len(item.channels),
                 "category_rows": len(item.categories),
+                "quarantined_provider_rows": len(item.quarantined_stream_ids),
             }
             for item in inventories
         },
@@ -7417,7 +7562,9 @@ def _run_sync_review_mode(
         )
         persist_reports()
         raise
-    persistent_quarantine_keys = open_alert_quarantine_keys(verified_alerts)
+    persistent_quarantine_keys = open_alert_quarantine_keys(verified_alerts).union(
+        provider_quarantine_keys
+    )
     if persistent_quarantine_keys != match_time_quarantine_keys:
         summary["sync_alert_verification_error"] = (
             "The OPEN Sync Alerts quarantine set changed after matching; "
@@ -7460,7 +7607,9 @@ def _run_sync_review_mode(
             )
             persist_reports()
             raise
-        latest_quarantine = open_alert_quarantine_keys(latest_alerts)
+        latest_quarantine = open_alert_quarantine_keys(latest_alerts).union(
+            provider_quarantine_keys
+        )
         if latest_quarantine != match_time_quarantine_keys:
             newly_blocked = latest_quarantine.difference(match_time_quarantine_keys)
             removed_blocks = match_time_quarantine_keys.difference(latest_quarantine)
@@ -7896,7 +8045,9 @@ def _run_sync_review_mode(
         )
         persist_reports()
         raise
-    terminal_quarantine_keys = open_alert_quarantine_keys(terminal_alerts)
+    terminal_quarantine_keys = open_alert_quarantine_keys(terminal_alerts).union(
+        provider_quarantine_keys
+    )
     if terminal_quarantine_keys != match_time_quarantine_keys:
         summary["sync_alert_quarantine_keys_added"] = len(
             terminal_quarantine_keys.difference(match_time_quarantine_keys)
@@ -8050,7 +8201,10 @@ def run_sync(
             continue
         validate_provider_inventory_secret_safe(
             provider_inventory.categories,
-            provider_inventory.channels,
+            [*provider_inventory.channels, *(
+                {"stream_id": value}
+                for value in provider_inventory.quarantined_stream_ids
+            )],
             provider_reflection_needles(config, [config.base_url]),
         )
     if google_session is not None:
@@ -8070,6 +8224,9 @@ def run_sync(
                 google_session, validate_sheet_id(sheet_id), alerts_tab
             )
         )
+    provider_quarantine_keys = provider_inventory_quarantine_keys(inventories).intersection(
+        authoritative_table.keys
+    )
     new_rows, changed_rows, missing_rows = compare_inventory(
         authoritative_table, inventories, discovered_at=generated_at
     )
@@ -8078,7 +8235,8 @@ def run_sync(
         changed_rows, existing_alerts, detected_at=generated_at
     )
     pre_match_quarantine_keys = open_alert_quarantine_keys(existing_alerts).union(
-        {_row_identity(row) for row in pre_match_pending_alerts}
+        {_row_identity(row) for row in pre_match_pending_alerts},
+        provider_quarantine_keys,
     )
     auto_match_summary: dict[str, Any] = {
         "auto_match_considered_rows": 0,
@@ -8158,7 +8316,9 @@ def run_sync(
     pending_alerts = pending_sync_alert_rows(
         changed_rows, existing_alerts, detected_at=generated_at
     )
-    persistent_quarantine_keys = open_alert_quarantine_keys(existing_alerts)
+    persistent_quarantine_keys = open_alert_quarantine_keys(existing_alerts).union(
+        provider_quarantine_keys
+    )
     projected_alert_bytes = validate_projected_alert_size(
         existing_alerts, pending_alerts
     )
@@ -8187,6 +8347,7 @@ def run_sync(
         **_native_review_summary_defaults(),
         **dict(native_hint_summary or {}),
         "inventory_rows": sum(len(inventory.channels) for inventory in inventories),
+        "quarantined_provider_rows": sum(len(item.quarantined_stream_ids) for item in inventories),
         "new_rows": len(new_rows),
         "appended_rows": 0,
         "changed_rows": len(changed_rows),
@@ -8207,6 +8368,7 @@ def run_sync(
                 "source": inventory.source,
                 "channel_rows": len(inventory.channels),
                 "category_rows": len(inventory.categories),
+                "quarantined_provider_rows": len(inventory.quarantined_stream_ids),
             }
             for inventory in inventories
         },
@@ -8275,7 +8437,7 @@ def run_sync(
                 verify_pending_alerts_are_open(pending_alerts, verified_alerts)
                 persistent_quarantine_keys = open_alert_quarantine_keys(
                     verified_alerts
-                )
+                ).union(provider_quarantine_keys)
                 existing_alerts = verified_alerts
                 summary["open_sync_alerts"] = sum(
                     1
@@ -8395,7 +8557,9 @@ def run_sync(
                     summary=summary,
                 )
                 raise
-            terminal_quarantine_keys = open_alert_quarantine_keys(terminal_alerts)
+            terminal_quarantine_keys = open_alert_quarantine_keys(terminal_alerts).union(
+                provider_quarantine_keys
+            )
             if terminal_quarantine_keys != pre_match_quarantine_keys:
                 summary["sync_alert_verification_error"] = (
                     "The OPEN Sync Alerts quarantine set changed after matching; "

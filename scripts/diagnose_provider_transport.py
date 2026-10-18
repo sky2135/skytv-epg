@@ -82,7 +82,8 @@ def actual_inventory_probe(config, allow_http: bool) -> dict:
         try:
             value = inventory.fetch_panel_inventory(session, sync_config, allow_insecure_http=allow_http)
             result.update(ok=True, source=value.source, categoryCount=len(value.categories),
-                          channelCount=len(value.channels))
+                          channelCount=len(value.channels),
+                          quarantinedRowCount=len(value.quarantined_stream_ids))
         except inventory.SyncError as error:
             result.update(ok=False, errorCode=inventory_error_code(error))
             result["httpStatusesInSafeDiagnostics"] = sorted({int(value) for value in re.findall(r"HTTP ([1-5][0-9]{2})\b", str(error))})
