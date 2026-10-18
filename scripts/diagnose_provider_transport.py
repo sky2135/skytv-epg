@@ -25,6 +25,72 @@ MAX_PUBLIC_COMPRESSED_BYTES = 8 * 1024 * 1024
 MAX_PUBLIC_EXPANDED_BYTES = 32 * 1024 * 1024
 
 
+def inventory_error_code(error: Exception) -> str:
+    text = str(error).casefold()
+    for fragment, code in (
+        ("persistence was blocked", "reflection_guard"),
+        ("password is too short", "short_password_guard"),
+        ("malformed percent", "malformed_transport_text"),
+        ("malformed html", "malformed_transport_text"),
+        ("transport-decoding safety limit", "text_scan_limit"),
+        ("account is not active", "inactive_account"),
+        ("rejected its configured credentials", "auth_rejected"),
+        ("unsafe credential redirect", "redirect_guard"),
+        ("network request failed", "network_error"),
+        ("duplicate", "duplicate_identity"),
+        ("conflicting", "conflicting_identity"),
+        ("no valid live inventory", "no_valid_inventory"),
+    ):
+        if fragment in text:
+            return code
+    return "sync_error"
+
+
+def actual_inventory_probe(config, allow_http: bool) -> dict:
+    sync_config = inventory.ServerConfig(config.server_id, "Server 1", config.base_url,
+                                         config.username, config.password)
+    result = {"serverId": config.server_id}
+    with clean_session() as session:
+        session.headers.update({"User-Agent": f"SKYTV-Channel-Inventory/{inventory.SYNC_VERSION}",
+                                "Accept": vod.PROVIDER_HEADERS["Accept"]})
+        try:
+            value = inventory.fetch_panel_inventory(session, sync_config, allow_insecure_http=allow_http)
+            result.update(ok=True, source=value.source, categoryCount=len(value.categories),
+                          channelCount=len(value.channels))
+        except inventory.SyncError as error:
+            result.update(ok=False, errorCode=inventory_error_code(error))
+            if result["errorCode"] in {"reflection_guard", "malformed_transport_text", "text_scan_limit"}:
+                try:
+                    bases = inventory.panel_base_candidates(sync_config.base_url, allow_insecure_http=allow_http)
+                    policy = inventory.provider_reflection_needles(sync_config, bases)
+                    counts = {}
+                    allowed_fields = {"stream_id","name","category_id","category_name",
+                                      "epg_channel_id","num","stream_icon"}
+                    for action in ("get_live_categories", "get_live_streams"):
+                        probe = inventory.request_panel_json(session, config.base_url+"/player_api.php",
+                            config.username, config.password, action, allow_insecure_http=allow_http)
+                        rows = inventory.normalize_panel_action_rows(probe.payload, action)
+                        rejected = 0
+                        for row in rows:
+                            try:
+                                inventory.validate_provider_inventory_secret_safe([row],[],policy)
+                            except inventory.SyncError:
+                                rejected += 1
+                                for field, value in row.items():
+                                    try:
+                                        inventory.validate_provider_inventory_secret_safe([{field:value}],[],policy)
+                                    except inventory.SyncError as field_error:
+                                        safe_field = field if field in allowed_fields else "other"
+                                        key = action+"."+safe_field+"."+inventory_error_code(field_error)
+                                        counts[key] = counts.get(key,0)+1
+                                if rejected >= 10:
+                                    break
+                    result["rejectedFieldCountsUpToTenRowsPerAction"] = counts
+                except inventory.SyncError as scan_error:
+                    result["fieldScanIssue"] = inventory_error_code(scan_error)
+    return result
+
+
 def clean_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
@@ -89,6 +155,10 @@ def inventory_probe(config, identity: str) -> dict:
                     result["payloadKind"] = "list" if isinstance(payload,list) else "object" if isinstance(payload,dict) else "other"
                     result["rowCount"] = len(payload) if isinstance(payload,list) else 0
                     result["authenticationRejected"] = vod._auth_rejected(payload)
+                    try:
+                        result["normalizedRowCount"] = len(inventory.normalize_panel_action_rows(payload, action))
+                    except inventory.SyncError as error:
+                        result["normalizationIssue"] = inventory_error_code(error)
             except (requests.RequestException, ValueError):
                 result["issue"] = "request_or_payload_failed"
             results.append(result)
@@ -163,6 +233,7 @@ def main() -> int:
     report = {"schemaVersion":1,"inventory":[],"redirect":{}}
     for identity in (f"SKYTV-Channel-Inventory/{inventory.SYNC_VERSION}", vod.PROVIDER_HEADERS["User-Agent"]):
         report["inventory"].append(inventory_probe(configs[0],identity))
+    report["actualInventory"] = actual_inventory_probe(configs[0], allow_http)
     try:
         report["redirect"] = redirect_probe(configs[1],configs)
     except requests.RequestException:
