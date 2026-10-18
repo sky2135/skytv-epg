@@ -616,6 +616,7 @@ jobs:
           )
           labels = (
               ("inventory_rows", "Channels found at available providers"),
+              ("quarantined_provider_rows", "Malformed provider rows held for review"),
               ("new_rows", "New channels found"),
               ("auto_matched_rows", "New channels safely matched automatically"),
               ("auto_match_review_rows", "New channels left for review"),
@@ -644,6 +645,12 @@ jobs:
               if count:
                   handle.write("\n**Degraded discovery:** unavailable providers retain their existing mappings; their new channels could not be checked.\n")
                   print("::warning::Discovery was partial: one or more provider inventories were unavailable.")
+              quarantined = payload.get("quarantined_provider_rows", 0)
+              if type(quarantined) is not int or not 0 <= quarantined <= 1_000_000:
+                  raise SystemExit("Invalid quarantined provider row count.")
+              if quarantined:
+                  handle.write("\n**Provider row quarantine:** identifiable malformed rows retain their existing mappings and are excluded from matching and missing-channel reports.\n")
+                  print(f"::warning::Held {quarantined} malformed provider row(s) for review; existing mappings were preserved.")
               handle.write("\n### Autonomous matching\n\n")
               matching_counts = (
                   ("review_recheck_safe_matches_persisted", "Existing mappings safely updated"),
@@ -691,7 +698,7 @@ jobs:
                           f"**{effective:,}**\n"
                       )
                       handle.write(
-                          f"- {label} rows safely excluded by OPEN alerts: "
+                          f"- {label} rows safely excluded by safety quarantine: "
                           f"**{quarantined:,}**\n"
                       )
                       handle.write(
