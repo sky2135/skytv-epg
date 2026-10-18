@@ -1,6 +1,6 @@
 # Provider availability recovery
 
-The October 18, 2026 publication failure had two independent causes:
+The initial October 18, 2026 publication failure had two independent causes:
 
 - Server 2 moved its XMLTV redirect to `epg-xml.dunze.org`. The configured
   provider returned that target, and a separate HTTPS request without account
@@ -41,3 +41,16 @@ statuses, row counts, fixed diagnostic codes and verified anonymous-host
 evidence. It never logs provider response bodies, account values, channel
 identities or credential-bearing URLs. Anonymous XMLTV sampling is a transport
 check; the normal publication pipeline still validates the full guide.
+
+A later refresh passed all three provider inventory and guide checks, then
+stopped on HTTP 502 while loading Server 2 movie categories. Inventory and VOD
+JSON reads now retry transient connection failures and HTTP 429/5xx responses
+up to three total attempts, with one- and two-second delays. Each attempt
+starts at the original configured endpoint and retains its credential,
+redirect and byte-limit checks. Partial VOD downloads continue consuming the
+same download budget across attempts.
+
+Authentication failures, TLS validation failures, unsafe redirects, byte-limit
+failures and invalid JSON or schema remain terminal. Exhausted retries still
+fail the build and preserve the last successful publication; no old inventory
+is relabelled as a successful fresh check.
