@@ -39,11 +39,37 @@ def inventory_error_code(error: Exception) -> str:
         ("network request failed", "network_error"),
         ("duplicate", "duplicate_identity"),
         ("conflicting", "conflicting_identity"),
+        ("id or name but not both", "partial_identity"),
+        ("non-channel row", "non_channel_row"),
+        ("non-object item", "non_object_row"),
+        ("empty item", "empty_row"),
+        ("unparseable item", "unparseable_row"),
         ("no valid live inventory", "no_valid_inventory"),
     ):
         if fragment in text:
             return code
     return "sync_error"
+
+
+def raw_stream_schema_summary(payload: list) -> dict:
+    issues = {}
+    valid_count = 0
+    for raw in payload:
+        if not isinstance(raw, dict):
+            code = "non_object_row"
+        elif not raw:
+            code = "empty_row"
+        else:
+            try:
+                row = inventory.normalize_stream_row(raw, allow_generic_id=True)
+                if row is not None:
+                    valid_count += 1
+                    continue
+                code = "unparseable_row"
+            except inventory.SyncError as error:
+                code = inventory_error_code(error)
+        issues[code] = issues.get(code, 0) + 1
+    return {"validRowCount":valid_count, "invalidRowCounts":issues}
 
 
 def actual_inventory_probe(config, allow_http: bool) -> dict:
@@ -59,6 +85,7 @@ def actual_inventory_probe(config, allow_http: bool) -> dict:
                           channelCount=len(value.channels))
         except inventory.SyncError as error:
             result.update(ok=False, errorCode=inventory_error_code(error))
+            result["httpStatusesInSafeDiagnostics"] = sorted({int(value) for value in re.findall(r"HTTP ([1-5][0-9]{2})\b", str(error))})
             if result["errorCode"] in {"reflection_guard", "malformed_transport_text", "text_scan_limit"}:
                 try:
                     bases = inventory.panel_base_candidates(sync_config.base_url, allow_insecure_http=allow_http)
@@ -159,6 +186,8 @@ def inventory_probe(config, identity: str) -> dict:
                         result["normalizedRowCount"] = len(inventory.normalize_panel_action_rows(payload, action))
                     except inventory.SyncError as error:
                         result["normalizationIssue"] = inventory_error_code(error)
+                        if action == "get_live_streams" and isinstance(payload, list):
+                            result["schemaSummary"] = raw_stream_schema_summary(payload)
             except (requests.RequestException, ValueError):
                 result["issue"] = "request_or_payload_failed"
             results.append(result)
