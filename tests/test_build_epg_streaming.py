@@ -2172,6 +2172,38 @@ class MappingContractTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_albanian_star_plus_quality_id_cannot_supply_indian_metadata_or_logo(self) -> None:
+        registry = runner.ChannelRegistry(
+            [{"id": "StarPlus.in", "name": "Star Plus", "country": "IN"}], [],
+            [{"code": "AL", "name": "Albania"}, {"code": "IN", "name": "India"}],
+        )
+        raw = _mapping_row(
+            server_id="server_2", stream_id="698105", channel_name="AL: STAR PLUS HD",
+            category_name="Albania", epg_id="STAR.PLUS.HD.in",
+        )
+        row = runner.parse_mapping_csv(
+            _mapping_bytes([raw]), {"server_2"}, channel_registry=registry,
+        )[0]
+        self.assertEqual(row.epg_id, "STAR.PLUS.HD.in")
+        self.assertEqual(row.metadata.countries, ["AL"])
+        self.assertEqual(row.metadata.primary_language, "und")
+        self.assertEqual(row.metadata_evidence.get("identityReview"),
+                         "selected_id_name_or_market_disagreement")
+        connection = runner.sqlite3.connect(":memory:")
+        try:
+            connection.execute(
+                "CREATE TABLE channels (source_key TEXT, channel_key TEXT, "
+                "display_name TEXT, icon_url TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO channels VALUES (?, ?, ?, ?)",
+                ("epgshare01", row.epg_id, "STAR PLUS HD", "https://logos.test/star-plus-india.png"),
+            )
+            self.assertEqual(runner.resolve_row_icon(
+                row, connection, runner.empty_icon_overrides()), "")
+        finally:
+            connection.close()
+
     def test_exact_xmltv_ids_and_channel_aliases_preserve_double_spaces(self) -> None:
         exact_id = "US-MoreMax  Eastern"
         exact_alias = "USA: HBO  COMEDY"

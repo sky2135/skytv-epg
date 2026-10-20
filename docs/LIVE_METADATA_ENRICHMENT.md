@@ -16,6 +16,9 @@ withheld. Reviewed broadcaster facts in `config/channel_metadata_facts.json`
 fill supported gaps and correct the specific audited genre errors. Regional
 or dubbed-feed disagreements remain unverified instead of inheriting a
 different country's language or branding.
+The logo conflict check also recognizes a unique registry identity expressed
+by a source ID's normalized name and country, such as `STAR.PLUS.HD.in`.
+This check can reject a conflicting image; it never assigns a schedule.
 
 `EPG/server_N_metadata.json.gz` remains schema v1. Enriched rows include
 `metadataEvidence` with the source, channel ID, method and changed facets.

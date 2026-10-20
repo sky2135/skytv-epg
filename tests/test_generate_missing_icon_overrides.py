@@ -591,6 +591,7 @@ class MissingIconOverrideTests(unittest.TestCase):
             {"id": "Independent.pt", "name": "Independent Channel", "country": "PT"},
             {"id": "KTV.al", "name": "KTV", "country": "AL"},
             {"id": "KTV.in", "name": "KTV", "country": "IN"},
+            {"id": "StarPlus.in", "name": "Star Plus", "country": "IN"},
         ]
         registry = ChannelRegistry(channels, [], [
             {"code": "PT", "name": "Portugal"}, {"code": "AL", "name": "Albania"},
@@ -601,15 +602,20 @@ class MissingIconOverrideTests(unittest.TestCase):
              "url": "https://logos.test/canal-hollywood.png"},
             {"channel": "KTV.al", "feed": None, "in_use": True,
              "url": "https://logos.test/ktv-albania.png"},
+            {"channel": "StarPlus.in", "feed": None, "in_use": True,
+             "url": "https://logos.test/star-plus-india.png"},
         ])
         names = [("star", "PT - Star Movies"), ("missing", "PT - Independent Channel"),
                  ("albania", "AL - KTV"), ("manual", "PT - Star Movies"),
-                 ("valid", "PT - Canal Hollywood"), ("sheet", "PT - Star Movies")]
+                 ("valid", "PT - Canal Hollywood"), ("sheet", "PT - Star Movies"),
+                 ("698105", "AL: STAR PLUS HD"), ("698677", "AL: STAR PLUS HD")]
         rows = [{"server_id": "server_1", "stream_id": rid, "enabled": "TRUE",
-                 "channel_name": name, "canonical_name": "KTV" if rid == "albania" else "Canal Hollywood",
+                 "channel_name": name, "canonical_name": "KTV" if rid == "albania" else
+                     name if rid in {"698105", "698677"} else "Canal Hollywood",
                  "genre": "movies", "channel_role": "linear", "source": "epgshare01",
                  "action": "APPROVED", "epg_feed": "ALL_SOURCES1",
-                 "epg_id": "KTV.in" if rid == "albania" else "CanalHollywood.pt",
+                 "epg_id": "KTV.in" if rid == "albania" else
+                           "STAR.PLUS.HD.in" if rid in {"698105", "698677"} else "CanalHollywood.pt",
                  "logo_url": "https://logos.test/sheet.png" if rid == "sheet" else ""}
                 for rid, name in names]
         with tempfile.TemporaryDirectory() as temporary:
@@ -636,6 +642,8 @@ class MissingIconOverrideTests(unittest.TestCase):
                 <icon src="https://logos.test/star-movies.png"/></channel>
               <channel id="KTV.in"><display-name>KTV</display-name>
                 <icon src="https://logos.test/ktv-india.png"/></channel>
+              <channel id="STAR.PLUS.HD.in"><display-name>Star Plus HD</display-name>
+                <icon src="https://logos.test/star-plus-india.png"/></channel>
             </tv>''')
             with mock.patch.object(generator.RegistryLogoIndex, "from_directory", return_value=index):
                 summary = generator.generate(mapping_csv=mapping, source_xmltv=source,
@@ -648,8 +656,9 @@ class MissingIconOverrideTests(unittest.TestCase):
         self.assertEqual(configured["albania"]["icon_url"], "https://logos.test/ktv-albania.png")
         self.assertEqual(configured["manual"]["icon_url"], "https://logos.test/reviewed.png")
         for category in ("mapping_logo", "manual_override", "source_xmltv", "source_name_xmltv",
-                         "registry_logo", "real_channel_no_override"):
+                         "registry_logo"):
             self.assertEqual(summary["coverage"][category], 1)
+        self.assertEqual(summary["coverage"]["real_channel_no_override"], 3)
 
     def test_registry_logo_precedes_generated_artwork(self):
         row = {
