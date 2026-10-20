@@ -22,8 +22,10 @@ import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import urlparse
 
 import requests
 
@@ -34,6 +36,9 @@ CATALOG_FILES = (*REGISTRY_FILES, "logos.json")
 MAX_CATALOG_BYTES = 25 * 1024 * 1024
 MAX_CATALOG_ROWS = 150_000
 SCHEMA = "skytv-channel-registry-v1"
+RULES_VERSION = "2026-10-20.1"
+CURATED_FACTS_PATH = Path(__file__).resolve().parents[1] / "config" / "channel_metadata_facts.json"
+AUTOMATIC_SOURCES = {"provider_category", "channel_name", "registry", "epgshare", "default"}
 
 # ISO 639-3 broadcast-language codes -> the app's preferred BCP-47 base tags.
 # Unmapped valid ISO 639-3 codes remain valid three-letter BCP-47 tags.
@@ -131,18 +136,23 @@ def _country(value: Any) -> str:
 
 def _provider_prefix(value: Any, valid_countries: set[str]) -> tuple[str, str]:
     value = _text(value)
+    # Quality concatenations are presentation grammar, not country codes:
+    # UKFHD : Sky Witness and UK HD : Sky Witness refer to the GB market.
+    quality_prefix = re.match(r"^([A-Z]{2,3}?)\s*(?:UHD|FHD|HD|SD)\s*[:|/-]\s*", value)
+    if quality_prefix and quality_prefix.group(1) not in AMBIGUOUS_PREFIXES and _country(quality_prefix.group(1)) in valid_countries:
+        return _country(quality_prefix.group(1)), value[quality_prefix.end():]
     subgroup = re.match(r"^([A-Z]{2})-[A-Z]{2,8}\s*[|:]\s*", value)
     if subgroup and _country(subgroup.group(1)) in valid_countries and subgroup.group(1) not in AMBIGUOUS_PREFIXES:
         return _country(subgroup.group(1)), value[subgroup.end():]
     # (US), |US|, .UK and US -/US| are actual provider presentation grammar.
-    matched = re.match(r"^\s*(?:\(([A-Z]{2,4})\)|\|([A-Z]{2,4})\||\.([A-Z]{2,4})\b|([A-Z]{2,4})\s*(?:[|:/-]|\s+-))\s*", value)
+    matched = re.match(r"^\s*(?:\[([A-Z]{2,4})\]|\(([A-Z]{2,4})\)|\|([A-Z]{2,4})\||\.([A-Z]{2,4})\b|([A-Z]{2,4})\s*(?:[|:/-]|\s+-))\s*", value)
     if not matched:
         return "", value
     token = next(part for part in matched.groups() if part)
     country = _country(token)
     if token in AMBIGUOUS_PREFIXES or country not in valid_countries:
         # Still strip known language/region presentation, without assigning a country.
-        if token in AMBIGUOUS_PREFIXES | {"EN", "ENG", "LAT", "INT", "VIP", "XX"}:
+        if token in AMBIGUOUS_PREFIXES | {"EN", "ENG", "LAT", "INT", "VIP", "XX", "TAM", "TEL", "MAL", "PJB", "PB", "BGL", "BENG", "HIN", "GUJ", "MAR"}:
             return "", value[matched.end():]
         return "", value
     return country, value[matched.end():]
@@ -170,6 +180,50 @@ def _provider_language(raw: Mapping[str, Any]) -> list[str]:
             if code not in found:
                 found.append(code)
     return found
+
+
+LANGUAGE_WORDS = {
+    "english": "en", "hindi": "hi", "punjabi": "pa", "panjabi": "pa",
+    "urdu": "ur", "tamil": "ta", "telugu": "te", "bengali": "bn", "bangla": "bn",
+    "gujarati": "gu", "marathi": "mr", "malayalam": "ml", "kannada": "kn",
+    "bhojpuri": "bho", "odia": "or", "oriya": "or", "assamese": "as",
+    "nepali": "ne", "sinhala": "si", "sinhalese": "si", "french": "fr",
+    "spanish": "es", "arabic": "ar", "mandarin": "zh", "cantonese": "yue",
+    "japanese": "ja", "korean": "ko", "portuguese": "pt", "german": "de", "italian": "it",
+}
+
+
+def _language_words(value: Any) -> list[str]:
+    words = re.findall(r"[^\W\d_]+", _text(value).casefold())
+    return list(dict.fromkeys(LANGUAGE_WORDS[word] for word in words if word in LANGUAGE_WORDS))
+
+
+@lru_cache(maxsize=1)
+def load_curated_facts() -> tuple[dict[str, Any], ...]:
+    """Load reviewed public facts with stable rule/source provenance."""
+    if CURATED_FACTS_PATH.stat().st_size > 1024 * 1024:
+        raise RegistryError("Curated channel facts exceed the size limit")
+    data = json.loads(CURATED_FACTS_PATH.read_text(encoding="utf-8"))
+    if data.get("schemaVersion") != 1 or data.get("rulesVersion") != RULES_VERSION or not isinstance(data.get("facts"), list) or len(data["facts"]) > 500:
+        raise RegistryError("Invalid curated channel facts schema/version")
+    seen = set()
+    for fact in data["facts"]:
+        if not isinstance(fact, dict) or not re.fullmatch(r"[a-z0-9]+", _text(fact.get("id"))) or fact["id"] in seen:
+            raise RegistryError("Invalid/duplicate curated channel fact identity")
+        seen.add(fact["id"])
+        for key in ("names", "channelIds", "originCountries", "languageMarkets"):
+            if not isinstance(fact.get(key), list) or len(fact[key]) > 40 or any(not isinstance(value, str) or not 0 < len(value) <= 512 for value in fact[key]):
+                raise RegistryError("Invalid curated channel fact identity list")
+        if not fact["names"] or not fact["channelIds"] and fact.get("directExactNameOnly") is not True:
+            raise RegistryError("Curated channel fact has no reviewed identity")
+        if fact.get("genre") is not None and fact["genre"] not in set(CATEGORY_GENRES.values()):
+            raise RegistryError("Invalid curated channel genre")
+        if fact.get("language") is not None and not re.fullmatch(r"[a-z]{2,3}", fact["language"]):
+            raise RegistryError("Invalid curated channel language")
+        source = urlparse(_text(fact.get("sourceUrl")))
+        if source.scheme != "https" or not source.hostname or source.username or source.password or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", _text(fact.get("checkedAt"))):
+            raise RegistryError("Curated channel fact is missing public source provenance")
+    return tuple(data["facts"])
 
 
 def _validate_catalog(filename: str, payload: Any) -> list[dict[str, Any]]:
@@ -229,6 +283,16 @@ class ChannelRegistry:
         self.records: dict[str, ChannelRecord] = {}
         self.by_id: dict[str, ChannelRecord] = {}
         self.by_name: dict[str, set[str]] = defaultdict(set)
+        self.by_primary_name: dict[str, set[str]] = defaultdict(set)
+        self.curated_by_channel: dict[str, dict[str, Any]] = {}
+        self.curated_by_name: dict[str, dict[str, Any]] = {}
+        for fact in load_curated_facts():
+            for channel_id in fact["channelIds"]:
+                if channel_id in self.curated_by_channel:
+                    raise RegistryError("Curated channel facts contain overlapping channel identities")
+                self.curated_by_channel[channel_id] = fact
+            for alias in fact["names"]:
+                self.curated_by_name[normalize_name(alias)] = fact
         for channel in channels:
             if channel.get("closed") or channel.get("replaced_by"):
                 continue
@@ -236,7 +300,10 @@ class ChannelRegistry:
             channel_feeds = feed_rows.get(channel_id, [])
             main_feeds = [feed for feed in channel_feeds if feed.get("is_main") is True]
             if main_feeds:
-                languages = sorted({LANGUAGE_TAGS.get(code, code) for feed in main_feeds for code in feed.get("languages", []) if code not in {"und", "mul"}})
+                # Different main-language variants are alternative feeds, not
+                # proof that an unidentified stream carries every audio track.
+                variants = {tuple(sorted(feed.get("languages", []))) for feed in main_feeds}
+                languages = sorted({LANGUAGE_TAGS.get(code, code) for code in next(iter(variants), ()) if code not in {"und", "mul"}}) if len(variants) == 1 else []
             else:
                 # A channel with different regional feed languages has no defensible
                 # language for an unidentified feed. Require unanimous feed evidence.
@@ -251,10 +318,18 @@ class ChannelRegistry:
             )
             self.records[channel_id] = record
             self.by_id[channel_id.casefold()] = record
+            self.by_primary_name[normalize_name(record.name)].add(channel_id)
             for name in (*record.names, channel_id.rsplit(".", 1)[0]):
                 normalized = normalize_name(name)
                 if len(normalized) >= 2:
                     self.by_name[normalized].add(channel_id)
+        # Reviewed spelling/renaming aliases can identify the exact allowed
+        # registry IDs, while market filtering and ambiguity checks still run.
+        # Do not make a generic reviewed name unique across foreign services.
+        for fact in self.curated_by_channel.values():
+            available = {channel_id for channel_id in fact["channelIds"] if channel_id in self.records}
+            for name in fact["names"]:
+                self.by_name[normalize_name(name)].update(available)
 
     @classmethod
     def from_directory(cls, directory: Path | str) -> "ChannelRegistry":
@@ -273,18 +348,63 @@ class ChannelRegistry:
 
     def resolve_channel(self, name: str, countries: Iterable[str] = (), epg_id: str = "") -> ChannelRecord | None:
         """Resolve one exact name/alias/ID; never pick among ambiguous brands."""
-        direct = self.by_id.get(_text(epg_id).casefold())
-        if direct:
-            return direct
         prefix_country, stripped = _provider_prefix(name, self.valid_countries)
-        ids = self.by_name.get(normalize_name(stripped), set())
-        if not ids:
-            return None
-        hints = {_country(value) for value in countries if value} | ({prefix_country} if prefix_country else set())
+        normalized = normalize_name(stripped)
+        ids = set(self.by_name.get(normalized, ()))
+        # A provider's explicit market prefix outranks an older inferred cell.
+        hints = {prefix_country} if prefix_country else {_country(value) for value in countries if value}
         if hints:
             origins = {channel_id for channel_id in ids if self.records[channel_id].country in hints}
             ids = origins or {channel_id for channel_id in ids if hints.intersection(self.records[channel_id].broadcast_countries)}
+        primary = ids.intersection(self.by_primary_name.get(normalized, ()))
+        if primary:
+            ids = primary
+        direct = self.by_id.get(_text(epg_id).casefold())
+        if direct:
+            if hints and direct.country not in hints and not hints.intersection(direct.broadcast_countries):
+                return None
+            # An existing guide ID is not proof that unrelated same-market
+            # channel names agree (Star Movies PT vs Canal Hollywood PT).
+            if self.by_name.get(normalized) and direct.channel_id not in ids:
+                return None
+            return direct
         return self.records[next(iter(ids))] if len(ids) == 1 else None
+
+    def identity_name_verified(self, name: str, record: ChannelRecord) -> bool:
+        _, stripped = _provider_prefix(name, self.valid_countries)
+        return record.channel_id in self.by_name.get(normalize_name(stripped), ())
+
+    def selected_id_identity_conflict(self, name: str, countries: Iterable[str] = (), epg_id: str = "") -> bool:
+        """Identify positive selected-ID conflicts, not merely unknown labels.
+
+        Supply explicit market evidence in countries, rather than an older
+        inferred metadata country. A known contrary name/market blocks use of
+        canonical aliases and selected-guide images across all consumers.
+        """
+        direct = self.by_id.get(_text(epg_id).casefold())
+        if direct is None:
+            return False
+        prefix, stripped = _provider_prefix(name, self.valid_countries)
+        named_ids = self.by_name.get(normalize_name(stripped), set())
+        markets = tuple(countries)
+        resolved = self.resolve_channel(name, markets, epg_id)
+        if resolved is None and (named_ids or prefix or markets):
+            return True
+        fact = self.curated_by_name.get(normalize_name(stripped))
+        return bool(fact and fact.get("directExactNameOnly") is True
+                    and direct.channel_id not in fact["channelIds"]
+                    and not self.identity_name_verified(name, direct))
+
+    def curated_fact(self, name: str, record: ChannelRecord | None) -> dict[str, Any] | None:
+        if record and self.identity_name_verified(name, record):
+            fact = self.curated_by_channel.get(record.channel_id)
+            if fact and record.country in fact["originCountries"]:
+                return fact
+        _, stripped = _provider_prefix(name, self.valid_countries)
+        fact = self.curated_by_name.get(normalize_name(stripped))
+        # Only explicitly reviewed globally named services can operate without
+        # a registry identity. A short generic name such as KTV cannot.
+        return fact if fact and fact.get("directExactNameOnly") is True else None
 
     def country_evidence(self, raw: Mapping[str, Any]) -> tuple[list[str], str]:
         for key in ("channel_name", "canonical_name", "channelName", "canonicalName", "category_name", "providerCategory"):
@@ -300,7 +420,7 @@ class ChannelRegistry:
                 return [country], "epg_id_suffix"
             feed = _text(raw.get("epg_feed")).upper()
             matched = re.fullmatch(r"([A-Z]{2})(?:_LOCALS|_SPORTS)?\d+", feed)
-            if matched and _country(matched.group(1)) in self.valid_countries:
+            if matched and matched.group(1) not in AMBIGUOUS_PREFIXES and _country(matched.group(1)) in self.valid_countries:
                 return [_country(matched.group(1))], "epg_feed_market"
         return [], ""
 
@@ -313,7 +433,7 @@ def enrich_metadata(raw: Mapping[str, Any], metadata: Any, registry: ChannelRegi
     explicit per-field value from an older inferred value; enrich_rows fills
     only unknown fields for that reason.
     """
-    if metadata.locked or (metadata.source == "manual" and (
+    if metadata.locked or metadata.status == "approved" or (metadata.source == "manual" and (
         _text(raw.get("metadata_source")).casefold() == "manual" or metadata.status != "auto"
     )):
         return metadata, {}
@@ -321,30 +441,91 @@ def enrich_metadata(raw: Mapping[str, Any], metadata: Any, registry: ChannelRegi
     if not name or re.match(r"^\s*[#=_]{3,}", name) or metadata.channel_role in {"event", "ppv", "virtual"}:
         return metadata, {}
     market, market_method = registry.country_evidence(raw)
-    country_hints = _list(raw.get("country_codes")) or market or list(metadata.countries)
+    country_hints = market or _list(raw.get("country_codes")) or list(metadata.countries)
     record = registry.resolve_channel(name, country_hints, _text(raw.get("epg_id")))
-    if record is None:
+    _, stripped_name = _provider_prefix(name, registry.valid_countries)
+    identity_review = registry.selected_id_identity_conflict(name, market, _text(raw.get("epg_id")))
+    if record and not registry.identity_name_verified(name, record):
+        # A guide ID alone cannot turn an unrelated or unknown provider label
+        # into a verified channel identity for metadata corrections.
+        record = None
+    if record is None and not identity_review:
         canonical = _text(raw.get("canonical_name", raw.get("canonicalName")))
         if canonical and canonical != name:
             record = registry.resolve_channel(canonical, country_hints)
+            if record:
+                name = canonical
+                _, stripped_name = _provider_prefix(name, registry.valid_countries)
+    fact = registry.curated_fact(name, record) if not identity_review else None
+    source = _text(raw.get("metadata_source")).casefold()
+    automatic = source in AUTOMATIC_SOURCES or (not source and (metadata.source in AUTOMATIC_SOURCES or metadata.status == "auto"))
+    preserve_known = raw.get("enrichment_preserve_known") is True
+
+    def editable(field: str) -> bool:
+        value = raw.get(field)
+        known = any(_known(item) for item in _list(value))
+        return not known or automatic and not preserve_known
+
     updates: dict[str, Any] = {}
     facets: dict[str, str] = {}
-    if not _text(raw.get("country_codes")):
-        countries = market or ([record.country] if record else [])
+    if editable("country_codes"):
+        # Origin is a fill-only fallback. A proven provider market may correct
+        # an older automatic country inferred from an unrelated selected ID.
+        countries = []
+        if market_method == "provider_prefix":
+            countries = market
+        elif not metadata.countries:
+            countries = market or ([record.country] if record else [])
         if countries and countries != metadata.countries:
             updates["countries"] = countries
             facets["countries"] = market_method if market else "registry_channel_origin"
     countries = updates.get("countries", metadata.countries)
-    if countries and not _known(raw.get("region_code")):
+    if countries and editable("region_code"):
         regions = {COUNTRY_REGIONS[country] for country in countries if country in COUNTRY_REGIONS}
         if len(regions) == 1 and metadata.region != next(iter(regions)):
             updates["region"] = next(iter(regions))
             facets["region"] = "country_region"
-    languages = _provider_language(raw) or (list(record.languages) if record else [])
-    if not any(_known(code) for code in _list(raw.get("language_codes"))) and not any(_known(code) for code in metadata.languages) and not _known(raw.get("primary_language")) and languages:
-        updates["languages"] = languages
-        updates["primary_language"] = languages[0] if len(languages) == 1 else "mul"
-        facets["languages"] = "provider_language_prefix" if _provider_language(raw) else "registry_broadcast_feed"
+
+    # Category labels are never positive language evidence. They can expose a
+    # conflict requiring a feed/audio review, such as Tamil-bank Sony PIX.
+    literal_languages = _language_words(stripped_name)
+    bank_languages = _provider_language(raw)
+    category_languages = _language_words(raw.get("category_name", raw.get("providerCategory")))
+    fact_language = []
+    if fact and fact.get("language") and (
+        fact.get("directExactNameOnly") is True
+        or (set(country_hints or ([record.country] if record else [])).issubset(fact["languageMarkets"]))
+    ):
+        fact_language = [fact["language"]]
+    expected_languages = fact_language or (list(record.languages) if record else [])
+    language_review = ""
+    languages = literal_languages
+    language_method = "channel_name_language_version"
+    if identity_review:
+        languages = []
+        language_review = "selected_id_name_or_market_disagreement"
+    elif not languages:
+        if expected_languages:
+            conflicting_bank = bank_languages and not set(bank_languages).issubset(expected_languages)
+            conflicting_category = category_languages and not set(expected_languages).intersection(category_languages)
+            if conflicting_bank or conflicting_category:
+                language_review = "provider_audio_or_category_disagrees_with_named_feed"
+                languages = []
+            else:
+                languages = expected_languages
+                language_method = "reviewed_domestic_channel_fact" if fact_language else "registry_broadcast_feed"
+        elif bank_languages:
+            language_review = "provider_language_bank_without_feed_corroboration"
+        elif any(_known(code) for code in metadata.languages) and automatic:
+            language_review = "no_identity_language_evidence"
+    if editable("language_codes") and editable("primary_language"):
+        # Unsupported older automatic values are withdrawn, not replaced by
+        # a guessed country language or a domestic-language assumption.
+        language_values = languages or ["und"]
+        primary = languages[0] if len(languages) == 1 else "mul" if languages else "und"
+        if language_values != metadata.languages or primary != metadata.primary_language:
+            updates.update(languages=language_values, primary_language=primary)
+            facets["languages"] = language_method if languages else "withheld_unverified_language"
     if record:
         if record.is_nsfw:
             # Exact adult identity strengthens an automatic classification even
@@ -356,7 +537,7 @@ def enrich_metadata(raw: Mapping[str, Any], metadata: Any, registry: ChannelRegi
             if changed:
                 updates.update(changed)
                 facets["genre"] = "registry_nsfw_identity"
-        elif not _known(raw.get("genre")) and metadata.genre == "unknown":
+        elif editable("genre") and metadata.genre == "unknown":
             genres = [CATEGORY_GENRES[category] for category in record.categories if category in CATEGORY_GENRES]
             genre = genres[0] if genres else ""
             if genre:
@@ -366,16 +547,41 @@ def enrich_metadata(raw: Mapping[str, Any], metadata: Any, registry: ChannelRegi
                     updates.update(audiences=["adults"], content_rating="adult", sports=[], religions=[])
                 elif genre == "kids" and not _text(raw.get("audience_codes")):
                     updates["audiences"] = ["kids"]
-    if not updates:
+    if fact and fact.get("genre") and metadata.genre != "adult" and editable("genre") and (
+        metadata.genre == "unknown" or fact.get("replaceAutomaticGenre") is True
+    ):
+        if fact["genre"] != updates.get("genre", metadata.genre):
+            updates["genre"] = fact["genre"]
+            facets["genre"] = "reviewed_broadcaster_channel_fact"
+            if fact["genre"] != "sports":
+                updates["sports"] = []
+            if fact["genre"] != "religion":
+                updates["religions"] = []
+            if editable("subgenres"):
+                updates["subgenres"] = []
+            if fact["genre"] == "kids" and editable("audience_codes"):
+                updates["audiences"] = ["kids"]
+    if identity_review or language_review:
+        if metadata.status != "review":
+            updates["status"] = "review"
+        if not _text(raw.get("metadata_confidence")) and metadata.confidence > 0.69:
+            updates["confidence"] = 0.69
+    if not updates and not identity_review and not language_review:
         return metadata, {}
     # These are still automatic assertions. Do not silently approve existing
     # review rows or weaken manual confidence controls.
-    updates["source"] = "registry" if record else "provider_category"
-    if not _text(raw.get("metadata_confidence")):
+    updates["source"] = "registry" if record or fact else "provider_category"
+    if not _text(raw.get("metadata_confidence")) and not identity_review and not language_review:
         updates["confidence"] = round(min(max(metadata.confidence, 0.82), 0.96), 3)
-    evidence = {"facets": facets, "method": "exact_channel_registry" if record else market_method}
+    evidence = {"rulesVersion": RULES_VERSION, "facets": facets, "method": "reviewed_channel_fact" if fact else "exact_channel_registry" if record else market_method}
     if record:
         evidence.update(channelId=record.channel_id, source=API_BASE + "channels.json", languageSource=API_BASE + "feeds.json")
+    if fact:
+        evidence["reviewedFact"] = {key: fact[key] for key in ("id", "sourceUrl", "sourceTitle", "checkedAt")}
+    if identity_review:
+        evidence["identityReview"] = "selected_id_name_or_market_disagreement"
+    if language_review:
+        evidence["languageReview"] = language_review
     return replace(metadata, **updates), evidence
 
 
@@ -385,6 +591,7 @@ def enrich_rows(rows: Sequence[Any], registry: ChannelRegistry) -> tuple[list[An
     for row in rows:
         metadata = row.metadata
         raw = {key: getattr(row, key, "") for key in ("channel_name", "canonical_name", "epg_id", "epg_feed", "requested_source", "category_name")}
+        raw["enrichment_preserve_known"] = True
         # Preserve already populated values: only the raw-aware entry point
         # may correct a weak previous inference with stronger market evidence.
         raw.update(country_codes="|".join(metadata.countries), region_code=metadata.region if metadata.region != "unknown" else "", genre=metadata.genre if metadata.genre != "unknown" else "", language_codes="|".join(code for code in metadata.languages if code != "und"), primary_language=metadata.primary_language if metadata.primary_language != "und" else "")

@@ -20,6 +20,7 @@ import requests
 import build_vod_catalogs as vod
 from vod_tmdb import TmdbClient
 from vod_series import enrich_series
+from vod_reviewed_corrections import apply_reviewed_correction, correction_for
 
 SCHEMA_VERSION = 1
 MAX_SHARD_RECORDS = 500
@@ -108,6 +109,11 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
     details = vod.normalize_detail_map(source.get(details_key, {}), kind=kind, label=details_key)
     baseline = not bool(state.get("initialized"))
     result = []
+    corrections = {}
+    for position, base in enumerate(normalized):
+        corrections[base["id"]] = correction_for(server_id, kind, base)
+        normalized[position] = apply_reviewed_correction(server_id, kind, base)
+        normalized[position]["contentId"] = f"{server_id}:{kind}:{base['id']}"
     priority = getattr(client, "enrichment_priority", lambda _item, _kind: 0)
     normalized.sort(key=lambda item: (priority(item, kind), vod._sort_item_id(item)))
     for base in normalized:
@@ -128,16 +134,40 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
         if movie:
             item["containerExtension"] = extension.lower() if SAFE_EXTENSION.fullmatch(extension) else None
         metadata = client.enrich(item, kind)
+        correction = corrections.get(provider_id)
+        rejected_identity = bool(metadata.get("rejectedIdentity")) or bool(correction and correction.get("rejectIdentity"))
+        if rejected_identity:
+            # No unrelated provider synopsis, artwork or date may reappear
+            # when a disproven TMDB/cache identity cannot be replaced yet.
+            item["tmdbId"] = None
+            item["releaseDate"] = None
+            item["genre"], item["genres"] = "unknown", []
+            item["artwork"] = {"posterUrl": None, "backdropUrl": None}
+            if item["adult"] is not True:
+                item["adult"] = None
+        metadata = dict(metadata)
+        if correction:
+            metadata.update(correction["metadata"])
+            item["metadataEvidence"] = {
+                "method": "reviewed_correction", "sourceURLs": correction["evidenceURLs"],
+            }
         item["metadataMatch"] = metadata.get("matchStatus", "unavailable")
-        item["tmdbId"] = metadata.get("tmdbId") or item["tmdbId"]
+        if correction and not item["metadataMatch"].startswith("matched_"):
+            item["metadataMatch"] = "reviewed_correction"
+        verified_external = metadata.get("matchStatus", "").startswith("matched_")
+        # Unvalidated provider IDs must not join a title to another work's
+        # trending/recommendation metadata. Playback continues to use id.
+        item["tmdbId"] = metadata.get("tmdbId") if verified_external else (
+            correction["metadata"].get("tmdbId") if correction else None)
         for key in ("overview", "originalTitle", "originalLanguage", "rating", "voteCount",
                     "popularity", "runtimeMinutes", "cast", "directors", "trailerUrl",
                     "seasonCount", "episodeCount", "status", "lastAirDate", "nextEpisode"):
             item[key] = metadata.get(key)
-        item["overview"] = item["overview"] or vod.clean_text(
-            vod._first_value(sources, ("plot", "description", "overview")), 4000) or None
-        item["rating"] = item["rating"] if item["rating"] is not None else number(
-            vod._first_value(sources, ("rating", "vote_average")), 10)
+        if not rejected_identity:
+            item["overview"] = item["overview"] or vod.clean_text(
+                vod._first_value(sources, ("plot", "description", "overview")), 4000) or None
+            item["rating"] = item["rating"] if item["rating"] is not None else number(
+                vod._first_value(sources, ("rating", "vote_average")), 10)
         item["releaseDate"] = metadata.get("releaseDate") or item["releaseDate"]
         if metadata.get("genres"):
             genre, genres = vod.normalize_genres([{"genre": metadata["genres"]}], "")
@@ -502,6 +532,33 @@ def validate_episode_inventory(output: Path, server_id: str, item: Mapping[str, 
         raise vod.CatalogBuildError("App available episode count does not match its inventory.")
 
 
+def validate_metadata_identity(server_id: str, kind: str, item: Mapping[str, Any]) -> None:
+    """Reject known audit regressions before any release pointer is replaced."""
+    correction = correction_for(server_id, kind, item)
+    reviewed_id = (correction or {}).get("metadata", {}).get("tmdbId")
+    matched = str(item.get("metadataMatch", "")).startswith("matched_")
+    if item.get("tmdbId") and not matched and item["tmdbId"] != reviewed_id:
+        raise vod.CatalogBuildError("App title contains an unverified TMDB identity.")
+    if correction is None:
+        return
+    if item.get("tmdbId") in correction.get("rejectedTmdbIds", []):
+        raise vod.CatalogBuildError("App title reintroduced a reviewed wrong-work TMDB identity.")
+    if correction.get("title") and item["title"] != correction["title"]:
+        raise vod.CatalogBuildError("App title lost its reviewed display-title correction.")
+    for field, expected in correction["metadata"].items():
+        if field == "genres":
+            genre, genres = vod.normalize_genres([{"genre": expected}], "")
+            if item["genre"] != genre or set(item["genres"]) - {"adult"} != set(genres) - {"adult"}:
+                raise vod.CatalogBuildError("App title lost its reviewed genre correction.")
+        elif item.get(field) != expected:
+            raise vod.CatalogBuildError("App title lost a reviewed metadata correction.")
+    if correction.get("year") and item.get("releaseDate") and item["releaseDate"][:4] != correction["year"]:
+        raise vod.CatalogBuildError("App title contradicts its reviewed release year.")
+    evidence = item.get("metadataEvidence", {})
+    if evidence.get("method") != "reviewed_correction" or evidence.get("sourceURLs") != correction["evidenceURLs"]:
+        raise vod.CatalogBuildError("App title lost its reviewed source evidence.")
+
+
 def validate(output: Path, *, epg_dir=None, expected_servers=vod.DEFAULT_SERVERS, index=None) -> dict:
     if index is None:
         index = vod._read_bounded_json(output / "index.json", 2 * 1024 * 1024, "App index")
@@ -533,6 +590,7 @@ def validate(output: Path, *, epg_dir=None, expected_servers=vod.DEFAULT_SERVERS
                         raise vod.CatalogBuildError("App title identity is invalid or duplicated.")
                     base = {key: item[key] for key in ("id", "title", "category", "language", "languages", "genre", "genres", "releaseDate", "adult", "tmdbId", "artwork")}
                     vod._validate_catalog_item(base, label="App title")
+                    validate_metadata_identity(server["serverId"], kind, item)
                     provider_key = "providerStreamId" if kind == "movie" else "providerSeriesId"
                     if item.get(provider_key) != item["id"]:
                         raise vod.CatalogBuildError("App playback identifier does not match its catalog ID.")

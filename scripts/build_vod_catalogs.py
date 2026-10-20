@@ -28,9 +28,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
-from urllib.parse import parse_qsl, quote, quote_plus, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
+from vod_reviewed_corrections import apply_reviewed_correction
 
 
 SCHEMA_VERSION = 1
@@ -46,6 +47,8 @@ MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_CATALOG_DECOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_TEXT_LENGTH = 500
 MAX_ARTWORK_URL_LENGTH = 2_048
+PUBLIC_GOOGLE_THUMBNAIL_HOST = re.compile(r"encrypted-tbn[0-3]\.gstatic\.com\Z")
+PUBLIC_GOOGLE_THUMBNAIL_KEY = re.compile(r"tbn:ANd9Gc[A-Za-z0-9_-]{16,800}\Z")
 REQUEST_TIMEOUT = (15, 90)
 PROVIDER_REQUEST_ATTEMPTS = 3
 # Use the same application identity as the existing EPG publisher. Some panels
@@ -873,8 +876,24 @@ def normalize_artwork_url(
     netloc = f"[{host}]" if ":" in host else host
     if port is not None:
         netloc += f":{port}"
+    if PUBLIC_GOOGLE_THUMBNAIL_HOST.fullmatch(host):
+        # /images is a lookup endpoint, not a standalone image. Removing its
+        # public thumbnail key produces a known 404. Retain only the narrowly
+        # typed public key; account/signature/tracking parameters never pass.
+        if parsed.path != "/images" or port not in (None, 443) or parsed.fragment:
+            return None
+        try:
+            pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=3)
+        except ValueError:
+            return None
+        query = dict(pairs)
+        if (len(query) != len(pairs) or set(query) - {"q", "usqp"}
+                or query.get("usqp", "CAU") != "CAU"
+                or not PUBLIC_GOOGLE_THUMBNAIL_KEY.fullmatch(query.get("q", ""))):
+            return None
+        return urlunsplit(("https", host, "/images", urlencode({"q": query["q"]}), ""))
     # Provider query strings can contain expiring signatures or account data;
-    # publishing stable, query-free artwork is the conservative contract.
+    # all other artwork continues to use the query-free contract.
     return urlunsplit((parsed.scheme.casefold(), netloc, parsed.path, "", ""))
 
 
@@ -977,21 +996,25 @@ def normalize_catalog(
         seen[item_id] = item
         output.append(item)
     output.sort(key=_sort_item_id)
-    completeness = {
-        "languageKnown": sum(item["language"] != "und" for item in output),
-        "genreKnown": sum(item["genre"] != "unknown" for item in output),
-        "releaseDateKnown": sum(item["releaseDate"] is not None for item in output),
-        "adultKnown": sum(item["adult"] is not None for item in output),
-        "tmdbIdKnown": sum(item["tmdbId"] is not None for item in output),
-        "artworkKnown": sum(
-            bool(item["artwork"]["posterUrl"] or item["artwork"]["backdropUrl"])
-            for item in output
-        ),
-    }
     return output, {
         "inputCount": len(rows),
         "skippedInvalid": skipped,
-        "completeness": completeness,
+        "completeness": catalog_completeness(output),
+    }
+
+
+def catalog_completeness(items: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """Count the final published facts, including reviewed corrections."""
+    return {
+        "languageKnown": sum(item["language"] != "und" for item in items),
+        "genreKnown": sum(item["genre"] != "unknown" for item in items),
+        "releaseDateKnown": sum(item["releaseDate"] is not None for item in items),
+        "adultKnown": sum(item["adult"] is not None for item in items),
+        "tmdbIdKnown": sum(item["tmdbId"] is not None for item in items),
+        "artworkKnown": sum(
+            bool(item["artwork"]["posterUrl"] or item["artwork"]["backdropUrl"])
+            for item in items
+        ),
     }
 
 
@@ -1719,6 +1742,10 @@ def publish_server(
         label=f"{server_id} series",
         blocked_artwork_hostname=blocked_artwork_hostname,
     )
+    movies = [apply_reviewed_correction(server_id, "movie", item) for item in movies]
+    series = [apply_reviewed_correction(server_id, "series", item) for item in series]
+    movie_stats["completeness"] = catalog_completeness(movies)
+    series_stats["completeness"] = catalog_completeness(series)
     ensure_no_secret_reflection({"movies": movies, "series": series}, config)
 
     # Data files are deliberately installed before their checksum manifest.

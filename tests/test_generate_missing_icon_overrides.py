@@ -582,6 +582,75 @@ class MissingIconOverrideTests(unittest.TestCase):
         self.assertEqual(summary["named_symbol_rows"], 0)
         self.assertEqual(configured[0]["icon_url"], "https://logos.test/exact-lata-channel.png")
 
+    def test_positive_identity_conflict_blocks_source_and_canonical_logo_reuse(self):
+        from channel_metadata_enrichment import ChannelRegistry
+        from logo_enrichment import RegistryLogoIndex
+        channels = [
+            {"id": "StarMovies.pt", "name": "Star Movies", "country": "PT"},
+            {"id": "CanalHollywood.pt", "name": "Canal Hollywood", "country": "PT"},
+            {"id": "Independent.pt", "name": "Independent Channel", "country": "PT"},
+            {"id": "KTV.al", "name": "KTV", "country": "AL"},
+            {"id": "KTV.in", "name": "KTV", "country": "IN"},
+        ]
+        registry = ChannelRegistry(channels, [], [
+            {"code": "PT", "name": "Portugal"}, {"code": "AL", "name": "Albania"},
+            {"code": "IN", "name": "India"},
+        ])
+        index = RegistryLogoIndex(registry, [
+            {"channel": "CanalHollywood.pt", "feed": None, "in_use": True,
+             "url": "https://logos.test/canal-hollywood.png"},
+            {"channel": "KTV.al", "feed": None, "in_use": True,
+             "url": "https://logos.test/ktv-albania.png"},
+        ])
+        names = [("star", "PT - Star Movies"), ("missing", "PT - Independent Channel"),
+                 ("albania", "AL - KTV"), ("manual", "PT - Star Movies"),
+                 ("valid", "PT - Canal Hollywood"), ("sheet", "PT - Star Movies")]
+        rows = [{"server_id": "server_1", "stream_id": rid, "enabled": "TRUE",
+                 "channel_name": name, "canonical_name": "KTV" if rid == "albania" else "Canal Hollywood",
+                 "genre": "movies", "channel_role": "linear", "source": "epgshare01",
+                 "action": "APPROVED", "epg_feed": "ALL_SOURCES1",
+                 "epg_id": "KTV.in" if rid == "albania" else "CanalHollywood.pt",
+                 "logo_url": "https://logos.test/sheet.png" if rid == "sheet" else ""}
+                for rid, name in names]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logos = root / "logos"
+            logos.mkdir()
+            mapping, base, catalog = (root / item for item in ("mapping.csv", "base.csv", "catalog.csv"))
+            source, output = root / "source.xml", root / "output.csv"
+            with mapping.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=(*MAPPING_COLUMNS, "canonical_name"))
+                writer.writeheader()
+                writer.writerows(rows)
+            with base.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=generator.CONFIG_COLUMNS)
+                writer.writeheader()
+                writer.writerow({"enabled": "true", "server_id": "server_1", "stream_id": "manual",
+                                 "icon_url": "https://logos.test/reviewed.png", "priority": "900",
+                                 "notes": "Reviewed manual override"})
+            catalog.write_text("subject_type,subject_name,asset_kind,review_status,license_id,local_file\n")
+            source.write_text('''<tv>
+              <channel id="CanalHollywood.pt"><display-name>Canal Hollywood</display-name>
+                <icon src="https://logos.test/canal-hollywood.png"/></channel>
+              <channel id="StarMovies.pt"><display-name>Star Movies</display-name>
+                <icon src="https://logos.test/star-movies.png"/></channel>
+              <channel id="KTV.in"><display-name>KTV</display-name>
+                <icon src="https://logos.test/ktv-india.png"/></channel>
+            </tv>''')
+            with mock.patch.object(generator.RegistryLogoIndex, "from_directory", return_value=index):
+                summary = generator.generate(mapping_csv=mapping, source_xmltv=source,
+                    base_config=base, output_config=output, logo_root=logos, asset_catalog=catalog,
+                    channel_registry_dir=root / "registry")
+            with output.open(encoding="utf-8", newline="") as handle:
+                configured = {row["stream_id"]: row for row in csv.DictReader(handle)}
+        self.assertEqual(set(configured), {"star", "albania", "manual"})
+        self.assertEqual(configured["star"]["icon_url"], "https://logos.test/star-movies.png")
+        self.assertEqual(configured["albania"]["icon_url"], "https://logos.test/ktv-albania.png")
+        self.assertEqual(configured["manual"]["icon_url"], "https://logos.test/reviewed.png")
+        for category in ("mapping_logo", "manual_override", "source_xmltv", "source_name_xmltv",
+                         "registry_logo", "real_channel_no_override"):
+            self.assertEqual(summary["coverage"][category], 1)
+
     def test_registry_logo_precedes_generated_artwork(self):
         row = {
             "server_id": "server_1", "stream_id": "1", "enabled": "TRUE",

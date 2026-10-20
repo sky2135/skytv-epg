@@ -203,6 +203,42 @@ class VodNormalizationTests(unittest.TestCase):
             )
         )
 
+    def test_google_thumbnails_keep_only_the_required_public_image_key(self) -> None:
+        key = "tbn:ANd9Gc" + "aB_123-" * 8
+        raw = f"https://encrypted-tbn0.gstatic.com/images?q={key}&usqp=CAU"
+        actual = vod.normalize_artwork_url(raw, tmdb_size="w500")
+        self.assertEqual(actual, "https://encrypted-tbn0.gstatic.com/images?q=tbn%3AANd9Gc" + "aB_123-" * 8)
+        self.assertEqual(vod.normalize_artwork_url(actual, tmdb_size="w500"), actual)
+        for suffix in ("", "?q=private-account", f"?q={key}&token=private", f"?q={key}&q={key}", f"?q={key}#private"):
+            with self.subTest(suffix=suffix):
+                self.assertIsNone(vod.normalize_artwork_url("https://encrypted-tbn0.gstatic.com/images" + suffix, tmdb_size="w500"))
+
+    def test_google_thumbnail_validation_does_not_allow_lookalike_or_provider_origins(self) -> None:
+        key = "tbn:ANd9Gc" + "aB_123-" * 8
+        self.assertIsNone(vod.normalize_artwork_url(
+            f"https://encrypted-tbn0.gstatic.com/images?q={key}", tmdb_size="w500", blocked_hostname="gstatic.com"))
+        self.assertEqual(vod.normalize_artwork_url(
+            f"https://encrypted-tbn0.gstatic.com.evil.test/poster.jpg?q={key}", tmdb_size="w500"),
+            "https://encrypted-tbn0.gstatic.com.evil.test/poster.jpg")
+
+    def test_basic_publisher_applies_reviewed_corrections_and_counts_final_metadata(self) -> None:
+        source = {"get_vod_categories": [], "get_series_categories": [], "get_series": [],
+                  "get_vod_streams": [{"stream_id": 622578, "name": "AR - Doctor (2021)",
+                                       "tmdb_id": 284052, "releaseDate": "2016-10-25",
+                                       "genre": "Fantasy", "stream_icon": "https://cdn.example/wrong.jpg"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            entry = vod.publish_server(output, "server_3", source, generated_at=NOW)
+            manifest = json.loads((output / entry["manifestFile"]).read_text(encoding="utf-8"))
+            ref = manifest["catalogs"]["movies"]
+            item = json.loads(gzip.decompress((output / ref["file"]).read_bytes()))["items"][0]
+            self.assertIsNone(item["tmdbId"])
+            self.assertIsNone(item["releaseDate"])
+            self.assertEqual(item["genre"], "unknown")
+            self.assertEqual(item["artwork"], {"posterUrl": None, "backdropUrl": None})
+            self.assertEqual(ref["metadataCompleteness"]["tmdbIdKnown"], 0)
+            self.assertEqual(ref["metadataCompleteness"]["artworkKnown"], 0)
+
     def test_panel_base_requires_a_credential_free_https_url(self) -> None:
         self.assertEqual(
             vod.normalize_base_url(

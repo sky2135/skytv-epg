@@ -179,11 +179,8 @@ class RegistryLogoIndex:
         return cls(ChannelRegistry.from_directory(directory),
                    json.loads(path.read_text(encoding="utf-8-sig")))
 
-    def lookup(self, row: Mapping[str, object]) -> tuple[str, str] | None:
-        if any(re.search(r"[#*_]{2,}", str(row.get(key) or ""))
-               for key in ("channel_name", "channelName")):
-            return None
-        explicit = row.get("countries", ())
+    def _country_hints(self, row: Mapping[str, object]) -> list[str]:
+        explicit = row.get("countries", row.get("country_codes", ()))
         if isinstance(explicit, str):
             try:
                 explicit = json.loads(explicit) if explicit.strip().startswith("[") else re.split(r"[,;|]", explicit)
@@ -193,13 +190,30 @@ class RegistryLogoIndex:
                  if str(value).strip().upper() in self.registry.valid_countries] if isinstance(explicit, (list, tuple)) else []
         if not hints:
             hints, _method = self.registry.country_evidence(row)
+        return hints
+
+    def selected_id_identity_conflict(self, row: Mapping[str, object]) -> bool:
+        """A known contrary provider identity blocks selected-ID/canonical reuse."""
+        name = str(row.get("channel_name") or row.get("channelName") or "")
+        return bool(name and self.registry.selected_id_identity_conflict(
+            name, countries=self._country_hints(row), epg_id=str(row.get("epg_id") or "")
+        ))
+
+    def lookup(self, row: Mapping[str, object]) -> tuple[str, str] | None:
+        if any(re.search(r"[#*_]{2,}", str(row.get(key) or ""))
+               for key in ("channel_name", "channelName")):
+            return None
+        hints = self._country_hints(row)
+        identity_conflict = self.selected_id_identity_conflict(row)
         records = {}
         for key in ("channel_name", "canonical_name", "channelName", "canonicalName"):
+            if identity_conflict and key in {"canonical_name", "canonicalName"}:
+                continue
             name = str(row.get(key) or "")
             if not name:
                 continue
             record = self.registry.resolve_channel(name, countries=hints,
-                                                    epg_id=str(row.get("epg_id") or ""))
+                                                    epg_id="" if identity_conflict else str(row.get("epg_id") or ""))
             if record is not None:
                 if hints and record.country not in hints and not set(hints).intersection(record.broadcast_countries):
                     continue

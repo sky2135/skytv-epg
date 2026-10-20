@@ -97,6 +97,21 @@ match. Unknown adult status stays `null`. Unknown language stays `und`.
 Original language and provider language availability remain separate facts;
 country or server market alone is not language evidence.
 
+Supplied TMDB IDs are hints. Title and year must independently corroborate both
+new responses and cache entries before external metadata is published. Cache
+keys include the matching policy and display identity. Compatible old cache
+entries are migrated only when their original title and year corroborate the
+displayed work; an unrelated stale match is never a fallback.
+
+Reviewed record-specific corrections are guarded by server, media kind,
+provider ID and exact display identity in `data/vod_reviewed_corrections.json`.
+They preserve provider audio fields and carry public source URLs in
+`metadataEvidence`. `metadataMatch: reviewed_correction` distinguishes these
+facts when a verified external match is unavailable. Rejected identities lose
+their inherited synopsis, artwork and dates. Unverified provider TMDB IDs are
+withheld from the app catalog so they cannot join unrelated trending records.
+The release validator rejects known wrong IDs and lost reviewed facts.
+
 `language` and `languages` describe the known provider version. TMDB's
 `originalLanguage` describes the work's original language; it does not prove
 which audio tracks a provider supplies. Never offer a language option solely

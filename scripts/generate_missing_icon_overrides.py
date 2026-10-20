@@ -592,13 +592,18 @@ def usable_source_icon(
 
 
 def usable_exact_name_icon(
-    row: Mapping[str, str], name_icons: Mapping[str, str]
+    row: Mapping[str, str], name_icons: Mapping[str, str], *,
+    allow_canonical: bool = True, excluded_urls: Iterable[str] = (),
 ) -> str:
+    names = (row.get("channel_name", ""),)
+    if allow_canonical:
+        names += (row.get("canonical_name", ""),)
+    excluded = set(excluded_urls)
     candidates = {
         name_icons[key]
-        for value in (row.get("channel_name", ""), row.get("canonical_name", ""))
+        for value in names
         if (key := exact_logo_name_key(value)) and key in name_icons
-    }
+    } - excluded
     return next(iter(candidates)) if len(candidates) == 1 else ""
 
 
@@ -839,13 +844,19 @@ def generate(
         # person artwork, even when the schedule itself is locally generated.
         source = requested_source(row)
         epg_id = identifier(row.get("epg_id", ""))
-        if source == "epgshare01" and usable_source_icon(
-            epg_id, source_icons, source_variants
-        ):
+        identity_conflict = (
+            registry_logos.selected_id_identity_conflict(row)
+            if registry_logos else False
+        )
+        selected_source_icon = usable_source_icon(epg_id, source_icons, source_variants)
+        if source == "epgshare01" and not identity_conflict and selected_source_icon:
             covered_by["source_xmltv"] += 1
             continue
 
-        source_name_icon = usable_exact_name_icon(row, source_name_icons)
+        source_name_icon = usable_exact_name_icon(
+            row, source_name_icons, allow_canonical=not identity_conflict,
+            excluded_urls=(selected_source_icon,) if identity_conflict else (),
+        )
         if source_name_icon:
             ephemeral_rows.append(
                 {

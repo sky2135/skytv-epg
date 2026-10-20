@@ -71,11 +71,12 @@ class MetadataEnrichmentTests(unittest.TestCase):
         self.assertIsNone(self.registry.resolve_channel("Golf"))
         self.assertNotEqual(enrichment.normalize_name("BBC UHD 2"), enrichment.normalize_name("BBC 2"))
 
-    def test_exact_alias_and_indian_language_bank(self):
+    def test_exact_alias_and_uncorroborated_indian_language_bank(self):
         result, evidence = self.enrich(channel_name="IN-TM | Completely Unlisted Channel")
         self.assertEqual(result.countries, ["IN"])
-        self.assertEqual(result.primary_language, "ta")
-        self.assertEqual(evidence["facets"]["languages"], "provider_language_prefix")
+        self.assertEqual(result.primary_language, "und")
+        self.assertEqual(result.status, "review")
+        self.assertEqual(evidence["languageReview"], "provider_language_bank_without_feed_corroboration")
         self.assertEqual(self.registry.resolve_channel("IN-NEWS | SAB TV FHD").channel_id, "SonySAB.in")
 
     def test_language_is_from_broadcast_evidence_never_country(self):
@@ -106,10 +107,10 @@ class MetadataEnrichmentTests(unittest.TestCase):
         result, _ = self.enrich(channel_name="Regional")
         self.assertEqual(result.languages, ["und"])
 
-    def test_provider_market_does_not_change_broadcast_language(self):
+    def test_unverified_provider_market_does_not_inherit_domestic_language(self):
         result, _ = self.enrich(channel_name="CA | Sony SAB", epg_id="SonySAB.in")
         self.assertEqual(result.countries, ["CA"])
-        self.assertEqual(result.languages, ["hi"])
+        self.assertEqual(result.languages, ["und"])
 
     def test_conflicting_unique_country_variant_is_rejected(self):
         self.assertIsNone(self.registry.resolve_channel("CA | Sony SAB"))
@@ -125,10 +126,10 @@ class MetadataEnrichmentTests(unittest.TestCase):
             self.assertEqual(result, before)
             self.assertEqual(evidence, {})
 
-    def test_explicit_partial_values_preserve_authority_but_allow_missing_facets(self):
+    def test_automatic_prior_genre_can_be_corrected_by_reviewed_source(self):
         result, _ = self.enrich(channel_name="Sky Witness", country_codes="GB", genre="movies", metadata_source="provider_category")
         self.assertEqual(result.countries, ["GB"])
-        self.assertEqual(result.genre, "movies")
+        self.assertEqual(result.genre, "entertainment")
         self.assertEqual(result.languages, ["en"])
 
     def test_stronger_provider_market_corrects_unlocked_weak_country_inference(self):
@@ -197,6 +198,175 @@ class MetadataEnrichmentTests(unittest.TestCase):
                 result, evidence = enrichment.enrich_metadata(raw, before, self.registry)
                 self.assertEqual(result, before)
                 self.assertEqual(evidence, {})
+
+
+class AuditedLiveRegressionTests(unittest.TestCase):
+    """Actual Oct-20 audit failures, including unrelated same-name channels."""
+
+    def setUp(self):
+        additions = [
+            channel("Zing.in", "Zing", "IN", ["music"]),
+            channel("ZeeBiskope.in", "Zee Biskope", "IN", ["movies"]),
+            channel("News18Gujarati.in", "News18 Gujarati", "IN", ["news"]),
+            channel("StarBharat.in", "Star Bharat", "IN", ["entertainment"]),
+            channel("AndTV.in", "&TV", "IN", ["entertainment"], ["And TV"]),
+            channel("AlJazeeraDocumentary.qa", "Al Jazeera Documentary", "QA", ["documentary"]),
+            channel("AlJazeera.qa", "Al Jazeera", "QA", ["news"]),
+            channel("KTV.in", "KTV", "IN", ["movies"]),
+            channel("Kohavision.xk", "Kohavision", "XK", ["general"], ["KTV"]),
+            channel("SABTV.pk", "SAB TV", "PK", ["entertainment"]),
+            channel("StarPlus.in", "StarPlus", "IN", ["entertainment"]),
+            channel("StarPlus.al", "Star Plus", "AL", ["general"]),
+            channel("StarMovies.in", "Star Movies", "IN", ["movies"]),
+            channel("StarMovies.pt", "Star Movies", "PT", ["movies"]),
+            channel("CanalHollywood.pt", "Canal Hollywood", "PT", ["movies"]),
+            channel("SonyMax.in", "Sony Max", "IN", ["movies"]),
+            channel("SonySportsTen5.in", "Sony Sports Ten 5", "IN", ["sports"], ["Sony MAX"]),
+            channel("SonyPIX.in", "Sony PIX", "IN", ["movies"]),
+            channel("Colors.in", "Colors", "IN", ["entertainment"]),
+            channel("GeminiLife.in", "Gemini Life", "IN", ["entertainment"]),
+            channel("PTCPunjabi.in", "PTC Punjabi", "IN", ["entertainment"]),
+            channel("CNBCBajar.in", "CNBC Bajar", "IN", ["business"]),
+            channel("News18MadhyaPradeshChhattisgarh.in", "News18 Madhya Pradesh/Chhattisgarh", "IN", ["news"]),
+            channel("SunGemini.in", "Sun Gemini", "IN", ["general"]),
+            channel("Alternative.us", "Alternative", "US", ["general"]),
+        ]
+        languages = {"Zing.in": "hin", "ZeeBiskope.in": "bho", "News18Gujarati.in": "guj", "StarBharat.in": "hin", "AndTV.in": "hin", "AlJazeeraDocumentary.qa": "ara", "KTV.in": "tam", "Kohavision.xk": "sqi", "SABTV.pk": "urd", "StarPlus.in": "hin", "StarPlus.al": "sqi", "StarMovies.in": "eng", "StarMovies.pt": "por", "CanalHollywood.pt": "spa", "SonyMax.in": "hin", "SonySportsTen5.in": "eng", "SonyPIX.in": "eng", "Colors.in": "hin", "GeminiLife.in": "tel", "PTCPunjabi.in": "pan"}
+        countries = COUNTRIES + [{"code": code, "name": name, "languages": []} for code, name in [("AL", "Albania"), ("XK", "Kosovo"), ("PT", "Portugal"), ("HU", "Hungary"), ("QA", "Qatar")]]
+        feeds = FEEDS + [feed(key, [language]) for key, language in languages.items()]
+        feeds += [feed("Alternative.us", ["eng"]), feed("Alternative.us", ["spa"], feed_id="Spanish")]
+        self.registry = enrichment.ChannelRegistry(CHANNELS + additions, feeds, countries)
+
+    def enrich(self, **raw):
+        raw.setdefault("metadata_source", "provider_category")
+        raw.setdefault("metadata_status", "auto")
+        before = runner.build_metadata(raw, 2)
+        result, evidence = enrichment.enrich_metadata(raw, before, self.registry)
+        return before, result, evidence
+
+    def test_all_seven_confirmed_genre_correction_identities(self):
+        for name, category, expected in [
+            ("UKFHD : Sky Witness", "UK| MOVIES", "entertainment"),
+            ("IN | Zing", "INDIA MOVIES", "music"),
+            ("IN | Zee Biskope", "INDIA MUSIC", "movies"),
+            ("IN-GUJ | News18 Gujarati", "INDIA ENTERTAINMENT", "news"),
+            ("IN - STAR BHARAT UHD", "INDIA NEWS", "entertainment"),
+            ("IN - AND TV UHD", "INDIA MOVIES", "entertainment"),
+            ("AR - AL JAZEERA DOCUMENTARY", "ARABIC NEWS & FACTUAL", "documentary"),
+        ]:
+            with self.subTest(name=name):
+                before, result, evidence = self.enrich(channel_name=name, category_name=category)
+                self.assertNotEqual(before.genre, expected)
+                self.assertEqual(result.genre, expected)
+                self.assertEqual(evidence["rulesVersion"], enrichment.RULES_VERSION)
+                self.assertEqual(evidence["facets"]["genre"], "reviewed_broadcaster_channel_fact")
+                self.assertTrue(evidence["reviewedFact"]["sourceUrl"].startswith("https://"))
+
+    def test_durable_correction_of_stored_automatic_genre_cells(self):
+        _, result, _ = self.enrich(channel_name="UK HD : Sky Witness", genre="movies", country_codes="GB")
+        self.assertEqual(result.genre, "entertainment")
+        for authority in ({"metadata_source": "manual"}, {"metadata_locked": "TRUE"}, {"metadata_status": "approved"}):
+            before, result, evidence = self.enrich(channel_name="Sky Witness", genre="movies", **authority)
+            self.assertEqual(before, result)
+            self.assertEqual(evidence, {})
+
+    def test_curated_gap_is_filled_without_promoting_uncertain_genre_candidate(self):
+        _, result, evidence = self.enrich(channel_name="PJB - PTC PUNJABI", category_name="PUNJABI")
+        self.assertEqual(result.genre, "entertainment")
+        self.assertEqual(evidence["reviewedFact"]["id"], "ptcpunjabi")
+        _, result, _ = self.enrich(channel_name="IN-TG | Gemini Life", genre="lifestyle", category_name="TELUGU")
+        self.assertEqual(result.genre, "lifestyle")
+
+    def test_reviewed_aliases_join_only_their_exact_available_registry_identity(self):
+        for name, channel_id, language in [
+            ("IN-NEWS | CNBC Bajaar", "CNBCBajar.in", "gu"),
+            ("IN: News18 MP Chhattisgarh SD", "News18MadhyaPradeshChhattisgarh.in", "hi"),
+            ("IN-TG | Gemini TV FHD", "SunGemini.in", "te"),
+        ]:
+            with self.subTest(name=name):
+                self.assertEqual(self.registry.resolve_channel(name).channel_id, channel_id)
+                _, result, evidence = self.enrich(channel_name=name, primary_language="und", language_codes="und", genre="unknown")
+                self.assertEqual(result.languages, [language])
+                self.assertIn("reviewedFact", evidence)
+
+    def test_cross_market_collisions_cannot_inherit_indian_facts(self):
+        for name, bad_id in [
+            ("ALB: KTV", "KTV.in"), ("AL: STAR PLUS HD", "StarPlus.in"),
+            ("PK: SAB TV-HD", "SonySAB.in"), ("HU - SONY MAX", "SonyMax.in"),
+            ("PT - STAR MOVIES UHD", "CanalHollywood.pt"),
+        ]:
+            with self.subTest(name=name):
+                self.assertIsNone(self.registry.resolve_channel(name, epg_id=bad_id))
+                _, result, evidence = self.enrich(channel_name=name, epg_id=bad_id, language_codes="hi", primary_language="hi")
+                self.assertEqual(result.languages, ["und"])
+                self.assertEqual(result.status, "review")
+                self.assertNotIn("reviewedFact", evidence)
+                self.assertEqual(evidence["identityReview"], "selected_id_name_or_market_disagreement")
+
+    def test_explicit_provider_market_corrects_stale_automatic_country(self):
+        _, result, evidence = self.enrich(channel_name="AL: STAR PLUS HD", epg_id="StarPlus.in", country_codes="IN", region_code="south_asia")
+        self.assertEqual(result.countries, ["AL"])
+        self.assertEqual(result.region, "europe")
+        self.assertEqual(evidence["facets"]["countries"], "provider_prefix")
+
+    def test_pakistan_sab_is_distinct_and_primary_name_beats_historical_alias(self):
+        self.assertEqual(self.registry.resolve_channel("PK: SAB TV-HD").channel_id, "SABTV.pk")
+        self.assertEqual(self.registry.resolve_channel("IN | Sony MAX FHD").channel_id, "SonyMax.in")
+        _, result, evidence = self.enrich(channel_name="PK: SAB TV-HD", category_name="PAKISTAN | TV")
+        self.assertEqual(result.languages, ["ur"])
+        self.assertNotIn("reviewedFact", evidence)
+
+    def test_dubbed_or_regional_bank_disagreements_remain_unknown(self):
+        for name, category, stored_language in [
+            ("IN-TM | Sony Pix FHD", "TAMIL", "ta"),
+            ("IN-MAR | Colors FHD", "MARATHI", "mr"),
+            ("IN-GUJ | COLORS FHD", "GUJARATI", "gu"),
+        ]:
+            with self.subTest(name=name):
+                _, result, evidence = self.enrich(channel_name=name, category_name=category, primary_language=stored_language, language_codes=stored_language)
+                self.assertEqual(result.languages, ["und"])
+                self.assertEqual(result.status, "review")
+                self.assertEqual(evidence["languageReview"], "provider_audio_or_category_disagrees_with_named_feed")
+
+    def test_category_language_cannot_supply_or_expand_channel_audio(self):
+        _, result, evidence = self.enrich(channel_name="Unlisted Channel", category_name="TAMIL", primary_language="ta", language_codes="ta")
+        self.assertEqual(result.languages, ["und"])
+        self.assertIn("languageReview", evidence)
+        _, result, _ = self.enrich(channel_name="AR - AL JAZEERA ENGLISH", category_name="ARABIC NEWS", primary_language="mul", language_codes="en|ar")
+        self.assertEqual(result.languages, ["en"])
+        self.assertEqual(result.primary_language, "en")
+
+    def test_different_main_feeds_do_not_mean_a_multilingual_provider_stream(self):
+        _, result, _ = self.enrich(channel_name="Alternative")
+        self.assertEqual(result.languages, ["und"])
+
+    def test_domestic_fact_does_not_fill_foreign_unverified_feed_language(self):
+        _, result, _ = self.enrich(channel_name="FR - STAR MOVIES", category_name="MOVIES")
+        self.assertEqual(result.languages, ["und"])
+        self.assertEqual(result.countries, ["FR"])
+
+    def test_positive_conflict_api_distinguishes_unknown_name_from_wrong_identity(self):
+        self.assertFalse(self.registry.selected_id_identity_conflict("Unlisted Channel", epg_id="StarMovies.in"))
+        self.assertTrue(self.registry.selected_id_identity_conflict("PT - STAR MOVIES UHD", epg_id="CanalHollywood.pt"))
+        self.assertTrue(self.registry.selected_id_identity_conflict("Al Jazeera English", epg_id="AlJazeera.qa"))
+
+    def test_repeated_review_preserves_identity_rejection_evidence(self):
+        _, result, evidence = self.enrich(
+            channel_name="PT - STAR MOVIES UHD", epg_id="CanalHollywood.pt",
+            country_codes="PT", region_code="europe", genre="movies",
+            primary_language="und", language_codes="und", metadata_status="review",
+            metadata_confidence="0.5", metadata_source="registry",
+        )
+        self.assertEqual(result.status, "review")
+        self.assertEqual(result.languages, ["und"])
+        self.assertEqual(evidence["identityReview"], "selected_id_name_or_market_disagreement")
+
+    def test_known_genre_replacements_are_limited_to_confirmed_audit_facts(self):
+        facts = enrichment.load_curated_facts()
+        self.assertEqual({fact["id"] for fact in facts if fact.get("replaceAutomaticGenre")},
+                         {"skywitness", "zing", "news18gujarati", "zeebiskope", "aljazeeradocumentary", "starbharat", "andtv"})
+        self.assertTrue(all(fact["sourceUrl"].startswith("https://") and fact["checkedAt"] == "2026-10-20" for fact in facts))
+        self.assertTrue(all("logo" not in key.casefold() and "brandverified" not in key.casefold() for fact in facts for key in fact))
 
 
 class Response:
