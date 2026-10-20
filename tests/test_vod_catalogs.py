@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import copy
 import hashlib
 import json
 import os
@@ -464,6 +465,56 @@ class VodPublishingTests(unittest.TestCase):
 
             with self.assertRaisesRegex(vod.CatalogBuildError, "SHA-256"):
                 vod.validate_publication(output_dir)
+
+    def test_basic_release_gate_rejects_resealed_reviewed_metadata_regressions(self) -> None:
+        source = sample_source()
+        rows, _ = vod.normalize_catalog(
+            source["get_vod_streams"], source["get_vod_categories"], source["vod_details"],
+            kind="movie", label="reviewed fixture",
+        )
+        doctor = {**rows[0], "id": "622578", "title": "AR - Doctor (2021)", "tmdbId": "284052"}
+        fish = {**rows[0], "id": "403965", "title": "EN - Fisherman's Friends 2 (2021)",
+                "releaseDate": "2021-01-01", "tmdbId": "684006"}
+        corrected_doctor = vod.apply_reviewed_correction("server_3", "movie", doctor)
+        corrected_fish = vod.apply_reviewed_correction("server_3", "movie", fish)
+        doree = vod.apply_reviewed_correction("server_2", "series", {
+            **rows[0], "id": "5731", "title": "Doree", "tmdbId": "23963",
+        })
+
+        with tempfile.TemporaryDirectory() as raw_temp:
+            path = Path(raw_temp) / "catalog.json.gz"
+
+            def validate(item, server="server_3", kind="movie"):
+                # Recompute counts after every change so generic release
+                # bookkeeping cannot hide whether the semantic gate ran.
+                payload = {"schemaVersion": 1, "serverId": server, "contentType": kind,
+                           "generatedAt": NOW, "itemCount": 1, "items": [item]}
+                path.write_bytes(gzip.compress(json.dumps(payload).encode("utf-8"), mtime=0))
+                entry = {"itemCount": 1, "metadataCompleteness": vod.catalog_completeness([item])}
+                return vod._validate_catalog_file(path, entry, server_id=server, kind=kind,
+                                                  generated_at=NOW, label="reviewed fixture")
+
+            validate(corrected_doctor)
+            validate(corrected_fish)  # A source-known year still permits an unknown full date.
+            self.assertIsNone(corrected_fish["releaseDate"])
+            validate({**corrected_fish, "releaseDate": "2022-08-19"})
+            validate(doree, "server_2", "series")
+            with self.assertRaisesRegex(vod.CatalogBuildError, "wrong-work TMDB"):
+                validate(doctor)
+            with self.assertRaisesRegex(vod.CatalogBuildError, "wrong-work TMDB"):
+                validate({**doree, "tmdbId": "23963"}, "server_2", "series")
+            for field, value in (("title", fish["title"]), ("releaseDate", "2021-01-01"),
+                                 ("genres", ["action"])):
+                item = copy.deepcopy(corrected_fish)
+                item[field] = value
+                if field == "genres":
+                    item["genre"] = "action"
+                with self.subTest(field=field), self.assertRaisesRegex(vod.CatalogBuildError, "reviewed metadata"):
+                    validate(item)
+            # Exact reviewed scopes do not capture another server or a reused
+            # provider ID whose displayed work has changed.
+            validate(doctor, "server_2")
+            validate({**doctor, "title": "Doctor Strange (2016)", "releaseDate": "2016-10-25"})
 
     def test_validator_rejects_path_traversal_in_release_index(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:

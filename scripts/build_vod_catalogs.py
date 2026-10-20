@@ -31,7 +31,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
-from vod_reviewed_corrections import apply_reviewed_correction
+from vod_reviewed_corrections import apply_reviewed_correction, correction_for
 
 
 SCHEMA_VERSION = 1
@@ -1301,6 +1301,23 @@ def _validate_catalog_item(
     return item
 
 
+def _validate_reviewed_catalog_item(
+    item: Mapping[str, Any], *, server_id: str, kind: str, label: str,
+) -> None:
+    """Enforce reviewed facts on the normalized basic fields only.
+
+    Exact record/title guards remain authoritative. A reviewed year can reject
+    a contradictory date, but never requires an invented month or day.
+    """
+    correction = correction_for(server_id, kind, item)
+    if correction is None:
+        return
+    if item.get("tmdbId") in correction.get("rejectedTmdbIds", []):
+        raise CatalogBuildError(f"{label} reintroduced a reviewed wrong-work TMDB identity.")
+    if apply_reviewed_correction(server_id, kind, item) != item:
+        raise CatalogBuildError(f"{label} lost a reviewed metadata correction.")
+
+
 def _validate_catalog_file(
     path: Path,
     entry: Mapping[str, Any],
@@ -1345,6 +1362,9 @@ def _validate_catalog_file(
     }
     for position, raw_item in enumerate(items):
         item = _validate_catalog_item(raw_item, label=f"{label} item {position + 1}")
+        _validate_reviewed_catalog_item(
+            item, server_id=server_id, kind=kind, label=f"{label} item {position + 1}"
+        )
         item_id = str(item["id"])
         if item_id in ids:
             raise CatalogBuildError(f"{label} contains a duplicate item ID.")
