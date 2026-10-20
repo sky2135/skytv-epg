@@ -350,6 +350,31 @@ class AuditedLiveRegressionTests(unittest.TestCase):
         self.assertTrue(self.registry.selected_id_identity_conflict("PT - STAR MOVIES UHD", epg_id="CanalHollywood.pt"))
         self.assertTrue(self.registry.selected_id_identity_conflict("Al Jazeera English", epg_id="AlJazeera.qa"))
 
+    def test_source_id_presentation_alias_detects_actual_star_plus_market_conflict(self):
+        for guide_id in ("StarPlus.in", "STAR.PLUS.HD.in"):
+            with self.subTest(guide_id=guide_id):
+                self.assertTrue(self.registry.selected_id_identity_conflict("AL: STAR PLUS HD", epg_id=guide_id))
+                _, result, evidence = self.enrich(channel_name="AL: STAR PLUS HD", epg_id=guide_id)
+                self.assertEqual(result.languages, ["und"])
+                self.assertIn("identityReview", evidence)
+        # The safety lookup must not broaden the general schedule resolver.
+        self.assertIsNone(self.registry.resolve_channel("Unlisted Channel", epg_id="STAR.PLUS.HD.in"))
+
+    def test_unrecognized_source_id_does_not_prove_identity_from_country_alone(self):
+        for guide_id in ("UNLISTED.HD.in", "STAR.PLUS.HD.notacountry", "STAR.PLUS.HD", "SONY.MAX.HD.in"):
+            with self.subTest(guide_id=guide_id):
+                # Sony MAX is intentionally ambiguous with a same-country
+                # historical sports alias unless its exact registry ID is used.
+                self.assertFalse(self.registry.selected_id_identity_conflict("AL: STAR PLUS HD", epg_id=guide_id))
+
+    def test_legitimate_foreign_broadcast_keeps_exact_and_source_alias_ids(self):
+        uk_feed = feed("SonyMax.in", ["hin"])
+        uk_feed["broadcast_area"] = ["c/GB"]
+        registry = enrichment.ChannelRegistry([channel("SonyMax.in", "Sony Max", "IN", ["movies"])], [uk_feed], COUNTRIES)
+        for guide_id in ("SonyMax.in", "SONY.MAX.HD.in"):
+            with self.subTest(guide_id=guide_id):
+                self.assertFalse(registry.selected_id_identity_conflict("UK: Sony Max FHD", epg_id=guide_id))
+
     def test_repeated_review_preserves_identity_rejection_evidence(self):
         _, result, evidence = self.enrich(
             channel_name="PT - STAR MOVIES UHD", epg_id="CanalHollywood.pt",

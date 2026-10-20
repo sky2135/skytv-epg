@@ -150,6 +150,7 @@ class LogoEnrichmentTests(unittest.TestCase):
             {"id": "CanalHollywood.pt", "name": "Canal Hollywood", "country": "PT"},
             {"id": "KTV.al", "name": "KTV", "country": "AL"},
             {"id": "KTV.in", "name": "KTV", "country": "IN"},
+            {"id": "StarPlus.in", "name": "Star Plus", "country": "IN"},
         ]
         registry = ChannelRegistry(channels, [], [
             {"code": "PT", "name": "Portugal"}, {"code": "AL", "name": "Albania"},
@@ -169,11 +170,17 @@ class LogoEnrichmentTests(unittest.TestCase):
              "url": "https://logos.test/ktv-albania.png"},
             {"channel": "KTV.in", "feed": None, "in_use": True,
              "url": "https://logos.test/ktv-india.png"},
+            {"channel": "StarPlus.in", "feed": None, "in_use": True,
+             "url": "https://logos.test/star-plus-india.png"},
         ])
         self.assertEqual(index.lookup(row), ("StarMovies.pt", "https://logos.test/star-movies.png"))
         self.assertEqual(index.lookup({"channel_name": "AL - KTV", "canonical_name": "KTV",
                                        "epg_id": "KTV.in"}),
                          ("KTV.al", "https://logos.test/ktv-albania.png"))
+        star_plus = {"channel_name": "AL: STAR PLUS HD", "canonical_name": "Star Plus",
+                     "epg_id": "STAR.PLUS.HD.in"}
+        self.assertTrue(index.selected_id_identity_conflict(star_plus))
+        self.assertIsNone(index.lookup(star_plus))
         self.assertFalse(index.selected_id_identity_conflict({
             "channel_name": "Uncatalogued label", "canonical_name": "Canal Hollywood",
             "epg_id": "CanalHollywood.pt",

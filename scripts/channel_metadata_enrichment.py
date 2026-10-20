@@ -383,11 +383,24 @@ class ChannelRegistry:
         """
         direct = self.by_id.get(_text(epg_id).casefold())
         if direct is None:
-            return False
+            # Source XMLTV IDs can spell the same known identity differently:
+            # STAR.PLUS.HD.in vs registry StarPlus.in. This narrow lookup is
+            # only a conflict check; it never assigns a guide or adds aliases.
+            source_name, separator, source_suffix = _text(epg_id).rpartition(".")
+            source_country = _country(source_suffix)
+            if not separator or not source_name or len(source_name) > 240 or source_country not in self.valid_countries:
+                return False
+            source_ids = {
+                channel_id for channel_id in self.by_name.get(normalize_name(source_name), ())
+                if self.records[channel_id].country == source_country
+            }
+            if len(source_ids) != 1:
+                return False
+            direct = self.records[next(iter(source_ids))]
         prefix, stripped = _provider_prefix(name, self.valid_countries)
         named_ids = self.by_name.get(normalize_name(stripped), set())
         markets = tuple(countries)
-        resolved = self.resolve_channel(name, markets, epg_id)
+        resolved = self.resolve_channel(name, markets, direct.channel_id)
         if resolved is None and (named_ids or prefix or markets):
             return True
         fact = self.curated_by_name.get(normalize_name(stripped))
