@@ -894,7 +894,8 @@ def build_metadata(raw: Mapping[str, str], row_number: int) -> ChannelMetadata:
         "" if dummy_mapping else clean_text(raw.get("epg_feed", ""), 80),
     )
     inferred_primary, inferred_languages, language_confidence = infer_language(
-        classification_evidence
+        # Provider categories describe browsing groups, not a channel's audio.
+        identity_evidence
     )
     inferred_genre, inferred_subgenres, genre_confidence = infer_genre(
         classification_evidence
@@ -4223,6 +4224,10 @@ def resolve_row_icon(
     _source_name, source_icon = source_channel_info(
         connection, row.source_key, row.epg_id
     )
+    if row.metadata_evidence.get("identityReview"):
+        # A valid image from a positively disputed guide identity is not
+        # evidence of this provider channel's branding.
+        source_icon = ""
     candidates = [row.logo_url, configured_icon(overrides, row), source_icon]
     for candidate in candidates:
         url = normalize_logo_url(candidate)

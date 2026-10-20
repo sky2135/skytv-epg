@@ -1,0 +1,2765 @@
+{
+  "schemaVersion": 1,
+  "rulesVersion": "2026-10-20.1",
+  "reviewedAt": "2026-10-20",
+  "policy": "EXACT_REVIEWED_IDENTITY_AND_MARKET_ONLY; UNKNOWN_AUDIO_WHEN_PROVIDER_AND_FEED_DISAGREE; NO_LOGO_VERIFICATION_CLAIMS",
+  "facts": [
+    {
+      "id": "sonyentertainmenttelevision",
+      "names": [
+        "Sony Entertainment Television",
+        "SET",
+        "Sony TV",
+        "Sony Entertainment"
+      ],
+      "channelIds": [
+        "SonyEntertainmentTelevision.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonysab",
+      "names": [
+        "Sony SAB",
+        "SAB TV",
+        "Sony SAB TV"
+      ],
+      "channelIds": [
+        "SonySAB.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonypal",
+      "names": [
+        "Sony PAL"
+      ],
+      "channelIds": [
+        "SonyPal.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonymarathi",
+      "names": [
+        "Sony Marathi"
+      ],
+      "channelIds": [
+        "SonyMarathi.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "mr",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonyaath",
+      "names": [
+        "Sony AATH"
+      ],
+      "channelIds": [
+        "SonyAath.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "bn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonymax",
+      "names": [
+        "Sony MAX",
+        "SET MAX",
+        "Sony Max TV"
+      ],
+      "channelIds": [
+        "SonyMax.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonymax1",
+      "names": [
+        "Sony MAX 1",
+        "Sony MAX1"
+      ],
+      "channelIds": [
+        "SonyMax1.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonymax2",
+      "names": [
+        "Sony MAX 2",
+        "Sony MAX2"
+      ],
+      "channelIds": [
+        "SonyMax2.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonywah",
+      "names": [
+        "Sony WAH"
+      ],
+      "channelIds": [
+        "SonyWah.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonypix",
+      "names": [
+        "Sony PIX"
+      ],
+      "channelIds": [
+        "SonyPix.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "en",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonybbcearth",
+      "names": [
+        "Sony BBC Earth"
+      ],
+      "channelIds": [
+        "SonyBBCEarth.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "documentary",
+      "replaceAutomaticGenre": false,
+      "language": null,
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonyyay",
+      "names": [
+        "Sony YAY",
+        "Sony YAY!",
+        "Sony Yay TV"
+      ],
+      "channelIds": [
+        "SonyYay.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "kids",
+      "replaceAutomaticGenre": false,
+      "language": null,
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonysportsten1",
+      "names": [
+        "Sony Sports Ten 1",
+        "Sony Ten 1",
+        "Ten 1"
+      ],
+      "channelIds": [
+        "SonySportsTen1.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": null,
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonysportsten2",
+      "names": [
+        "Sony Sports Ten 2",
+        "Sony Ten 2",
+        "Ten 2"
+      ],
+      "channelIds": [
+        "SonySportsTen2.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": null,
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonysportsten4",
+      "names": [
+        "Sony Sports Ten 4",
+        "Sony Ten 4",
+        "Ten 4"
+      ],
+      "channelIds": [
+        "SonySportsTen4.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": null,
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonysportsten5",
+      "names": [
+        "Sony Sports Ten 5",
+        "Sony Ten 5",
+        "Ten 5"
+      ],
+      "channelIds": [
+        "SonySportsTen5.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": null,
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "suntv",
+      "names": [
+        "Sun TV"
+      ],
+      "channelIds": [
+        "SunTV.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/tv-channel.aspx/Default.aspx",
+      "sourceTitle": "Sun TV Network: Tamil channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "ktv",
+      "names": [
+        "KTV",
+        "K TV"
+      ],
+      "channelIds": [
+        "KTV.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/tv-channel.aspx/Default.aspx",
+      "sourceTitle": "Sun TV Network: Tamil channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sunmusic",
+      "names": [
+        "Sun Music"
+      ],
+      "channelIds": [
+        "SunMusic.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "music",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/tv-channel.aspx/Default.aspx",
+      "sourceTitle": "Sun TV Network: Tamil channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sunnews",
+      "names": [
+        "Sun News"
+      ],
+      "channelIds": [
+        "SunNews.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/tv-channel.aspx/Default.aspx",
+      "sourceTitle": "Sun TV Network: Tamil channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "adithyatv",
+      "names": [
+        "Adithya TV",
+        "Adithya"
+      ],
+      "channelIds": [
+        "AdithyaTV.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/tv-channel.aspx/Default.aspx",
+      "sourceTitle": "Sun TV Network: Tamil channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "chuttitv",
+      "names": [
+        "Chutti TV",
+        "Chutti"
+      ],
+      "channelIds": [
+        "ChuttiTV.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "kids",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/tv-channel.aspx/Default.aspx",
+      "sourceTitle": "Sun TV Network: Tamil channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sunlife",
+      "names": [
+        "Sun Life"
+      ],
+      "channelIds": [
+        "SunLife.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": null,
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/tv-channel.aspx/Default.aspx",
+      "sourceTitle": "Sun TV Network: Tamil channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "geminitv",
+      "names": [
+        "Gemini TV",
+        "Sun Gemini",
+        "Sun Gemini TV"
+      ],
+      "channelIds": [
+        "SunGemini.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "geminimovies",
+      "names": [
+        "Gemini Movies",
+        "Sun Gemini Movies"
+      ],
+      "channelIds": [
+        "SunGeminiMovies.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "geminimusic",
+      "names": [
+        "Gemini Music",
+        "Sun Gemini Music"
+      ],
+      "channelIds": [
+        "SunGeminiMusic.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "music",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "geminicomedy",
+      "names": [
+        "Gemini Comedy",
+        "Sun Gemini Comedy"
+      ],
+      "channelIds": [
+        "SunGeminiComedy.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "geminilife",
+      "names": [
+        "Gemini Life",
+        "Sun Gemini Life"
+      ],
+      "channelIds": [
+        "SunGeminiLife.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "kushitv",
+      "names": [
+        "Kushi TV"
+      ],
+      "channelIds": [
+        "KushiTV.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "kids",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "udayatv",
+      "names": [
+        "Udaya TV",
+        "Sun Udaya",
+        "Sun Udaya TV"
+      ],
+      "channelIds": [
+        "SunUdaya.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "udayamovies",
+      "names": [
+        "Udaya Movies",
+        "Sun Udaya Movies"
+      ],
+      "channelIds": [
+        "SunUdayaMovies.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "udayamusic",
+      "names": [
+        "Udaya Music",
+        "Sun Udaya Music"
+      ],
+      "channelIds": [
+        "SunUdayaMusic.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "music",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "udayacomedy",
+      "names": [
+        "Udaya Comedy",
+        "Sun Udaya Comedy"
+      ],
+      "channelIds": [
+        "SunUdayaComedy.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "chintutv",
+      "names": [
+        "Chintu TV"
+      ],
+      "channelIds": [
+        "ChintuTV.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "kids",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "suryatv",
+      "names": [
+        "Surya TV",
+        "Surya",
+        "Sun Surya"
+      ],
+      "channelIds": [
+        "SunSurya.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "ml",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "kochutv",
+      "names": [
+        "Kochu TV"
+      ],
+      "channelIds": [
+        "KochuTV.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "kids",
+      "replaceAutomaticGenre": false,
+      "language": "ml",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeetv",
+      "names": [
+        "Zee TV",
+        "Z TV"
+      ],
+      "channelIds": [
+        "ZeeTV.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "andtv",
+      "names": [
+        "&TV",
+        "And TV"
+      ],
+      "channelIds": [
+        "AndTV.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": true,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeecinema",
+      "names": [
+        "Zee Cinema"
+      ],
+      "channelIds": [
+        "ZeeCinema.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "andpictures",
+      "names": [
+        "&pictures",
+        "And Pictures"
+      ],
+      "channelIds": [
+        "Andpictures.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeebollywood",
+      "names": [
+        "Zee Bollywood"
+      ],
+      "channelIds": [
+        "ZeeBollywood.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeeclassic",
+      "names": [
+        "Zee Classic"
+      ],
+      "channelIds": [
+        "ZeeClassic.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zing",
+      "names": [
+        "Zing",
+        "Zee Zing"
+      ],
+      "channelIds": [
+        "Zing.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "music",
+      "replaceAutomaticGenre": true,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeemarathi",
+      "names": [
+        "Zee Marathi"
+      ],
+      "channelIds": [
+        "ZeeMarathi.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "mr",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeetalkies",
+      "names": [
+        "Zee Talkies"
+      ],
+      "channelIds": [
+        "ZeeTalkies.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "mr",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeeyuva",
+      "names": [
+        "Zee Yuva"
+      ],
+      "channelIds": [
+        "ZeeYuva.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "mr",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeebangla",
+      "names": [
+        "Zee Bangla"
+      ],
+      "channelIds": [
+        "ZeeBangla.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "bn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeebanglasonar",
+      "names": [
+        "Zee Bangla Sonar"
+      ],
+      "channelIds": [
+        "ZeeBanglaSonar.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "bn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeesarthak",
+      "names": [
+        "Zee Sarthak"
+      ],
+      "channelIds": [
+        "ZeeSarthak.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "or",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeepunjabi",
+      "names": [
+        "Zee Punjabi"
+      ],
+      "channelIds": [
+        "ZeePunjabi.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "pa",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeetamil",
+      "names": [
+        "Zee Tamil"
+      ],
+      "channelIds": [
+        "ZeeTamil.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeethirai",
+      "names": [
+        "Zee Thirai"
+      ],
+      "channelIds": [
+        "ZeeThirai.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeetelugu",
+      "names": [
+        "Zee Telugu"
+      ],
+      "channelIds": [
+        "ZeeTelugu.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeecinemalu",
+      "names": [
+        "Zee Cinemalu"
+      ],
+      "channelIds": [
+        "ZeeCinemalu.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeekannada",
+      "names": [
+        "Zee Kannada"
+      ],
+      "channelIds": [
+        "ZeeKannada.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeekeralam",
+      "names": [
+        "Zee Keralam"
+      ],
+      "channelIds": [
+        "ZeeKeralam.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "ml",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "zeebiskope",
+      "names": [
+        "Zee Biskope"
+      ],
+      "channelIds": [
+        "ZeeBiskope.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": true,
+      "language": "bho",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "andxplor",
+      "names": [
+        "&xplor",
+        "And Xplor"
+      ],
+      "channelIds": [
+        "AndxplorHD.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://assets-prod.zee.com/wp-content/uploads/2026/03/ZEEL_RIO_DAS-HITS-DTH_NTO-4_V-4.pdf#page=90",
+      "sourceTitle": "ZEE: 2026 channel genre and language table, pages 90-92",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "asianet",
+      "names": [
+        "Asianet"
+      ],
+      "channelIds": [
+        "Asianet.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "ml",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "asianetmovies",
+      "names": [
+        "Asianet Movies"
+      ],
+      "channelIds": [
+        "AsianetMovies.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "ml",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "cnbcawaaz",
+      "names": [
+        "CNBC Awaaz",
+        "CNBC Awaz"
+      ],
+      "channelIds": [
+        "CNBCAwaaz.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "cnbcbajar",
+      "names": [
+        "CNBC Bajar",
+        "CNBC Bajaar"
+      ],
+      "channelIds": [
+        "CNBCBajar.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "gu",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "cnbctv18",
+      "names": [
+        "CNBC TV18",
+        "CNBC TV 18"
+      ],
+      "channelIds": [
+        "CNBCTV18.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "en",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "cnbctv18prime",
+      "names": [
+        "CNBC TV18 Prime"
+      ],
+      "channelIds": [
+        "CNBCTV18PrimeHD.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "en",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "cnnnews18",
+      "names": [
+        "CNN News18",
+        "CNN News 18"
+      ],
+      "channelIds": [
+        "CNNNews18.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "en",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "colors",
+      "names": [
+        "Colors",
+        "Colors TV"
+      ],
+      "channelIds": [
+        "Colors.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "colorsbanglacinema",
+      "names": [
+        "Colors Bangla Cinema"
+      ],
+      "channelIds": [
+        "ColorsBanglaCinema.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "bn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "colorscineplex",
+      "names": [
+        "Colors Cineplex"
+      ],
+      "channelIds": [
+        "ColorsCineplex.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "colorskannada",
+      "names": [
+        "Colors Kannada"
+      ],
+      "channelIds": [
+        "ColorsKannada.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "colorsmarathi",
+      "names": [
+        "Colors Marathi"
+      ],
+      "channelIds": [
+        "ColorsMarathi.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "mr",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "jalshamovies",
+      "names": [
+        "Jalsha Movies",
+        "Star Jalsha Movies"
+      ],
+      "channelIds": [
+        "JalshaMovies.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "bn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starbharat",
+      "names": [
+        "Star Bharat"
+      ],
+      "channelIds": [
+        "StarBharat.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": true,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "stargold",
+      "names": [
+        "Star Gold"
+      ],
+      "channelIds": [
+        "StarGold.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "stargold2",
+      "names": [
+        "Star Gold 2"
+      ],
+      "channelIds": [
+        "StarGold2.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starjalsha",
+      "names": [
+        "Star Jalsha"
+      ],
+      "channelIds": [
+        "StarJalsha.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "bn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starmaa",
+      "names": [
+        "Star Maa",
+        "Maa",
+        "Maa TV",
+        "Star Maa TV"
+      ],
+      "channelIds": [
+        "StarMaa.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starmaamovies",
+      "names": [
+        "Star Maa Movies",
+        "Maa Movies"
+      ],
+      "channelIds": [
+        "StarMaaMovies.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starmovies",
+      "names": [
+        "Star Movies"
+      ],
+      "channelIds": [
+        "StarMovies.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "en",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starplus",
+      "names": [
+        "Star Plus"
+      ],
+      "channelIds": [
+        "StarPlus.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starpravah",
+      "names": [
+        "Star Pravah"
+      ],
+      "channelIds": [
+        "StarPravah.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "mr",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsuvarna",
+      "names": [
+        "Star Suvarna",
+        "Suvarna TV"
+      ],
+      "channelIds": [
+        "StarSuvarna.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starvijay",
+      "names": [
+        "Star Vijay",
+        "Vijay",
+        "Vijay TV",
+        "Star Vijay TV"
+      ],
+      "channelIds": [
+        "StarVijay.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "vijaysuper",
+      "names": [
+        "Vijay Super",
+        "Star Vijay Super"
+      ],
+      "channelIds": [
+        "VijaySuper.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": null,
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18assamnortheast",
+      "names": [
+        "News18 Assam North East",
+        "News18 Assam/North East",
+        "News18 Assam NE"
+      ],
+      "channelIds": [
+        "News18AssamNorthEast.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "as",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18bangla",
+      "names": [
+        "News18 Bangla"
+      ],
+      "channelIds": [
+        "News18Bangla.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "bn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18biharjharkhand",
+      "names": [
+        "News18 Bihar Jharkhand",
+        "News18 Bihar/Jharkhand"
+      ],
+      "channelIds": [
+        "News18BiharJharkhand.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18gujarati",
+      "names": [
+        "News18 Gujarati"
+      ],
+      "channelIds": [
+        "News18Gujarati.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": true,
+      "language": "gu",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18india",
+      "names": [
+        "News18 India"
+      ],
+      "channelIds": [
+        "News18India.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18kannada",
+      "names": [
+        "News18 Kannada"
+      ],
+      "channelIds": [
+        "News18Kannada.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18kerala",
+      "names": [
+        "News18 Kerala"
+      ],
+      "channelIds": [
+        "News18Kerala.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "ml",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18marathi",
+      "names": [
+        "News18 Marathi"
+      ],
+      "channelIds": [
+        "News18Marathi.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "mr",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18mpchhattisgarh",
+      "names": [
+        "News18 MP Chhattisgarh",
+        "News18 Madhya Pradesh/Chhattisgarh",
+        "News18 MP CG"
+      ],
+      "channelIds": [
+        "News18MadhyaPradeshChhattisgarh.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18odia",
+      "names": [
+        "News18 Odia"
+      ],
+      "channelIds": [
+        "News18Odia.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "or",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18rajasthan",
+      "names": [
+        "News18 Rajasthan"
+      ],
+      "channelIds": [
+        "News18Rajasthan.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18tamilnadu",
+      "names": [
+        "News18 Tamil Nadu",
+        "News18 Tamilnadu"
+      ],
+      "channelIds": [
+        "News18TamilNadu.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "news18uputtarakhand",
+      "names": [
+        "News18 UP Uttarakhand",
+        "News18 Uttar Pradesh/Uttarakhand",
+        "News18 UP UK"
+      ],
+      "channelIds": [
+        "News18UttarPradeshUttarakhand.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsports1",
+      "names": [
+        "Star Sports 1",
+        "Star Sports HD1"
+      ],
+      "channelIds": [
+        "StarSports1.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": "en",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsports2",
+      "names": [
+        "Star Sports 2",
+        "Star Sports HD2"
+      ],
+      "channelIds": [
+        "StarSports2.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": "en",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsports1hindi",
+      "names": [
+        "Star Sports 1 Hindi",
+        "Star Sports 1 HD Hindi"
+      ],
+      "channelIds": [
+        "StarSports1Hindi.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsports2hindi",
+      "names": [
+        "Star Sports 2 Hindi",
+        "Star Sports 2 HD Hindi"
+      ],
+      "channelIds": [
+        "StarSports2Hindi.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": "hi",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsports1tamil",
+      "names": [
+        "Star Sports 1 Tamil"
+      ],
+      "channelIds": [
+        "StarSports1Tamil.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsports2tamil",
+      "names": [
+        "Star Sports 2 Tamil"
+      ],
+      "channelIds": [
+        "StarSports2Tamil.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": "ta",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsports1telugu",
+      "names": [
+        "Star Sports 1 Telugu"
+      ],
+      "channelIds": [
+        "StarSports1Telugu.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsports2telugu",
+      "names": [
+        "Star Sports 2 Telugu"
+      ],
+      "channelIds": [
+        "StarSports2Telugu.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": "te",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsports1kannada",
+      "names": [
+        "Star Sports 1 Kannada"
+      ],
+      "channelIds": [
+        "StarSports1Kannada.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "starsports2kannada",
+      "names": [
+        "Star Sports 2 Kannada"
+      ],
+      "channelIds": [
+        "StarSports2Kannada.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": "kn",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "ptcpunjabi",
+      "names": [
+        "PTC Punjabi"
+      ],
+      "channelIds": [
+        "PTCPunjabi.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "pa",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.ptcnetwork.com/channel/",
+      "sourceTitle": "PTC Network: official channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": "Official portfolio describes entertainment and also substantial Gurbani carriage; a religion-only primary genre understates the channel remit."
+    },
+    {
+      "id": "ptcnews",
+      "names": [
+        "PTC News"
+      ],
+      "channelIds": [
+        "PTCNews.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "pa",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.ptcnetwork.com/channel/",
+      "sourceTitle": "PTC Network: official channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "ptcchakde",
+      "names": [
+        "PTC Chak De",
+        "PTC Chakde"
+      ],
+      "channelIds": [
+        "PTCChakde.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "music",
+      "replaceAutomaticGenre": false,
+      "language": "pa",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.ptcnetwork.com/channel/",
+      "sourceTitle": "PTC Network: official channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": "Official portfolio also acknowledges religious programming; primary positioning is music."
+    },
+    {
+      "id": "ptcsimran",
+      "names": [
+        "PTC Simran"
+      ],
+      "channelIds": [
+        "PTCSimran.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "religion",
+      "replaceAutomaticGenre": false,
+      "language": "pa",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.ptcnetwork.com/channel/",
+      "sourceTitle": "PTC Network: official channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "ptcdholtv",
+      "names": [
+        "PTC Dhol TV",
+        "Dhol TV"
+      ],
+      "channelIds": [
+        "PTCDholTV.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "music",
+      "replaceAutomaticGenre": false,
+      "language": "pa",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.ptcnetwork.com/channel/",
+      "sourceTitle": "PTC Network: official channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "ptcmusic",
+      "names": [
+        "PTC Music"
+      ],
+      "channelIds": [
+        "PTCMusic.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "music",
+      "replaceAutomaticGenre": false,
+      "language": null,
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.ptcnetwork.com/channel/",
+      "sourceTitle": "PTC Network: official channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": "Official portfolio says Punjabi and Hindi music; no single exclusive language is asserted."
+    },
+    {
+      "id": "skywitness",
+      "names": [
+        "Sky Witness",
+        "Sky Witness +1"
+      ],
+      "channelIds": [
+        "SkyWitness.uk"
+      ],
+      "originCountries": [
+        "GB"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": true,
+      "language": null,
+      "languageMarkets": [
+        "GB"
+      ],
+      "sourceUrl": "https://www.sky.com/watch/channel/sky-witness",
+      "sourceTitle": "Sky: Sky Witness channel profile",
+      "checkedAt": "2026-10-20",
+      "notes": "Official Sky profile positions this as a drama-series channel; English broadcast-language expectation is separately catalogued, not inferred from country."
+    },
+    {
+      "id": "aljazeeradocumentary",
+      "names": [
+        "Al Jazeera Documentary"
+      ],
+      "channelIds": [
+        "AlJazeeraDocumentary.qa"
+      ],
+      "originCountries": [
+        "QA"
+      ],
+      "genre": "documentary",
+      "replaceAutomaticGenre": true,
+      "language": null,
+      "languageMarkets": [
+        "QA"
+      ],
+      "sourceUrl": "https://network.aljazeera.net/en/channels/aljazeera-documentary?page=1",
+      "sourceTitle": "Al Jazeera Media Network: Al Jazeera Documentary",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "aljazeeramubasher",
+      "names": [
+        "Al Jazeera Mubasher"
+      ],
+      "channelIds": [
+        "AlJazeeraMubasher.qa"
+      ],
+      "originCountries": [
+        "QA"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": null,
+      "languageMarkets": [
+        "QA"
+      ],
+      "sourceUrl": "https://network.aljazeera.net/en/channels/aljazeera-mubasher",
+      "sourceTitle": "Al Jazeera Media Network: Al Jazeera Mubasher",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "sonysportsten3",
+      "names": [
+        "Sony Sports Ten 3",
+        "Sony Ten 3",
+        "Ten 3"
+      ],
+      "channelIds": [
+        "SonySportsTen3Hindi.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "sports",
+      "replaceAutomaticGenre": false,
+      "language": null,
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sonypicturesnetworks.com/overview",
+      "sourceTitle": "Sony Pictures Networks India: current corporate channel portfolio",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "suryamovies",
+      "names": [
+        "Surya Movies"
+      ],
+      "channelIds": [
+        "SunSuryaMovies.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "movies",
+      "replaceAutomaticGenre": false,
+      "language": "ml",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "suryamusic",
+      "names": [
+        "Surya Music"
+      ],
+      "channelIds": [
+        "SunSuryaMusic.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "music",
+      "replaceAutomaticGenre": false,
+      "language": "ml",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "suryacomedy",
+      "names": [
+        "Surya Comedy"
+      ],
+      "channelIds": [
+        "SunSuryaComedy.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "entertainment",
+      "replaceAutomaticGenre": false,
+      "language": "ml",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://www.sunnetwork.in/footerpdf/tvch/2026/RIO_DTH_SUNTV-W.E.F_1st_MAY_2026.pdf",
+      "sourceTitle": "Sun TV Network: 2026 reference offer channel genre/language table",
+      "checkedAt": "2026-10-20",
+      "notes": ""
+    },
+    {
+      "id": "news18punjabharyana",
+      "names": [
+        "News18 Punjab Haryana",
+        "News18 Punjab/Haryana"
+      ],
+      "channelIds": [
+        "News18PunjabHaryanaHimachal.in"
+      ],
+      "originCountries": [
+        "IN"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "pa",
+      "languageMarkets": [
+        "IN"
+      ],
+      "sourceUrl": "https://cdn.jiostar.com/jiostar/wp-content/uploads/2026/02/RIO-for-all-DPOs-1.pdf#page=80",
+      "sourceTitle": "JioStar: February 2026 channel genre and language table, pages 80-83",
+      "checkedAt": "2026-10-20",
+      "notes": "Indian domestic feed documentation; regional/international feed variants require separate checks."
+    },
+    {
+      "id": "aljazeeraenglish",
+      "names": [
+        "Al Jazeera English"
+      ],
+      "channelIds": [],
+      "originCountries": [
+        "QA"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "en",
+      "languageMarkets": [
+        "QA"
+      ],
+      "sourceUrl": "https://network.aljazeera.net/en/channels/aljazeera-english",
+      "sourceTitle": "Al Jazeera Media Network: Al Jazeera English",
+      "checkedAt": "2026-10-20",
+      "notes": "Explicitly named English/Arabic global service. Unqualified Al Jazeera is not proof of an English-language feed.",
+      "directExactNameOnly": true
+    },
+    {
+      "id": "aljazeeraarabic",
+      "names": [
+        "Al Jazeera Arabic"
+      ],
+      "channelIds": [
+        "AlJazeera.qa"
+      ],
+      "originCountries": [
+        "QA"
+      ],
+      "genre": "news",
+      "replaceAutomaticGenre": false,
+      "language": "ar",
+      "languageMarkets": [
+        "QA"
+      ],
+      "sourceUrl": "https://network.aljazeera.net/en/channels/aljazeera",
+      "sourceTitle": "Al Jazeera Media Network: Al Jazeera Arabic",
+      "checkedAt": "2026-10-20",
+      "notes": "Explicitly named English/Arabic global service. Unqualified Al Jazeera is not proof of an English-language feed.",
+      "directExactNameOnly": true
+    }
+  ]
+}

@@ -143,6 +143,42 @@ class LogoEnrichmentTests(unittest.TestCase):
         self.assertEqual(logos._image_kind(b'<!DOCTYPE svg SYSTEM "https://evil.test/x"><svg/>',
                                           "image/svg+xml"), "")
 
+    def test_rejected_selected_identity_cannot_return_through_canonical_logo(self):
+        from channel_metadata_enrichment import ChannelRegistry
+        channels = [
+            {"id": "StarMovies.pt", "name": "Star Movies", "country": "PT"},
+            {"id": "CanalHollywood.pt", "name": "Canal Hollywood", "country": "PT"},
+            {"id": "KTV.al", "name": "KTV", "country": "AL"},
+            {"id": "KTV.in", "name": "KTV", "country": "IN"},
+        ]
+        registry = ChannelRegistry(channels, [], [
+            {"code": "PT", "name": "Portugal"}, {"code": "AL", "name": "Albania"},
+            {"code": "IN", "name": "India"},
+        ])
+        row = {"channel_name": "PT - Star Movies", "canonical_name": "Canal Hollywood",
+               "epg_id": "CanalHollywood.pt"}
+        wrong = {"channel": "CanalHollywood.pt", "feed": None, "in_use": True,
+                 "url": "https://logos.test/canal-hollywood.png"}
+        index = logos.RegistryLogoIndex(registry, [wrong])
+        self.assertTrue(index.selected_id_identity_conflict(row))
+        self.assertIsNone(index.lookup(row))
+        index = logos.RegistryLogoIndex(registry, [wrong,
+            {"channel": "StarMovies.pt", "feed": None, "in_use": True,
+             "url": "https://logos.test/star-movies.png"},
+            {"channel": "KTV.al", "feed": None, "in_use": True,
+             "url": "https://logos.test/ktv-albania.png"},
+            {"channel": "KTV.in", "feed": None, "in_use": True,
+             "url": "https://logos.test/ktv-india.png"},
+        ])
+        self.assertEqual(index.lookup(row), ("StarMovies.pt", "https://logos.test/star-movies.png"))
+        self.assertEqual(index.lookup({"channel_name": "AL - KTV", "canonical_name": "KTV",
+                                       "epg_id": "KTV.in"}),
+                         ("KTV.al", "https://logos.test/ktv-albania.png"))
+        self.assertFalse(index.selected_id_identity_conflict({
+            "channel_name": "Uncatalogued label", "canonical_name": "Canal Hollywood",
+            "epg_id": "CanalHollywood.pt",
+        }))
+
     def test_registry_logos_require_one_exact_current_channel_and_safe_feed_scope(self):
         from channel_metadata_enrichment import ChannelRegistry
         channels = [

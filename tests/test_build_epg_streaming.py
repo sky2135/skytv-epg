@@ -1559,6 +1559,57 @@ class MappingContractTests(unittest.TestCase):
                 self.assertEqual(metadata.primary_language, expected)
                 self.assertEqual(metadata.languages, [expected])
 
+    def test_provider_language_category_does_not_define_channel_language(self) -> None:
+        for category in ("Tamil", "Marathi", "Tamil | Marathi Movies"):
+            with self.subTest(category=category):
+                metadata = runner.build_metadata(
+                    {
+                        "channel_name": "Sony PIX",
+                        "canonical_name": "Sony PIX",
+                        "category_name": category,
+                        "epg_id": "SonyPIX.in",
+                    },
+                    2,
+                )
+                self.assertEqual(metadata.primary_language, "und")
+                self.assertEqual(metadata.languages, ["und"])
+
+    def test_identity_language_is_not_combined_with_provider_category_language(self) -> None:
+        metadata = runner.build_metadata(
+            {
+                "channel_name": "Al Jazeera English",
+                "canonical_name": "Al Jazeera English",
+                "category_name": "Tamil News",
+                "epg_id": "AlJazeeraEnglish.qa",
+            },
+            2,
+        )
+        self.assertEqual(metadata.primary_language, "en")
+        self.assertEqual(metadata.languages, ["en"])
+
+    def test_explicit_manual_languages_survive_provider_category_language(self) -> None:
+        for locked in ("false", "true"):
+            with self.subTest(locked=locked):
+                metadata = runner.build_metadata(
+                    {
+                        "channel_name": "Sony PIX",
+                        "canonical_name": "Sony PIX",
+                        "category_name": "Tamil | Marathi Movies",
+                        "epg_id": "SonyPIX.in",
+                        "primary_language": "en",
+                        "language_codes": "en",
+                        "metadata_source": "manual",
+                        "metadata_status": "approved",
+                        "metadata_locked": locked,
+                    },
+                    2,
+                )
+                self.assertEqual(metadata.primary_language, "en")
+                self.assertEqual(metadata.languages, ["en"])
+                self.assertEqual(metadata.source, "manual")
+                self.assertEqual(metadata.status, "approved")
+                self.assertEqual(metadata.locked, locked == "true")
+
     def test_identity_specific_sport_wins_over_conflicting_provider_category(self) -> None:
         cricket = runner.build_metadata(
             {
@@ -2071,6 +2122,55 @@ class MappingContractTests(unittest.TestCase):
                 )
             finally:
                 connection.close()
+
+    def test_disputed_guide_identity_cannot_supply_its_source_logo(self) -> None:
+        row = runner.parse_mapping_csv(
+            _mapping_bytes([_mapping_row(
+                server_id="server_1", stream_id="1",
+                channel_name="PT - Star Movies", category_name="Movies",
+                epg_id="CanalHollywood.pt",
+            )]),
+            {"server_1"},
+        )[0]
+        wrong_logo = "https://logos.example/canal-hollywood.png"
+        right_logo = "https://logos.example/star-movies.png"
+        connection = runner.sqlite3.connect(":memory:")
+        try:
+            connection.execute(
+                "CREATE TABLE channels (source_key TEXT, channel_key TEXT, "
+                "display_name TEXT, icon_url TEXT)"
+            )
+            connection.execute(
+                "INSERT INTO channels VALUES (?, ?, ?, ?)",
+                ("epgshare01", row.epg_id, "Canal Hollywood", wrong_logo),
+            )
+            overrides = runner.empty_icon_overrides()
+            overrides.verification[wrong_logo] = {"status": "valid_image"}
+            self.assertEqual(runner.resolve_row_icon(row, connection, overrides), wrong_logo)
+            row.metadata_evidence = {"languageReview": "provider_bank_conflict"}
+            self.assertEqual(runner.resolve_row_icon(row, connection, overrides), wrong_logo)
+            row.metadata_evidence = {
+                "identityReview": "selected_id_name_or_market_disagreement"
+            }
+            self.assertEqual(runner.resolve_row_icon(row, connection, overrides), "")
+            row.logo_url = right_logo
+            self.assertEqual(runner.resolve_row_icon(row, connection, overrides), right_logo)
+            row.logo_url = ""
+            for notes in ("Reviewed manual logo", "SOURCE_NAME_LOGO: exact provider name"):
+                with self.subTest(notes=notes):
+                    icon = runner.IconOverride(
+                        server_id=row.server_id, stream_id=row.stream_id,
+                        epg_id="", channel_name=row.channel_name,
+                        icon_url=right_logo, priority=100, notes=notes,
+                    )
+                    configured = runner.empty_icon_overrides()
+                    configured.rows.append(icon)
+                    configured.by_stream[(row.server_id, row.stream_id)] = [icon]
+                    self.assertEqual(
+                        runner.resolve_row_icon(row, connection, configured), right_logo
+                    )
+        finally:
+            connection.close()
 
     def test_exact_xmltv_ids_and_channel_aliases_preserve_double_spaces(self) -> None:
         exact_id = "US-MoreMax  Eastern"

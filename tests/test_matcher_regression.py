@@ -274,6 +274,12 @@ class MatcherIntegrityTests(unittest.TestCase):
             ("logoEnrichmentSha256", "scripts/logo_enrichment.py"),
             ("programmeDetailsSha256", "scripts/epg_programme_details.py"),
             ("liveEnrichmentAuditSha256", "scripts/audit_live_enrichment.py"),
+            ("vodCatalogBuilderSha256", "scripts/build_vod_catalogs.py"),
+            ("appCatalogBuilderSha256", "scripts/build_skytvplayer_catalog.py"),
+            ("vodTmdbSha256", "scripts/vod_tmdb.py"),
+            ("vodReviewedCorrectionsSha256", "scripts/vod_reviewed_corrections.py"),
+            ("vodReviewedFactsSha256", "data/vod_reviewed_corrections.json"),
+            ("channelMetadataFactsSha256", "config/channel_metadata_facts.json"),
         ):
             with self.subTest(protected_file=relative_path):
                 self.assertEqual(

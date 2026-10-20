@@ -117,8 +117,12 @@ Each gzip catalog has a small envelope followed by `items`:
 `language` is an ISO 639-1 code, `mul`, or `und`. `languages` retains the known
 component languages when a title is multilingual. A release date may be
 `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` so the publisher never invents missing month
-or day precision. Artwork must be a credential-free HTTP(S) URL; query strings
-and fragments are removed. Artwork hosted on the configured provider hostname
+or day precision. Artwork must be a credential-free HTTP(S) URL. Query strings
+and fragments are removed, with one narrow public-CDN exception: Google's
+`encrypted-tbn[0-3].gstatic.com/images` requires its `q=tbn:ANd9Gc...` image key.
+Only that bounded public key survives; unknown, duplicate, credential-like or
+signed parameters are rejected. A bare `/images` endpoint stays `null` instead
+of becoming a broken poster URL. Artwork hosted on the configured provider hostname
 is left `null` so the public catalog never exposes that private origin; TMDB and
 independent public-CDN artwork remains eligible.
 

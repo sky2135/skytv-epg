@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import copy
 import hashlib
 import json
 import os
@@ -202,6 +203,42 @@ class VodNormalizationTests(unittest.TestCase):
                 blocked_hostname="provider.invalid",
             )
         )
+
+    def test_google_thumbnails_keep_only_the_required_public_image_key(self) -> None:
+        key = "tbn:ANd9Gc" + "aB_123-" * 8
+        raw = f"https://encrypted-tbn0.gstatic.com/images?q={key}&usqp=CAU"
+        actual = vod.normalize_artwork_url(raw, tmdb_size="w500")
+        self.assertEqual(actual, "https://encrypted-tbn0.gstatic.com/images?q=tbn%3AANd9Gc" + "aB_123-" * 8)
+        self.assertEqual(vod.normalize_artwork_url(actual, tmdb_size="w500"), actual)
+        for suffix in ("", "?q=private-account", f"?q={key}&token=private", f"?q={key}&q={key}", f"?q={key}#private"):
+            with self.subTest(suffix=suffix):
+                self.assertIsNone(vod.normalize_artwork_url("https://encrypted-tbn0.gstatic.com/images" + suffix, tmdb_size="w500"))
+
+    def test_google_thumbnail_validation_does_not_allow_lookalike_or_provider_origins(self) -> None:
+        key = "tbn:ANd9Gc" + "aB_123-" * 8
+        self.assertIsNone(vod.normalize_artwork_url(
+            f"https://encrypted-tbn0.gstatic.com/images?q={key}", tmdb_size="w500", blocked_hostname="gstatic.com"))
+        self.assertEqual(vod.normalize_artwork_url(
+            f"https://encrypted-tbn0.gstatic.com.evil.test/poster.jpg?q={key}", tmdb_size="w500"),
+            "https://encrypted-tbn0.gstatic.com.evil.test/poster.jpg")
+
+    def test_basic_publisher_applies_reviewed_corrections_and_counts_final_metadata(self) -> None:
+        source = {"get_vod_categories": [], "get_series_categories": [], "get_series": [],
+                  "get_vod_streams": [{"stream_id": 622578, "name": "AR - Doctor (2021)",
+                                       "tmdb_id": 284052, "releaseDate": "2016-10-25",
+                                       "genre": "Fantasy", "stream_icon": "https://cdn.example/wrong.jpg"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            entry = vod.publish_server(output, "server_3", source, generated_at=NOW)
+            manifest = json.loads((output / entry["manifestFile"]).read_text(encoding="utf-8"))
+            ref = manifest["catalogs"]["movies"]
+            item = json.loads(gzip.decompress((output / ref["file"]).read_bytes()))["items"][0]
+            self.assertIsNone(item["tmdbId"])
+            self.assertIsNone(item["releaseDate"])
+            self.assertEqual(item["genre"], "unknown")
+            self.assertEqual(item["artwork"], {"posterUrl": None, "backdropUrl": None})
+            self.assertEqual(ref["metadataCompleteness"]["tmdbIdKnown"], 0)
+            self.assertEqual(ref["metadataCompleteness"]["artworkKnown"], 0)
 
     def test_panel_base_requires_a_credential_free_https_url(self) -> None:
         self.assertEqual(
@@ -428,6 +465,56 @@ class VodPublishingTests(unittest.TestCase):
 
             with self.assertRaisesRegex(vod.CatalogBuildError, "SHA-256"):
                 vod.validate_publication(output_dir)
+
+    def test_basic_release_gate_rejects_resealed_reviewed_metadata_regressions(self) -> None:
+        source = sample_source()
+        rows, _ = vod.normalize_catalog(
+            source["get_vod_streams"], source["get_vod_categories"], source["vod_details"],
+            kind="movie", label="reviewed fixture",
+        )
+        doctor = {**rows[0], "id": "622578", "title": "AR - Doctor (2021)", "tmdbId": "284052"}
+        fish = {**rows[0], "id": "403965", "title": "EN - Fisherman's Friends 2 (2021)",
+                "releaseDate": "2021-01-01", "tmdbId": "684006"}
+        corrected_doctor = vod.apply_reviewed_correction("server_3", "movie", doctor)
+        corrected_fish = vod.apply_reviewed_correction("server_3", "movie", fish)
+        doree = vod.apply_reviewed_correction("server_2", "series", {
+            **rows[0], "id": "5731", "title": "Doree", "tmdbId": "23963",
+        })
+
+        with tempfile.TemporaryDirectory() as raw_temp:
+            path = Path(raw_temp) / "catalog.json.gz"
+
+            def validate(item, server="server_3", kind="movie"):
+                # Recompute counts after every change so generic release
+                # bookkeeping cannot hide whether the semantic gate ran.
+                payload = {"schemaVersion": 1, "serverId": server, "contentType": kind,
+                           "generatedAt": NOW, "itemCount": 1, "items": [item]}
+                path.write_bytes(gzip.compress(json.dumps(payload).encode("utf-8"), mtime=0))
+                entry = {"itemCount": 1, "metadataCompleteness": vod.catalog_completeness([item])}
+                return vod._validate_catalog_file(path, entry, server_id=server, kind=kind,
+                                                  generated_at=NOW, label="reviewed fixture")
+
+            validate(corrected_doctor)
+            validate(corrected_fish)  # A source-known year still permits an unknown full date.
+            self.assertIsNone(corrected_fish["releaseDate"])
+            validate({**corrected_fish, "releaseDate": "2022-08-19"})
+            validate(doree, "server_2", "series")
+            with self.assertRaisesRegex(vod.CatalogBuildError, "wrong-work TMDB"):
+                validate(doctor)
+            with self.assertRaisesRegex(vod.CatalogBuildError, "wrong-work TMDB"):
+                validate({**doree, "tmdbId": "23963"}, "server_2", "series")
+            for field, value in (("title", fish["title"]), ("releaseDate", "2021-01-01"),
+                                 ("genres", ["action"])):
+                item = copy.deepcopy(corrected_fish)
+                item[field] = value
+                if field == "genres":
+                    item["genre"] = "action"
+                with self.subTest(field=field), self.assertRaisesRegex(vod.CatalogBuildError, "reviewed metadata"):
+                    validate(item)
+            # Exact reviewed scopes do not capture another server or a reused
+            # provider ID whose displayed work has changed.
+            validate(doctor, "server_2")
+            validate({**doctor, "title": "Doctor Strange (2016)", "releaseDate": "2016-10-25"})
 
     def test_validator_rejects_path_traversal_in_release_index(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:

@@ -8,6 +8,15 @@ Country alone does not establish a language. Unknown values remain unknown
 when the available evidence is ambiguous; manual and locked values remain
 authoritative.
 
+Automatic language inference uses channel identity and feed evidence, excluding
+provider category banks. A Tamil or Marathi category does not establish the
+audio of a named English movie channel. Exact primary names take precedence
+over ambiguous aliases, and conflicting named feeds, markets or EPG IDs are
+withheld. Reviewed broadcaster facts in `config/channel_metadata_facts.json`
+fill supported gaps and correct the specific audited genre errors. Regional
+or dubbed-feed disagreements remain unverified instead of inheriting a
+different country's language or branding.
+
 `EPG/server_N_metadata.json.gz` remains schema v1. Enriched rows include
 `metadataEvidence` with the source, channel ID, method and changed facets.
 Every row includes `logoProvenance`: image kind, identity source/match,

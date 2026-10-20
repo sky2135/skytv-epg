@@ -437,6 +437,64 @@ class SkytvPlayerCatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(vod.CatalogBuildError, "SHA-256"):
             app.validate(self.output, expected_servers=["server_1"])
 
+    def test_reviewed_wrong_identity_never_restores_provider_details_when_api_unavailable(self):
+        source = {
+            "get_vod_categories": [], "get_series_categories": [], "get_series": [],
+            "get_vod_streams": [{
+                "stream_id": 622578, "name": "AR - Doctor (2021)", "language": "ar",
+                "tmdb_id": 284052, "genre": "Fantasy", "releaseDate": "2016-10-25",
+                "plot": "Wrong Doctor Strange synopsis", "rating": "8.5", "adult": False,
+                "stream_icon": "https://cdn.example/doctor-strange.jpg",
+            }],
+        }
+        index = self.build(sources=[("server_3", source, None)])
+        rows, _ = self.catalog(index["servers"][0], "movies")
+        item = rows[0]
+        self.assertEqual(item["id"], "622578")
+        self.assertEqual(item["originalLanguage"], "ta")
+        self.assertEqual(item["directors"], ["Nelson Dilipkumar"])
+        self.assertEqual(item["languages"], ["ar"])
+        self.assertIsNone(item["tmdbId"])
+        self.assertIsNone(item["releaseDate"])
+        self.assertIsNone(item["overview"])
+        self.assertIsNone(item["rating"])
+        self.assertIsNone(item["adult"])
+        self.assertEqual(item["artwork"], {"posterUrl": None, "backdropUrl": None})
+        self.assertEqual(item["genre"], "unknown")
+        self.assertEqual(item["metadataMatch"], "reviewed_correction")
+        self.assertTrue(item["metadataEvidence"]["sourceURLs"])
+        self.assertEqual(app.validate(self.output, expected_servers=["server_3"]), {"serverCount": 1})
+
+    def test_rejected_provider_identity_keeps_only_a_validated_clean_replacement(self):
+        source = app_source()
+        class Replacement(FakeTmdbClient):
+            def enrich(self, item, kind):
+                return {
+                    "matchStatus": "matched_search", "tmdbId": "777", "rejectedIdentity": True,
+                    "originalTitle": "Correct Film", "originalLanguage": "fr", "genres": ["Comedy"],
+                    "overview": "Verified replacement synopsis", "releaseDate": "2025-01-02",
+                    "posterUrl": "https://image.tmdb.org/t/p/w500/verified.jpg",
+                    "adult": False,
+                }
+        index = app.build(self.output, self.cache, [("server_1", source, None)], Replacement(), NOW)
+        rows, _ = self.catalog(index["servers"][0], "movies")
+        self.assertEqual(rows[0]["tmdbId"], "777")
+        self.assertEqual(rows[0]["overview"], "Verified replacement synopsis")
+        self.assertEqual(rows[0]["originalLanguage"], "fr")
+        self.assertEqual(rows[0]["languages"], ["en"])
+        self.assertEqual(rows[0]["genre"], "comedy")
+        self.assertEqual(rows[0]["artwork"]["posterUrl"], "https://image.tmdb.org/t/p/w500/verified.jpg")
+
+    def test_unvalidated_provider_tmdb_id_is_not_used_as_a_recommendation_join(self):
+        source = app_source()
+        source["get_vod_streams"].append({"stream_id": "919", "name": "Unverified Film", "tmdb_id": "919", "adult": False})
+        rows, _ = self.catalog(self.build(source)["servers"][0], "movies")
+        item = next(item for item in rows if item["id"] == "919")
+        self.assertIsNone(item["tmdbId"])
+        item["tmdbId"] = "919"
+        with self.assertRaisesRegex(vod.CatalogBuildError, "unverified TMDB"):
+            app.validate_metadata_identity("server_1", "movie", item)
+
     def test_late_secret_failure_retains_existing_release_index(self):
         self.build()
         previous = (self.output / "index.json").read_bytes()

@@ -20,6 +20,8 @@ from typing import Any, Mapping
 
 import requests
 
+from vod_reviewed_corrections import correction_for
+
 
 API_ROOT = "https://api.themoviedb.org/3"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -32,6 +34,11 @@ MAX_ATTEMPTS = 3
 IMAGE_PATH = re.compile(r"/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)\Z", re.I)
 YOUTUBE_KEY = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 STATUSES = {"matched_id", "matched_search", "no_match", "unavailable"}
+IDENTITY_POLICY = 2
+# Only provider decoration is removed. Articles, subtitles, sequels and numbers
+# remain identity-bearing ("Doctor" must never become "Doctor Strange").
+PROVIDER_PREFIX = re.compile(r"^(?:[A-Z]{2,3}|4K|FHD|UHD|HD)\s*[-|:]\s+")
+PROVIDER_SUFFIX = re.compile(r"\s*(?:\[(?:4K|FHD|UHD|HD|SD)\]|\((?:4K|FHD|UHD|HD|SD|HINDI|MARATHI|TAMIL|TELUGU|ENGLISH|DUBBED)\))\s*$", re.I)
 
 
 def _text(value: object, limit: int = 300) -> str | None:
@@ -79,15 +86,20 @@ def _normalized_title(value: object) -> str:
 
 def _title_and_year(item: Mapping[str, Any]) -> tuple[str, str | None]:
     title = _text(item.get("title") or item.get("name")) or ""
+    title = PROVIDER_PREFIX.sub("", title)
+    for _ in range(3):
+        title = PROVIDER_SUFFIX.sub("", title).strip()
+    trailing_year = re.search(r"(?:\s*[\[(]((?:19|20)\d{2})[\])]|\s+-\s+((?:19|20)\d{2}))\s*$", title)
     year = None
     for value in (item.get("year"), item.get("releaseDate"), item.get("release_date"), item.get("first_air_date")):
         match = re.match(r"^((?:19|20)\d{2})(?:$|-\d{2})", str(value or ""))
         if match:
             year = match.group(1)
             break
-    trailing_year = re.search(r"\s*[\[(]((?:19|20)\d{2})[\])]\s*$", title)
-    if trailing_year and (year is None or trailing_year.group(1) == year):
-        year = trailing_year.group(1)
+    if trailing_year:
+        # The independently displayed year wins over possibly polluted detail
+        # metadata supplied alongside an incorrect TMDB identifier.
+        year = trailing_year.group(1) or trailing_year.group(2)
         title = title[:trailing_year.start()].strip()
     return title, year
 
@@ -99,8 +111,41 @@ def _image(path: object, size: str) -> str | None:
 def _enrichment_identity(item: Mapping[str, Any], kind: str) -> tuple[str, str | None, str, str | None]:
     identifier = _identifier(item.get("tmdbId") or item.get("tmdb_id") or item.get("tmdb"))
     title, year = _title_and_year(item)
-    key = f"{kind}:id:{identifier}" if identifier else f"{kind}:title:{_normalized_title(title)}:year:{year or ''}"
+    correction = _reviewed(item, kind)
+    if correction:
+        title = correction.get("searchTitle") or title
+        year = correction.get("year") or year
+        identifier = _identifier(correction["metadata"].get("tmdbId")) if correction["rejectIdentity"] else identifier
+    key = f"{kind}:identity-v{IDENTITY_POLICY}:id:{identifier or ''}:title:{_normalized_title(title)}:year:{year or ''}"
     return key, identifier, title, year
+
+
+def _reviewed(item: Mapping[str, Any], kind: str) -> dict[str, Any] | None:
+    content_id = str(item.get("contentId") or "")
+    server_id = str(item.get("_serverId") or (content_id.split(":", 1)[0] if ":" in content_id else ""))
+    return correction_for(server_id, kind, item) if server_id else None
+
+
+def _detail_identity(details: Mapping[str, Any], kind: str) -> dict[str, Any]:
+    names = [details.get("title"), details.get("original_title")] if kind == "movie" else [details.get("name"), details.get("original_name")]
+    alternatives = details.get("alternative_titles")
+    alternatives = alternatives.get("titles" if kind == "movie" else "results") if isinstance(alternatives, dict) else None
+    if isinstance(alternatives, list):
+        names.extend(alias.get("title") for alias in alternatives[:100] if isinstance(alias, dict))
+    release = _date(details.get("release_date" if kind == "movie" else "first_air_date"))
+    return {"names": sorted({_normalized_title(name) for name in names if _normalized_title(name)}),
+            "year": release[:4] if release else None,
+            "originalTitle": _normalized_title(details.get("original_title" if kind == "movie" else "original_name")),
+            "tmdbId": _identifier(details.get("id"))}
+
+
+def _identity_matches(proof: Mapping[str, Any], title: str, year: str | None) -> bool:
+    names = proof.get("names")
+    if not isinstance(names, list) or len(names) > 102 or any(
+            not isinstance(name, str) or not name or name != _normalized_title(name) for name in names):
+        return False
+    return bool(_normalized_title(title) and _normalized_title(title) in names
+                and (year is None or proof.get("year") == year))
 
 
 def _strings(values: object, limit: int = 40) -> list[str]:
@@ -120,7 +165,7 @@ def _empty(identifier: str | None, status: str = "unavailable") -> dict[str, Any
         "voteCount": None, "popularity": None, "runtimeMinutes": None,
         "cast": [], "directors": [], "trailerUrl": None, "seasonCount": None,
         "episodeCount": None, "status": None, "lastAirDate": None, "nextEpisode": None,
-        "adult": None,
+        "adult": None, "rejectedIdentity": False,
     }
 
 
@@ -183,12 +228,13 @@ def _metadata(details: Mapping[str, Any], kind: str, match_status: str) -> dict[
 
 def _cached_metadata(data: object) -> dict[str, Any] | None:
     """Revalidate restored cache files before they enter a public catalog."""
-    if not isinstance(data, dict) or set(data) != set(_empty(None)) or data.get("matchStatus") not in STATUSES:
+    if not isinstance(data, dict) or set(data) not in (set(_empty(None)), set(_empty(None)) - {"rejectedIdentity"}) or data.get("matchStatus") not in STATUSES:
         return None
     identifier = _identifier(data.get("tmdbId"))
     if data["matchStatus"].startswith("matched_") and identifier is None:
         return None
     result = _empty(identifier, data["matchStatus"])
+    result["rejectedIdentity"] = data.get("rejectedIdentity") is True
     for field, limit in (("overview", 6000), ("originalTitle", 300), ("status", 100)):
         result[field] = _text(data.get(field), limit)
     for field in ("releaseDate", "lastAirDate"):
@@ -393,6 +439,55 @@ class TmdbClient:
             raise ValueError("Metadata kind must be movie or series.")
         return "movie" if kind == "movie" else "tv"
 
+    def _identity_cache(self, key: str, item: Mapping[str, Any], kind: str,
+                        identifier: str | None, title: str, year: str | None) -> tuple[dict[str, Any] | None, bool, bool]:
+        """Read only caches corroborated against the current display identity.
+
+        Legacy positive entries can be reused without requests when their own
+        original title and year independently agree. Rejected legacy entries
+        never become stale fallbacks. New entries retain bounded alias proof so
+        translated original titles can be reused safely after an API check.
+        """
+        value, fresh = self._read_cache(key)
+        correction = _reviewed(item, kind)
+        rejected_ids = correction.get("rejectedTmdbIds", []) if correction else []
+        if isinstance(value, dict) and value.get("identityPolicy") == IDENTITY_POLICY:
+            metadata = _cached_metadata(value.get("metadata"))
+            proof = value.get("identity")
+            if metadata is not None:
+                if metadata["tmdbId"] in rejected_ids:
+                    return None, False, True
+                if not metadata["matchStatus"].startswith("matched_"):
+                    return metadata, fresh, metadata["rejectedIdentity"]
+                if isinstance(proof, dict) and _identity_matches(proof, title, year) and (
+                    proof.get("tmdbId") == metadata["tmdbId"]
+                    and (identifier is None or metadata["tmdbId"] == identifier)
+                    and proof.get("originalTitle") == _normalized_title(metadata["originalTitle"])
+                    and proof.get("year") == ((metadata["releaseDate"] or "")[:4] or None)
+                ):
+                    return metadata, fresh, metadata["rejectedIdentity"]
+            return None, False, True
+        # Only pre-policy entries use these keys. Never read them as unbound
+        # payloads at the new key, and never migrate misses or unvalidated IDs.
+        raw_identifier = _identifier(item.get("tmdbId") or item.get("tmdb_id") or item.get("tmdb"))
+        legacy_key = f"{kind}:id:{raw_identifier}" if raw_identifier else f"{kind}:title:{_normalized_title(title)}:year:{year or ''}"
+        legacy, legacy_fresh = self._read_cache(legacy_key)
+        metadata = _cached_metadata(legacy)
+        if metadata is None or not metadata["matchStatus"].startswith("matched_"):
+            return None, False, False
+        if correction and correction["rejectIdentity"]:
+            return None, False, True
+        valid = bool(year and _normalized_title(title)
+                     and _normalized_title(metadata["originalTitle"]) == _normalized_title(title)
+                     and (metadata["releaseDate"] or "")[:4] == year
+                     and (identifier is None or metadata["tmdbId"] == identifier))
+        return (metadata, legacy_fresh, False) if valid else (None, False, True)
+
+    def _write_identity_cache(self, key: str, metadata: dict[str, Any], ttl: int,
+                              proof: Mapping[str, Any] | None = None) -> None:
+        self._write_cache(key, {"identityPolicy": IDENTITY_POLICY,
+                                "identity": dict(proof or {}), "metadata": metadata}, ttl)
+
     def enrichment_priority(self, item: Mapping[str, Any], kind: str) -> int:
         """Prioritize missing titles, then stale matches/misses, then fresh cache.
 
@@ -400,9 +495,10 @@ class TmdbClient:
         This prevents refreshing early catalog entries from starving new titles.
         """
         self._kind(kind)
-        key, _identifier_value, _title_value, _year_value = _enrichment_identity(item, kind)
-        cached, fresh = self._read_cache(key)
-        cached = _cached_metadata(cached)
+        key, identifier, title, year = _enrichment_identity(item, kind)
+        cached, fresh, _rejected = self._identity_cache(key, item, kind, identifier, title, year)
+        if _reviewed(item, kind) and (cached is None or not fresh):
+            return -1
         if cached is None:
             return 0
         if fresh:
@@ -412,9 +508,11 @@ class TmdbClient:
     def enrich(self, item: Mapping[str, Any], kind: str) -> dict[str, Any]:
         api_kind = self._kind(kind)
         key, identifier, title, year = _enrichment_identity(item, kind)
+        correction = _reviewed(item, kind)
+        rejected_ids = correction.get("rejectedTmdbIds", []) if correction else []
         requests_before = self.stats["requests"]
-        cached, fresh = self._read_cache(key)
-        cached = _cached_metadata(cached)
+        cached, fresh, rejected = self._identity_cache(key, item, kind, identifier, title, year)
+        rejected = rejected or bool(correction and correction["rejectIdentity"])
         if cached is None:
             fresh = False
         if fresh:
@@ -425,24 +523,40 @@ class TmdbClient:
         def unavailable() -> dict[str, Any]:
             if cached is not None:
                 self.stats["staleFallbacks"] += 1
-            result = cached if cached is not None else _empty(identifier)
+            result = cached if cached is not None else _empty(None if rejected else identifier)
+            result["rejectedIdentity"] = rejected
             # Record attempted failures without storing HTTP responses or errors.
             # Untouched titles remain uncached so the next run prioritizes them.
             # A failed refresh retains every previously successful metadata field.
             if self.stats["requests"] > requests_before:
-                self._write_cache(key, result, MISS_TTL)
+                previous, _fresh = self._read_cache(key)
+                proof = previous.get("identity") if isinstance(previous, dict) else None
+                if cached is not None and cached["matchStatus"].startswith("matched_") and not proof:
+                    proof = {"names": [_normalized_title(cached["originalTitle"])],
+                             "originalTitle": _normalized_title(cached["originalTitle"]),
+                             "year": (cached["releaseDate"] or "")[:4], "tmdbId": cached["tmdbId"]}
+                self._write_identity_cache(key, result, MISS_TTL, proof)
+            return result
+
+        def no_match() -> dict[str, Any]:
+            result = _empty(None, "no_match")
+            result["rejectedIdentity"] = rejected
+            self.stats["noMatches"] += 1
+            self._write_identity_cache(key, result, MISS_TTL)
             return result
 
         if not (self.token or self.api_key):
             return unavailable()
+        # A provider ID alone does not identify the displayed asset. Original
+        # title is deliberately never an identity fallback: it may be polluted.
+        if not title or "://" in title or not _normalized_title(title):
+            rejected = bool(identifier) or rejected
+            return no_match()
         match_status = "matched_id" if identifier else "matched_search"
         if not identifier:
             # A year is necessary to distinguish remakes, reboots and common titles.
             if not title or not year or "://" in title or not _normalized_title(title):
-                result = _empty(None, "no_match")
-                self.stats["noMatches"] += 1
-                self._write_cache(key, result, MISS_TTL)
-                return result
+                return no_match()
             params = {"query": title, "page": 1, "include_adult": "true", "year" if kind == "movie" else "first_air_date_year": year}
             state, search = self._request(f"/search/{api_kind}", params)
             if state != "ok" or search is None:
@@ -459,27 +573,27 @@ class TmdbClient:
                     names = (candidate.get("title"), candidate.get("original_title")) if kind == "movie" else (candidate.get("name"), candidate.get("original_name"))
                     release = _date(candidate.get("release_date" if kind == "movie" else "first_air_date"))
                     candidate_id = _identifier(candidate.get("id"))
-                    if candidate_id and release and release[:4] == year and _normalized_title(title) in {_normalized_title(name) for name in names}:
+                    if candidate_id and candidate_id not in rejected_ids and release and release[:4] == year and _normalized_title(title) in {_normalized_title(name) for name in names}:
                         matches.add(candidate_id)
             if len(matches) != 1:
-                result = _empty(None, "no_match")
-                self.stats["noMatches"] += 1
-                self._write_cache(key, result, MISS_TTL)
-                return result
+                return no_match()
             identifier = matches.pop()
-        state, details = self._request(f"/{api_kind}/{identifier}", {"append_to_response": "credits,videos"})
+        state, details = self._request(f"/{api_kind}/{identifier}", {"append_to_response": "credits,videos,alternative_titles"})
         if state == "not_found":
-            result = _empty(identifier, "no_match")
-            self.stats["noMatches"] += 1
-            self._write_cache(key, result, MISS_TTL)
-            return result
+            rejected = True
+            return no_match()
         if state != "ok" or not details or _identifier(details.get("id")) != identifier:
             if state == "ok":
                 self.stats["errors"] += 1
             return unavailable()
+        proof = _detail_identity(details, kind)
+        if not _identity_matches(proof, title, year):
+            rejected = True
+            return no_match()
         result = _metadata(details, kind, match_status)
+        result["rejectedIdentity"] = rejected
         self.stats["matches"] += 1
-        self._write_cache(key, result, DETAIL_TTL)
+        self._write_identity_cache(key, result, DETAIL_TTL, proof)
         return result
 
     def trending(self, kind: str) -> dict[str, int]:
