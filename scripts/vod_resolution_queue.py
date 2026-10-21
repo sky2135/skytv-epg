@@ -247,7 +247,12 @@ class ResolutionQueue:
             current[key] = (server_id, kind, item)
         due = [key for key in current if key in self.entries and self.entries[key]["nextAttemptAt"] <= self.now]
         input_order = {key: index for index, key in enumerate(current)}
-        due.sort(key=lambda key: (self.entries[key]["selectionOrder"], self.entries[key]["nextAttemptAt"],
+        # A reserved batch can outlive the runtime budget. Prioritize entries
+        # that received no request, then the least recently attempted, before
+        # rotating selections that have equal actual attempt history.
+        due.sort(key=lambda key: (self.entries[key]["lastAttemptAt"] is not None,
+                                  self.entries[key]["lastAttemptAt"] or 0,
+                                  self.entries[key]["selectionOrder"], self.entries[key]["nextAttemptAt"],
                                   input_order[key], self.entries[key]["contentId"]))
         selected = due[:limit]
         for key in selected:

@@ -83,6 +83,27 @@ class ResolutionQueueTests(unittest.TestCase):
         # Once selected, persistent fairness overrides a later input reordering.
         self.assertEqual(["9", "2"], [item[2]["id"] for item in queue.select_due(list(reversed(items)), limit=2)])
 
+    def test_runtime_budget_unattempted_batch_member_precedes_due_temporary_retry(self):
+        items = [("server_1", "movie", movie(i)) for i in (1, 2)]
+        queue = self.queue()
+        self.assertEqual(["1", "2"], [item[2]["id"] for item in queue.select_due(items, limit=2)])
+        self.record(queue, "unavailable", identifier=1, attempted=True)
+        self.assertTrue(queue.save())
+        queue = self.queue(now=EPOCH + resolution.DAY)
+        self.assertEqual(["2", "1"], [item[2]["id"] for item in queue.select_due(items, limit=2)])
+        self.assertEqual(0, self.row(queue, 2)["attempts"])
+        self.assertEqual(1, self.row(queue, 1)["attempts"])
+
+    def test_oldest_actual_attempt_precedes_selection_rotation_for_due_retries(self):
+        items = [("server_1", "movie", movie(i)) for i in (1, 2)]
+        queue = self.queue()
+        queue.select_due(items, limit=2)
+        self.record(queue, "unavailable", identifier=2)
+        queue.now += resolution.DAY
+        self.record(queue, "unavailable", identifier=1)
+        queue.now += resolution.DAY
+        self.assertEqual(["2", "1"], [item[2]["id"] for item in queue.select_due(items, limit=2)])
+
     def test_retain_scope_prunes_only_removed_selected_scope_and_keeps_positive_history(self):
         queue = self.queue()
         for identifier in (1, 2, 3):
