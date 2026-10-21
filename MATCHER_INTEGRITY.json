@@ -77,6 +77,6 @@
   "vodProviderEvidenceSha256": "3eef3b2341b651dedf786b0af71439be217419da3fa262d56bd63cd1af159c2e",
   "vodPreparedInstallerSha256": "c6f44200e4c13be9cfe297c5cec63739d6ae8ec3bce611d55a34949a3a9bacfb",
   "vodSeriesSha256": "2586964d5abd267dd48ac50629c4d2af7ddb8892da1928f43ab721580719daaa",
-  "vodProviderEvidenceDiagnosticSha256": "9d1e72976870b13004169a285d51e893545cc9f6b9d0d2cbe4cc70044d75afab",
+  "vodProviderEvidenceDiagnosticSha256": "aa7b8f315dd52ab7382f639170b38aaec967fbad5db975f64a95c27f5aa82c26",
   "vodProviderEvidenceDiagnosticWorkflowSha256": "7254a58a27f28a1ed507d9e6881d7c79d9f946be2a1a80d8a7f5919e46690e15"
 }
