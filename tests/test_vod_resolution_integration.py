@@ -43,10 +43,11 @@ class ResolutionIntegrationTests(unittest.TestCase):
         data = source(movie(1))
         original = copy.deepcopy(data)
         candidates = [{"id": i, "title": "Example Film", "release_date": "2026-10-10"} for i in (101, 102)]
-        details = [{**movie_details(i), "release_date": "2026-10-10", "imdb_id": imdb}
-                   for i, imdb in [(101, "tt1234567"), (102, "tt7654321")]]
+        details = {**movie_details(101), "release_date": "2026-10-10",
+                   "external_ids": {"imdb_id": "tt1234567"}}
         search = {"total_pages": 1, "results": candidates}
-        session = FakeSession(FakeResponse(search), FakeResponse(search), *(FakeResponse(d) for d in details))
+        session = FakeSession(FakeResponse(search), FakeResponse({"movie_results": [{"id": 101}]}),
+                              FakeResponse(details))
         client = tmdb.TmdbClient(self.cache / "tmdb", token="private-token", session=session)
         collector = MovieEvidenceCollector(self.cache / "provider-evidence", configs={"server_1": self.config})
         self.addCleanup(collector.close)
@@ -58,6 +59,9 @@ class ResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(request.call_count, 1)
         self.assertEqual(result["matchedDates"], 1)
         self.assertEqual(result["providerEvidence"]["requests"], 1)
+        self.assertEqual(result["stats"]["requests"], 3)
+        self.assertEqual([url for url, _options in session.calls], [
+            tmdb.API_ROOT + "/search/movie", tmdb.API_ROOT + "/find/tt1234567", tmdb.API_ROOT + "/movie/101"])
         self.assertEqual(data, original)
         replay = tmdb.TmdbClient(self.cache / "tmdb", session=FakeSession())
         replay.trending = lambda _kind: {}

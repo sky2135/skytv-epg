@@ -995,6 +995,9 @@ jobs:
           if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
             app_command+=(--allow-insecure-http)
           fi
+          if [[ -x /usr/bin/time ]]; then
+            app_command=(/usr/bin/time -f "SkyTVPlayer peak RSS KiB: %M" "${app_command[@]}")
+          fi
           timeout --signal=TERM --kill-after=30s 15m "${app_command[@]}"
 
       - name: Verify files contain no passwords, private URLs, or credential fields
