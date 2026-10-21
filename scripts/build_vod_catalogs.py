@@ -590,6 +590,18 @@ def load_offline_inputs(input_dir: Path, server_id: str) -> dict[str, Any]:
     return source
 
 
+def _explicit_empty_inventory_list(payload: Any) -> bool:
+    """Distinguish an empty inventory from malformed or unsupported JSON."""
+    if isinstance(payload, list):
+        return not payload
+    if isinstance(payload, Mapping):
+        for key in ("data", "results", "response", "items"):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                return not candidate
+    return False
+
+
 def fetch_live_inputs(
     session: requests.Session,
     config: ServerConfig,
@@ -602,6 +614,18 @@ def fetch_live_inputs(
         for action in ACTION_FILE_NAMES
     }
     for key in ("get_vod_streams", "get_series"):
+        if _explicit_empty_inventory_list(source[key]):
+            # Panels can briefly return HTTP 200 with an empty inventory.
+            # Confirm only this well-formed empty case once, sharing the same
+            # transport retries and cumulative download budget. Authentication,
+            # schema and other failures never enter this semantic retry lane.
+            print(
+                f"WARNING: {config.server_id}: {key} returned an empty inventory; "
+                "confirming once before refusing publication.",
+                file=sys.stderr,
+            )
+            time.sleep(1)
+            source[key] = request_panel_json(session, config, key, budget=budget)
         if not normalize_rows(source[key], f"{config.server_id} {key}"):
             raise CatalogBuildError(
                 f"{config.server_id}: live {key} returned no usable items; "

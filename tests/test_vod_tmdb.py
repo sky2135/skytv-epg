@@ -73,6 +73,19 @@ def movie_details(identifier=101):
     }
 
 
+def evidence_item(**facts):
+    return {"title": "Example Film (2025)", "contentId": "server_1:movie:999", "_identityEvidence": {
+        "contentId": "server_1:movie:999", "fingerprint": "f" * 64,
+        "directors": ["Director"], "cast": ["Actor", "Second Actor"], **facts}}
+
+
+def evidence_details(identifier=101, *, matches=True):
+    result = movie_details(identifier)
+    result["credits"] = {"cast": [{"id": 9, "name": "Actor"}, {"id": 10, "name": "Second Actor"}],
+                         "crew": [{"name": "Director" if matches else "Other Director", "job": "Director"}]}
+    return result
+
+
 class TmdbEnrichmentTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -131,7 +144,6 @@ class TmdbEnrichmentTests(unittest.TestCase):
         ]
         for payload in (
             {"total_pages": 1, "results": ambiguous},
-            {"total_pages": 2, "results": ambiguous[:1]},
             {"total_pages": 1, "results": [{**ambiguous[0], "release_date": "2024-04-03"}]},
         ):
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as directory:
@@ -142,6 +154,260 @@ class TmdbEnrichmentTests(unittest.TestCase):
         session = FakeSession()
         self.assertEqual(self.client(session).enrich({"title": "Film"}, "movie")["matchStatus"], "no_match")
         self.assertFalse(session.calls)
+
+    def test_real_acronym_prefixes_survive_but_observed_decoration_is_removed(self):
+        for label, expected in (("BTS: THE RETURN (2026)", "BTS: THE RETURN"),
+                                ("NFT: Cursed Images (2026)", "NFT: Cursed Images"),
+                                ("IT: Chapter Two (2019)", "IT: Chapter Two"),
+                                ("XYZ - A Film (2026)", "XYZ - A Film"),
+                                ("EN - A Film (2026)", "A Film"),
+                                ("AR | A Film (2026)", "A Film"),
+                                ("FHD: A Film (2026)", "A Film")):
+            with self.subTest(label=label):
+                self.assertEqual(tmdb._title_and_year({"title": label})[0], expected)
+        title = "NFT: Cursed Images"
+        details = {**movie_details(1436835), "title": title, "release_date": "2026-03-06"}
+        session = FakeSession(FakeResponse({"results": [{"id": 1436835, "title": title, "release_date": "2026-03-06"}]}), FakeResponse(details))
+        result = self.client(session).enrich({"title": title + " (2026)"}, "movie")
+        self.assertEqual(result["matchStatus"], "matched_search")
+        self.assertEqual(session.calls[0][1]["params"]["query"], title)
+
+    def test_complete_pagination_finds_late_exact_match_and_deduplicates_ids(self):
+        other = {"id": 90, "title": "Other Film", "release_date": "2025-01-01"}
+        exact = {"id": 101, "title": "Example Film", "release_date": "2025-04-03"}
+        session = FakeSession(*[FakeResponse({"page": page, "total_pages": 3, "total_results": 3, "results": [candidate]})
+                                for page, candidate in enumerate((other, exact, exact), 1)], FakeResponse(movie_details()))
+        client = self.client(session)
+        self.assertEqual(client.enrich({"title": "Example Film (2025)"}, "movie")["tmdbId"], "101")
+        self.assertEqual([options["params"]["page"] for _url, options in session.calls[:3]], [1, 2, 3])
+        self.assertEqual(client.last_match_diagnostic["searchPages"], 3)
+        self.assertEqual(client.last_match_diagnostic["exactMatchCount"], 1)
+        self.assertEqual(client.last_match_diagnostic["candidateIds"], ["101"])
+
+    def test_late_page_competitor_proves_ambiguity_without_details(self):
+        session = FakeSession(*[FakeResponse({"page": page, "total_pages": 3, "results": [
+            {"id": identifier, "title": "Example Film", "release_date": "2025-04-03"}]})
+            for page, identifier in ((1, 101), (2, 102))])
+        client = self.client(session)
+        self.assertEqual(client.enrich({"title": "Example Film (2025)"}, "movie")["matchStatus"], "no_match")
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(client.last_match_diagnostic["reason"], "ambiguous_title_year")
+
+    def test_incomplete_pagination_never_accepts_first_page_candidate(self):
+        first = {"page": 1, "total_pages": 2, "results": [{"id": 101, "title": "Example Film", "release_date": "2025-04-03"}]}
+        for budget, extra in ((10, [FakeResponse({}, 401)]), (1, [])):
+            with self.subTest(budget=budget), tempfile.TemporaryDirectory() as directory:
+                session = FakeSession(FakeResponse(first), *extra)
+                client = tmdb.TmdbClient(Path(directory), token="secret", session=session, max_requests=budget)
+                self.assertEqual(client.enrich({"title": "Example Film (2025)"}, "movie")["matchStatus"], "unavailable")
+                self.assertEqual(client.last_match_diagnostic["reason"], "incomplete_search")
+                self.assertEqual(client.stats["noMatches"], 0)
+                self.assertLessEqual(client.stats["requests"], budget)
+
+    def test_known_page_limit_defers_without_spending_on_unfinishable_search(self):
+        session = FakeSession(FakeResponse({"total_pages": tmdb.MAX_SEARCH_PAGES + 1, "results": [
+            {"id": 101, "title": "Example Film", "release_date": "2025-04-03"}]}))
+        client = self.client(session)
+        self.assertEqual(client.enrich({"title": "Example Film (2025)"}, "movie")["matchStatus"], "unavailable")
+        self.assertEqual(client.last_match_diagnostic["reason"], "incomplete_search")
+        self.assertEqual(len(session.calls), 1)
+
+    def test_inconsistent_search_pages_or_truncated_result_counts_fail_closed(self):
+        exact = {"id": 101, "title": "Example Film", "release_date": "2025-04-03"}
+        first = {"page": 1, "total_pages": 2, "total_results": 2, "results": [exact]}
+        for second in ({"page": 2, "total_pages": 3, "total_results": 2, "results": [exact]},
+                       {"page": 2, "total_pages": 2, "total_results": 3, "results": [exact]},
+                       {"page": 2, "total_pages": 2, "total_results": 2, "results": []},
+                       {"page": 2, "total_pages": 2, "total_results": 2, "results": [{**exact, "title": "Changed Film"}]}):
+            with self.subTest(second=second), tempfile.TemporaryDirectory() as directory:
+                client = tmdb.TmdbClient(Path(directory), token="key", session=FakeSession(FakeResponse(first), FakeResponse(second)))
+                self.assertEqual(client.enrich({"title": "Example Film (2025)"}, "movie")["matchStatus"], "unavailable")
+                self.assertEqual(client.last_match_diagnostic["reason"], "incomplete_search")
+        client = self.client(FakeSession(FakeResponse({"total_pages": 1, "total_results": 2, "results": [exact]})))
+        self.assertEqual(client.enrich({"title": "Example Film (2025)"}, "movie")["matchStatus"], "unavailable")
+
+    def test_search_discovers_official_alias_and_retains_bound_cache_proof(self):
+        details = {**movie_details(), "alternative_titles": {"titles": [{"title": "Official Alias"}]}}
+        session = FakeSession(FakeResponse({"results": [{"id": 101, "title": "Example Film", "release_date": "2025-04-03"}]}), FakeResponse(details))
+        client = self.client(session)
+        item = {"title": "Official Alias (2025)"}
+        result = client.enrich(item, "movie")
+        self.assertEqual(result["matchStatus"], "matched_search")
+        self.assertEqual(client.last_match_diagnostic["reason"], "matched_alias")
+        offline = self.client(FakeSession())
+        self.assertEqual(offline.enrich(item, "movie"), result)
+        self.assertTrue(offline.last_match_diagnostic["cacheHit"])
+        self.assertEqual(offline.last_match_diagnostic["reason"], "matched_alias")
+
+    def test_competing_official_aliases_are_ambiguous_and_partial_proof_defers(self):
+        search = {"results": [{"id": identifier, "title": f"Different Film {identifier}", "release_date": "2025-04-03"} for identifier in (101, 102)]}
+        def aliased(identifier):
+            return {**movie_details(identifier), "alternative_titles": {"titles": [{"title": "Official Alias"}]}}
+        for second, status, reason in ((FakeResponse(aliased(102)), "no_match", "ambiguous_title_year"),
+                                       (FakeResponse({}, 401), "unavailable", "incomplete_search")):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                session = FakeSession(FakeResponse(search), FakeResponse(aliased(101)), second)
+                client = tmdb.TmdbClient(Path(directory), token="key", session=session)
+                self.assertEqual(client.enrich({"title": "Official Alias (2025)"}, "movie")["matchStatus"], status)
+                self.assertEqual(client.last_match_diagnostic["reason"], reason)
+                self.assertEqual(len(session.calls), 3)
+
+    def test_alias_candidate_limit_preserves_unknown_and_does_not_spend_details_budget(self):
+        search = {"results": [{"id": identifier, "title": f"Different Film {identifier}", "release_date": "2025-04-03"}
+                              for identifier in range(101, 101 + tmdb.MAX_ALIAS_CANDIDATES + 1)]}
+        session = FakeSession(FakeResponse(search))
+        client = self.client(session)
+        self.assertEqual(client.enrich({"title": "Official Alias (2025)"}, "movie")["matchStatus"], "no_match")
+        self.assertEqual(client.last_match_diagnostic["reason"], "alias_candidate_limit")
+        self.assertEqual(len(session.calls), 1)
+
+    def test_old_negative_strategy_is_retried_without_invalidating_validated_positive(self):
+        item = {"title": "Example Film (2025)"}
+        self.client(FakeSession(FakeResponse({"results": [], "total_pages": 0}))).enrich(item, "movie")
+        path = next(self.root.rglob("*.json"))
+        entry = json.loads(path.read_text())
+        entry["data"].pop("matchStrategy")
+        path.write_text(json.dumps(entry), encoding="utf-8")
+        session = FakeSession(FakeResponse({"results": [{"id": 101, "title": "Example Film", "release_date": "2025-04-03"}]}), FakeResponse(movie_details()))
+        client = self.client(session)
+        self.assertEqual(client.enrichment_priority(item, "movie"), 0)
+        expected = client.enrich(item, "movie")
+        self.assertEqual(expected["matchStatus"], "matched_search")
+        entry = json.loads(path.read_text())
+        entry["data"].pop("matchStrategy")
+        path.write_text(json.dumps(entry), encoding="utf-8")
+        offline = self.client(FakeSession())
+        self.assertEqual(offline.enrich(item, "movie"), expected)
+        self.assertTrue(offline.last_match_diagnostic["cacheHit"])
+
+    def test_private_diagnostics_are_whitelisted_and_reset_between_records(self):
+        raw = {"reason": ["private"], "candidateIds": ["101", "https://private.invalid/secret", True, "101"],
+               "password": "secret", "searchPages": "3", "candidateCount": -2}
+        result = tmdb._match_diagnostic(raw)
+        self.assertEqual(result["reason"], "unavailable")
+        self.assertEqual(result["candidateIds"], ["101"])
+        self.assertNotIn("private", json.dumps(result))
+        session = FakeSession(FakeResponse({"results": [{"id": 101, "title": "Wrong Title", "release_date": "2024-04-03"}]}))
+        client = self.client(session)
+        client.enrich({"title": "Example Film (2025)"}, "movie")
+        client.enrich({"title": "No Year"}, "movie")
+        self.assertEqual(client.last_match_diagnostic["candidateIds"], [])
+        self.assertEqual(client.last_match_diagnostic["reason"], "missing_identity")
+
+    def test_independent_director_and_two_cast_facts_can_resolve_bounded_ambiguity(self):
+        search = {"results": [{"id": identifier, "title": "Example Film", "release_date": "2025-04-03"}
+                              for identifier in (101, 102)]}
+        session = FakeSession(FakeResponse(search), FakeResponse(evidence_details(101)), FakeResponse(evidence_details(102, matches=False)))
+        client = self.client(session)
+        item = evidence_item(runtimeMinutes=122)
+        expected = client.enrich(item, "movie")
+        self.assertEqual(expected["tmdbId"], "101")
+        self.assertTrue(client.last_match_diagnostic["evidenceMatched"])
+        self.assertEqual(len(session.calls), 3)
+        offline = self.client(FakeSession())
+        self.assertEqual(offline.enrich(item, "movie"), expected)
+        self.assertTrue(offline.last_match_diagnostic["cacheHit"])
+        # The selected work cannot enter the ordinary shared title/year cache.
+        baseline = self.client(FakeSession(FakeResponse(search)))
+        self.assertEqual(baseline.enrich({"title": item["title"]}, "movie")["matchStatus"], "no_match")
+
+    def test_evidence_does_not_hide_competing_alias_or_partial_candidate_details(self):
+        search = {"results": [
+            {"id": 101, "title": "Example Film", "release_date": "2025-04-03"},
+            {"id": 102, "title": "Example Film", "release_date": "2025-04-03"},
+            {"id": 103, "title": "Other Primary Title", "release_date": "2025-04-03"}]}
+        competitor = {**evidence_details(103), "title": "Other Primary Title", "original_title": "Other Original Title",
+                      "alternative_titles": {"titles": [{"title": "Example Film"}]}}
+        for third, status, reason in ((FakeResponse(competitor), "no_match", "ambiguous_title_year"),
+                                      (FakeResponse({}, 401), "unavailable", "incomplete_search")):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                session = FakeSession(FakeResponse(search), FakeResponse(evidence_details(101)),
+                                      FakeResponse(evidence_details(102, matches=False)), third)
+                client = tmdb.TmdbClient(Path(directory), token="key", session=session)
+                self.assertEqual(client.enrich(evidence_item(), "movie")["matchStatus"], status)
+                self.assertEqual(client.last_match_diagnostic["reason"], reason)
+                self.assertEqual(len(session.calls), 4)
+
+    def test_single_exact_with_evidence_still_checks_an_official_alias_competitor(self):
+        search = {"results": [
+            {"id": 101, "title": "Example Film", "release_date": "2025-04-03"},
+            {"id": 102, "title": "Other Primary Title", "release_date": "2025-04-03"}]}
+        competitor = {**evidence_details(102), "title": "Other Primary Title", "original_title": "Other Original Title",
+                      "alternative_titles": {"titles": [{"title": "Example Film"}]}}
+        session = FakeSession(FakeResponse(search), FakeResponse(evidence_details(101)), FakeResponse(competitor))
+        client = self.client(session)
+        self.assertEqual(client.enrich(evidence_item(), "movie")["matchStatus"], "no_match")
+        self.assertEqual(client.last_match_diagnostic["reason"], "ambiguous_title_year")
+        self.assertEqual(len(session.calls), 3)
+
+    def test_runtime_or_provider_tmdb_id_alone_never_resolves_ambiguity(self):
+        search = {"results": [{"id": identifier, "title": "Example Film", "release_date": "2025-04-03"}
+                              for identifier in (101, 102)]}
+        for facts in ({"directors": [], "cast": [], "runtimeMinutes": 122, "tmdbId": "101"},
+                      {"directors": ["Director"], "cast": ["Actor", "Actor"]},
+                      {"directors": ["Director"], "cast": ["Actor", "Second Actor"], "fingerprint": "bad"},
+                      {"contentId": "server_1:movie:1000"}):
+            with self.subTest(facts=facts), tempfile.TemporaryDirectory() as directory:
+                session = FakeSession(FakeResponse(search))
+                client = tmdb.TmdbClient(Path(directory), token="key", session=session)
+                self.assertEqual(client.enrich(evidence_item(**facts), "movie")["matchStatus"], "no_match")
+                self.assertEqual(len(session.calls), 1)
+
+    def test_evidence_proof_is_bound_to_record_facts_fingerprint_and_full_display_title(self):
+        search = {"results": [{"id": identifier, "title": "Example Film", "release_date": "2025-04-03"}
+                              for identifier in (101, 102)]}
+        session = FakeSession(FakeResponse(search), FakeResponse(evidence_details(101)), FakeResponse(evidence_details(102, matches=False)))
+        expected = self.client(session).enrich(evidence_item(), "movie")
+        self.assertEqual(expected["tmdbId"], "101")
+        variants = []
+        other_record = evidence_item()
+        other_record["contentId"] = other_record["_identityEvidence"]["contentId"] = "server_1:movie:1000"
+        variants.append(other_record)
+        variants.append(evidence_item(fingerprint="a" * 64))
+        variants.append(evidence_item(directors=["Different Director"]))
+        other_title = evidence_item()
+        other_title["title"] = "Example: Film (2025)"
+        variants.append(other_title)
+        for item in variants:
+            with self.subTest(item=item):
+                client = self.client(FakeSession(), max_requests=0)
+                self.assertEqual(client.enrichment_priority(item, "movie"), 0)
+                self.assertEqual(client.enrich(item, "movie")["matchStatus"], "unavailable")
+
+    def test_external_id_evidence_is_corroborated_and_cannot_override_wrong_year(self):
+        search = {"results": [{"id": identifier, "title": "Example Film", "release_date": "2025-04-03"}
+                              for identifier in (101, 102)]}
+        correct = {**movie_details(101), "imdb_id": "tt1234567"}
+        wrong = {**movie_details(102), "imdb_id": "tt7654321"}
+        item = evidence_item(imdbId="tt1234567", directors=[], cast=[])
+        session = FakeSession(FakeResponse(search), FakeResponse(correct), FakeResponse(wrong))
+        client = self.client(session)
+        self.assertEqual(client.enrich(item, "movie")["tmdbId"], "101")
+        self.assertTrue(session.calls[1][1]["params"]["append_to_response"].endswith(",external_ids"))
+        with tempfile.TemporaryDirectory() as directory:
+            wrong_year = {**correct, "release_date": "2024-04-03"}
+            client = tmdb.TmdbClient(Path(directory), token="key", session=FakeSession(FakeResponse(search), FakeResponse(wrong_year), FakeResponse(wrong)))
+            self.assertEqual(client.enrich(item, "movie")["matchStatus"], "no_match")
+
+    def test_conflicting_external_id_vetoes_even_a_unique_title_match(self):
+        session = FakeSession(FakeResponse({"results": [{"id": 101, "title": "Example Film", "release_date": "2025-04-03"}]}),
+                              FakeResponse({**movie_details(), "imdb_id": "tt7654321"}))
+        client = self.client(session)
+        self.assertEqual(client.enrich(evidence_item(imdbId="tt1234567"), "movie")["matchStatus"], "no_match")
+
+    def test_conflicting_runtime_corroboration_vetoes_director_cast_route(self):
+        session = FakeSession(FakeResponse({"results": [{"id": 101, "title": "Example Film", "release_date": "2025-04-03"}]}),
+                              FakeResponse(evidence_details()))
+        self.assertEqual(self.client(session).enrich(evidence_item(runtimeMinutes=200.5), "movie")["matchStatus"], "no_match")
+
+    def test_evidence_candidate_cap_never_picks_from_a_partial_set(self):
+        search = {"results": [{"id": identifier, "title": "Example Film" if identifier < 103 else "Different Film", "release_date": "2025-04-03"}
+                              for identifier in range(101, 105)]}
+        session = FakeSession(FakeResponse(search))
+        client = self.client(session)
+        self.assertEqual(client.enrich(evidence_item(), "movie")["matchStatus"], "no_match")
+        self.assertEqual(client.last_match_diagnostic["reason"], "ambiguous_title_year")
+        self.assertEqual(len(session.calls), 1)
 
     def test_series_details_and_calendar_never_imply_provider_episodes_exist(self):
         details = {

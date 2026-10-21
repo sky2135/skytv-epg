@@ -20,13 +20,17 @@ search for manual review. Credentials, request URLs, full API response bodies,
 synopses and playback URLs are excluded. Duplicate queries retain separate
 provider records while sharing the diagnostic result.
 
-`no_match` is intentionally generic in the production cache. The earlier
-response and rejection branch were not retained, so a replay reason must not be
-presented as proof of the historical response. A replay distinguishes multiple
-search pages, multiple exact title/year candidates, different primary release
-years, missing full dates, different returned titles, empty results and detail
-identity conflicts. None of these alone establishes that a film does not exist.
+The original October 21 cache retained only generic `no_match` values. Its earlier
+response and rejection branch cannot be reconstructed from those values.
+Matching strategy 2 now retains a sanitized reason in private cache envelopes
+and the automatic resolution queue. Diagnostic schema 2 records that strategy's
+current decision, search completeness and fetched-page candidates. An incomplete
+or early ambiguity exit never claims uniqueness across unseen pages. None of
+these reasons alone establishes that a film does not exist.
 Supplementary yearless results are candidates, never automatic corrections.
+
+See [automatic resolution](VOD_AUTOMATIC_RESOLUTION.md) for the daily queue,
+bounded provider facts, retry policy and publication performance changes.
 
 Run against a reviewed local public snapshot:
 

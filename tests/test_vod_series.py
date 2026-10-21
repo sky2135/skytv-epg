@@ -165,6 +165,78 @@ class EpisodeEnrichmentTests(unittest.TestCase):
             self.assertEqual(stats["statusBySeries"]["1"], "available")
             self.assertEqual(list(cache.rglob("*.json")), [])
 
+    def test_supplement_preserves_oversized_success_and_processes_untouched_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(series, "MAX_CACHE_BYTES", 32):
+            cache = Path(folder)
+            value = source("1", "2", "3")
+            with mock.patch.object(vod, "request_panel_json", return_value=detail("900")) as request:
+                first = series.enrich_series(value, "server_1", cache, CONFIG, object(), max_requests=1, now=NOW)
+            self.assertEqual(first[1]["attemptedSeriesIds"], ["1"])
+            self.assertEqual(list(cache.rglob("*.json")), [])
+
+            def supplement(_session, _config, _action, *, item_id, **_kwargs):
+                if item_id == "1":
+                    raise AssertionError("A successful first-pass series must not be fetched again")
+                if item_id == "2":
+                    raise vod.CatalogBuildError("safe supplemental provider failure")
+                return detail("902")
+
+            with mock.patch.object(vod, "request_panel_json", side_effect=supplement) as request:
+                episodes, stats = series.enrich_series(value, "server_1", cache, CONFIG, object(),
+                    max_requests=2, now=NOW, previous=first)
+            self.assertEqual([call.kwargs["item_id"] for call in request.call_args_list], ["2", "3"])
+            self.assertEqual(episodes["1"], first[0]["1"])
+            self.assertEqual(episodes["3"][0]["id"], "902")
+            self.assertEqual(stats["statusBySeries"], {"1": "available", "2": "unavailable", "3": "available"})
+            self.assertEqual(stats["attemptedSeriesIds"], ["2", "3"])
+            self.assertEqual(stats["requests"], 2)
+            self.assertEqual(stats["budgetDeferred"], 0)
+
+    def test_supplement_does_not_retry_an_uncached_first_pass_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(series, "MAX_CACHE_BYTES", 32):
+            cache = Path(folder)
+            value = source("1", "2")
+            with mock.patch.object(vod, "request_panel_json", side_effect=vod.CatalogBuildError("safe failure")):
+                first = series.enrich_series(value, "server_1", cache, CONFIG, object(), max_requests=1, now=NOW)
+            with mock.patch.object(vod, "request_panel_json", return_value=detail("901")) as request:
+                episodes, stats = series.enrich_series(value, "server_1", cache, CONFIG, object(),
+                    max_requests=1, now=NOW, previous=first)
+            self.assertEqual(request.call_args.kwargs["item_id"], "2")
+            self.assertEqual(stats["attemptedSeriesIds"], ["2"])
+            self.assertEqual(stats["statusBySeries"], {"1": "unavailable", "2": "available"})
+            self.assertEqual(episodes["1"], [])
+
+    def test_supplement_keeps_unattempted_stale_and_pending_series_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            cache = Path(folder)
+            normalized = series.normalize_episodes(detail("900"), CONFIG)
+            previous = ({"1": normalized, "2": normalized, "3": []},
+                        {"statusBySeries": {"1": "stale", "2": "available", "3": "pending"},
+                         "attemptedSeriesIds": []})
+            with mock.patch.object(vod, "request_panel_json", return_value=detail("901")) as request:
+                episodes, stats = series.enrich_series(source("1", "2", "3"), "server_1", cache, CONFIG,
+                    object(), max_requests=2, now=NOW, previous=previous)
+            self.assertEqual([call.kwargs["item_id"] for call in request.call_args_list], ["1", "3"])
+            self.assertEqual(episodes["2"], normalized)
+            self.assertEqual(stats["attemptedSeriesIds"], ["1", "3"])
+            self.assertEqual(stats["statusBySeries"], {"1": "available", "2": "available", "3": "available"})
+
+    def test_previous_inventories_are_revalidated_and_foreign_ids_cannot_enter_output(self) -> None:
+        bad = series.normalize_episodes(detail("900"), CONFIG)
+        bad[0]["title"] = CONFIG.password
+        foreign = series.normalize_episodes(detail("999"), CONFIG)
+        previous = ({"1": bad, "999": foreign},
+                    {"statusBySeries": {"1": "available", "999": "available"},
+                     "attemptedSeriesIds": ["999", "1", "2"]})
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(vod, "request_panel_json") as request:
+            episodes, stats = series.enrich_series(source("1"), "server_1", Path(folder), CONFIG,
+                now=NOW, previous=previous)
+        request.assert_not_called()
+        self.assertEqual(episodes, {"1": []})
+        self.assertEqual(stats["statusBySeries"], {"1": "pending"})
+        self.assertEqual(stats["attemptedSeriesIds"], [])
+        self.assertNotIn(CONFIG.password, json.dumps((episodes, stats)))
+
 
 if __name__ == "__main__":
     unittest.main()

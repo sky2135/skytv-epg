@@ -56,6 +56,7 @@ from skytv_epg_auto_match_v1 import (  # noqa: E402
     propose_new_channel_matches,
 )
 from skytv_epg_contextual_v8 import (  # noqa: E402
+    CandidateContextV8,
     _normalize_key_v8,
     _is_decorative_heading_v84 as _matcher_is_decorative_heading,
     install_contextual_v8,
@@ -1031,6 +1032,51 @@ def prepare_matcher_runtime(
         approved_aliases_sha256=aliases_hash,
         schedule_equivalences_sha256=equivalences_hash,
     )
+
+
+def _prepared_candidate_contexts(resolver: Any) -> dict[tuple[str, str], CandidateContextV8]:
+    """Reuse the frozen parser's prepared semantics without changing candidates.
+
+    Resolver preparation has already parsed every exact ID/region pair.  The
+    verification and advisory lanes used to repeat that expensive work over
+    the entire catalog.  Missing or conflicting prepared entries remain on the
+    original parser path; no normalization or identity inference is added.
+    """
+    by_region = getattr(getattr(resolver, "state", None), "by_region", None)
+    if not isinstance(by_region, Mapping):
+        return {}
+    contexts = by_region.get("ALL", ())
+    if not isinstance(contexts, (list, tuple)):
+        return {}
+    result: dict[tuple[str, str], CandidateContextV8] = {}
+    ambiguous: set[tuple[str, str]] = set()
+    for context in contexts:
+        if not isinstance(context, CandidateContextV8):
+            continue
+        candidate = context.candidate
+        key = (str(candidate.get("epg_id", "")), str(candidate.get("region", "")).upper())
+        if not all(key) or key in ambiguous:
+            continue
+        if key in result and result[key] is not context:
+            result.pop(key)
+            ambiguous.add(key)
+        else:
+            result[key] = context
+    return result
+
+
+def _catalog_candidate_context(
+    resolver: Any, candidate: Mapping[str, str],
+    prepared: Mapping[tuple[str, str], CandidateContextV8],
+) -> CandidateContextV8:
+    key = (str(candidate.get("epg_id", "")), str(candidate.get("region", "")).upper())
+    context = prepared.get(key)
+    if context is None:
+        return parse_candidate_context_v8(resolver.engine, candidate)
+    # All semantic fields depend on exact ID and region. Preserve the current
+    # raw candidate object, including its display/normalization fields, just as
+    # a fresh parse would; prepared engine fields must not leak into this lane.
+    return replace(context, candidate=candidate)
 
 
 def _canonical_key(server_id: object, stream_id: object) -> tuple[str, str]:
@@ -2114,6 +2160,7 @@ def _stage_ai_review_shortlists_with_metrics(
         and callable(getattr(resolver, "_fuzzy_score", None))
         else None
     )
+    prepared_contexts = _prepared_candidate_contexts(contextual_resolver)
     candidates_by_market: dict[str, list[dict[str, Any]]] = {}
     for raw in corroborated_real_candidates:
         epg_id = str(raw.get("epg_id") or "")
@@ -2142,7 +2189,7 @@ def _stage_ai_review_shortlists_with_metrics(
             "region": region,
             "normalized": normalized,
             "context": (
-                parse_candidate_context_v8(contextual_resolver.engine, raw)
+                _catalog_candidate_context(contextual_resolver, raw, prepared_contexts)
                 if contextual_resolver is not None
                 else None
             ),
@@ -3388,6 +3435,7 @@ def auto_match_and_spool(
         if not runtime.identity.is_expected or not runtime.preflight.ready:
             raise AutoMatchError("The Version 1 matcher verification failed safely.")
         verification_candidates: list[VerificationCatalogCandidateEvidence] = []
+        prepared_contexts = _prepared_candidate_contexts(runtime.resolver)
         for candidate in sorted(
             corroborated_real_candidates,
             key=lambda value: (
@@ -3395,7 +3443,7 @@ def auto_match_and_spool(
                 str(value.get("epg_id") or ""),
             ),
         ):
-            context = parse_candidate_context_v8(runtime.resolver.engine, candidate)
+            context = _catalog_candidate_context(runtime.resolver, candidate, prepared_contexts)
             verification_candidates.append(
                 VerificationCatalogCandidateEvidence(
                     epg_id=str(candidate.get("epg_id") or ""),

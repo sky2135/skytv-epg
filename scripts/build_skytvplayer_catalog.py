@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -22,6 +23,9 @@ import build_vod_catalogs as vod
 from vod_tmdb import TmdbClient, _date as tmdb_date, _enrichment_identity
 from vod_series import enrich_series
 from vod_reviewed_corrections import apply_reviewed_correction, correction_for
+from vod_resolution_queue import ResolutionQueue
+from vod_provider_evidence import MovieEvidenceCollector
+from vod_tmdb import MATCH_STRATEGY
 
 SCHEMA_VERSION = 1
 MAX_SHARD_RECORDS = 500
@@ -94,7 +98,9 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
                state: dict[str, Any], client: TmdbClient, now: str,
                config: vod.ServerConfig | None = None,
                episodes: Mapping[str, list] | None = None,
-               statuses: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+               statuses: Mapping[str, str] | None = None,
+               evidence: MovieEvidenceCollector | None = None,
+               resolution_queue: ResolutionQueue | None = None) -> list[dict[str, Any]]:
     movie = kind == "movie"
     rows_key = "get_vod_streams" if movie else "get_series"
     categories_key = "get_vod_categories" if movie else "get_series_categories"
@@ -134,7 +140,23 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
         extension = vod.clean_text(vod._first_value(sources, ("container_extension",)), 8)
         if movie:
             item["containerExtension"] = extension.lower() if SAFE_EXTENSION.fullmatch(extension) else None
-        metadata = client.enrich(item, kind)
+        match_item = item
+        if movie and evidence is not None:
+            facts = evidence.load(item)
+            if facts:
+                match_item = dict(item, _identityEvidence=facts)
+        metadata = None
+        if resolution_queue is not None and resolution_queue.defer_cached_miss(server_id, kind, match_item):
+            reader = getattr(client, "_identity_cache", None)
+            if callable(reader):
+                key, identifier, title, year = _enrichment_identity(match_item, kind)
+                cached, _fresh, _rejected = reader(key, match_item, kind, identifier, title, year)
+                if cached and cached.get("matchStatus") == "no_match":
+                    metadata = dict(cached)
+                    client.stats["cacheHits"] = client.stats.get("cacheHits", 0) + 1
+                    client.stats["queueDeferred"] = client.stats.get("queueDeferred", 0) + 1
+        if metadata is None:
+            metadata = client.enrich(match_item, kind)
         correction = corrections.get(provider_id)
         rejected_identity = bool(metadata.get("rejectedIdentity")) or bool(correction and correction.get("rejectIdentity"))
         if rejected_identity:
@@ -204,7 +226,11 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
 
 def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
                           client: TmdbClient, now: str, *,
-                          max_elapsed_seconds: float = 600) -> dict[str, Any]:
+                          max_elapsed_seconds: float = 600,
+                          queue: ResolutionQueue | None = None,
+                          evidence: MovieEvidenceCollector | None = None,
+                          report_dir: Path | None = None,
+                          max_due: int = 300) -> dict[str, Any]:
     """Warm only verified metadata caches from selected offline movie inputs.
 
     Publication and normal per-group budgets are deliberately separate. A year
@@ -219,11 +245,13 @@ def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
     priority = getattr(client, "enrichment_priority", lambda _item, _kind: 0)
     cache_reader = getattr(client, "_identity_cache", None)
     summaries, candidates = [], []
+    active_scope = {}
     selected = [vod.normalize_server_id(server_id) for server_id, _source in sources]
     if not selected or len(selected) != len(set(selected)):
         raise vod.CatalogBuildError("Each backfill server must be selected once.")
     for server_id, source in sources:
         server_id = vod.normalize_server_id(server_id)
+        active_scope[server_id] = set()
         normalized, _stats = vod.normalize_catalog(
             source["get_vod_streams"], source.get("get_vod_categories", []), source.get("vod_details", {}),
             kind="movie", label=f"{server_id} release-date backfill", blocked_artwork_hostname="")
@@ -236,16 +264,30 @@ def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
         for base in normalized:
             item = apply_reviewed_correction(server_id, "movie", base)
             item["contentId"] = f"{server_id}:movie:{item['id']}"
+            raw = raw_rows.get(item["id"], {})
+            item["providerLastModified"] = timestamp(raw.get("last_modified"))
+            if evidence is not None:
+                facts = evidence.load(item)
+                if facts:
+                    item["_identityEvidence"] = facts
             if item.get("languages") != ["en"] or tmdb_date(item.get("releaseDate")):
                 continue
             key, identifier, title, identity_year = _enrichment_identity(item, "movie")
             if identity_year != str(year):
                 continue
+            active_scope[server_id].add(item["contentId"])
             known_before = None
             if callable(cache_reader):
-                cached, _fresh, _rejected = cache_reader(key, item, "movie", identifier, title, identity_year)
+                cached, fresh, _rejected = cache_reader(key, item, "movie", identifier, title, identity_year)
                 known_before = bool(cached and str(cached.get("matchStatus", "")).startswith("matched_")
                                     and tmdb_date(cached.get("releaseDate")))
+                # The normal publisher consumes this fresh proof directly.
+                # Do not put thousands of already-resolved titles in the queue.
+                if queue is not None and known_before and fresh:
+                    summary["knownCachedDatesBefore"] += 1
+                    summary["candidateCount"] += 1
+                    summary["cachedDatesReused"] = summary.get("cachedDatesReused", 0) + 1
+                    continue
             provider_sources = vod._nested_sources(raw_rows.get(item["id"], {}), details.get(item["id"], {}))
             added = timestamp(vod._first_value(provider_sources, ("added", "added_at", "created_at")))
             added_epoch = datetime.fromisoformat(added.replace("Z", "+00:00")).timestamp() if added else 0
@@ -253,16 +295,41 @@ def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
             summary["candidateCount"] += 1
             summary["knownCachedDatesBefore"] += known_before is True
     candidates.sort(key=lambda candidate: candidate[:3])
+    due_ids = None
+    if queue is not None:
+        for server_id, content_ids in active_scope.items():
+            queue.retain_scope(server_id, "movie", content_ids)
+        due = queue.select_due([(entry[4]["serverId"], "movie", entry[3]) for entry in candidates], limit=max_due)
+        due_order = {item["contentId"]: position for position, (_server, _kind, item) in enumerate(due)}
+        due_ids = set(due_order)
+        candidates.sort(key=lambda entry: due_order.get(entry[3]["contentId"], len(due_order)))
     stopped = "complete"
     for _priority, _added, _id, item, summary, known_before in candidates:
+        if due_ids is not None and item["contentId"] not in due_ids:
+            summary["queueDeferred"] = summary.get("queueDeferred", 0) + 1
+            continue
         if time.monotonic() - started >= seconds:
             stopped = "time_budget"
             break
         before = client.stats.get("requests", 0)
+        provider_before = evidence.stats["requests"] if evidence is not None else 0
         if before >= client.max_requests:
             stopped = "request_budget"
             break
         metadata = client.enrich(item, "movie")
+        diagnostic = dict(getattr(client, "last_match_diagnostic", {}))
+        if (evidence is not None and not str(metadata.get("matchStatus", "")).startswith("matched_")
+                and diagnostic.get("reason") in {"ambiguous_title_year", "title_mismatch", "year_mismatch", "no_search_results"}
+                and time.monotonic() - started < seconds and client.stats.get("requests", 0) < client.max_requests):
+            facts = evidence.collect(summary["serverId"], item)
+            if facts and facts != item.get("_identityEvidence"):
+                item = dict(item, _identityEvidence=facts)
+                metadata = client.enrich(item, "movie")
+                diagnostic = dict(getattr(client, "last_match_diagnostic", {}))
+        if queue is not None:
+            queue.record_result(summary["serverId"], "movie", item, metadata,
+                diagnostic=diagnostic, attempted=(client.stats.get("requests", 0) > before
+                    or evidence is not None and evidence.stats["requests"] > provider_before))
         summary["processedCount"] += 1
         status = str(metadata.get("matchStatus", ""))
         date = tmdb_date(metadata.get("releaseDate"))
@@ -274,11 +341,18 @@ def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
     fields = ("candidateCount", "processedCount", "knownCachedDatesBefore", "matchedDates", "newlyMatchedDates")
     stats_fields = ("requests", "cacheHits", "cacheMisses", "staleFallbacks", "matches", "noMatches", "errors",
                     "budgetExhausted", "elapsedBudgetExhausted", "retries", "cacheWriteErrors")
+    extra = {}
+    if queue is not None:
+        queue.save()
+        if report_dir is not None:
+            extra["resolution"] = queue.write_reports(report_dir)
+    if evidence is not None:
+        extra["providerEvidence"] = dict(evidence.stats)
     return {"schemaVersion": 1, "mode": "release_date_backfill", "generatedAt": now, "year": year,
             "targetServers": selected, "servers": summaries, **{field: sum(row[field] for row in summaries) for field in fields},
             "maxRequests": client.max_requests, "maxElapsedSeconds": seconds,
             "elapsedSeconds": round(max(0, time.monotonic() - started), 3), "stoppedReason": stopped,
-            "stats": {field: client.stats.get(field, 0) for field in stats_fields}}
+            "stats": {field: client.stats.get(field, 0) for field in stats_fields}, **extra}
 
 
 def has_series_inventory(item: Mapping[str, Any]) -> bool:
@@ -373,6 +447,13 @@ def write_artifact(output: Path, prefix: str, payload: Any, *, compressed=True, 
     if len(raw) > MAX_JSON_BYTES:
         raise vod.CatalogBuildError("An app artifact exceeds its size limit.")
     data = gzip.compress(raw, mtime=0) if compressed else raw
+    return _install_artifact(output, prefix, raw, data, compressed=compressed, count=count)
+
+
+def _install_artifact(output: Path, prefix: str, raw: bytes, data: bytes, *, compressed=True, count=0) -> dict[str, Any]:
+    """Install bytes already encoded and size-checked by the shard writer."""
+    if len(raw) > MAX_JSON_BYTES:
+        raise vod.CatalogBuildError("An app artifact exceeds its size limit.")
     digest = hashlib.sha256(data).hexdigest()
     name = f"{prefix}.{digest[:16]}.json" + (".gz" if compressed else "")
     path = output / name
@@ -395,15 +476,16 @@ def write_dataset(output: Path, server_id: str, kind: str, items: list[dict], no
     def write_batch(batch, start):
         payload = {"schemaVersion": 1, "serverId": server_id, "dataset": dataset,
                    "generatedAt": now, "recordCount": len(batch), "items": batch}
-        size = len(gzip.compress(json_bytes(payload), mtime=0))
-        if size > MAX_SHARD_BYTES:
+        raw = json_bytes(payload)
+        data = gzip.compress(raw, mtime=0)
+        if len(data) > MAX_SHARD_BYTES:
             if len(batch) < 2:
                 raise vod.CatalogBuildError("A single title exceeds the app shard size limit.")
             middle = len(batch) // 2
             write_batch(batch[:middle], start)
             write_batch(batch[middle:], start + middle)
         else:
-            reference = write_artifact(output, f"{server_id}_{plural}_{start:06d}", payload, count=len(batch))
+            reference = _install_artifact(output, f"{server_id}_{plural}_{start:06d}", raw, data, count=len(batch))
             reference["providerCategoryIds"] = sorted({item["category"]["id"] for item in batch if item["category"]["id"]})
             reference["languages"] = sorted({language for item in batch for language in item["languages"]})
             shards.append(reference)
@@ -430,14 +512,16 @@ def write_episode_files(output: Path, server_id: str, series: list[dict], now: s
             payload = {"schemaVersion": 1, "serverId": server_id, "dataset": "vod-episodes",
                        "providerSeriesId": item["id"], "generatedAt": now,
                        "recordCount": len(batch), "items": batch}
-            if len(gzip.compress(json_bytes(payload), mtime=0)) > MAX_SHARD_BYTES:
+            raw = json_bytes(payload)
+            data = gzip.compress(raw, mtime=0)
+            if len(data) > MAX_SHARD_BYTES:
                 if len(batch) < 2:
                     raise vod.CatalogBuildError("A single episode exceeds the app shard size limit.")
                 middle = len(batch) // 2
                 write_batch(batch[:middle], start)
                 write_batch(batch[middle:], start + middle)
             else:
-                reference = write_artifact(output, f"{server_id}_series_{series_key}_episodes_{start:06d}", payload, count=len(batch))
+                reference = _install_artifact(output, f"{server_id}_series_{series_key}_episodes_{start:06d}", raw, data, count=len(batch))
                 item["episodeFiles"].append(reference)
         for start in range(0, len(episodes), MAX_SHARD_RECORDS):
             write_batch(episodes[start:start + MAX_SHARD_RECORDS], start)
@@ -461,30 +545,83 @@ def epg_references(epg_dir: Path | None, server_id: str) -> dict:
 
 def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClient,
           now: str, epg_dir: Path | None = None, fetch_episodes=False,
-          max_episode_requests=600) -> dict:
+          max_episode_requests=600, timings: dict | None = None) -> dict:
+    build_started = time.monotonic()
     output.mkdir(parents=True, exist_ok=True)
+    if len({server_id for server_id, _source, _config in sources}) != len(sources):
+        raise vod.CatalogBuildError("Each app server must be selected once.")
     if cache.resolve() == output.resolve() or output.resolve() in cache.resolve().parents:
         raise vod.CatalogBuildError("Private app caches must stay outside the publication directory.")
     reset_time = getattr(client, "reset_elapsed_budget", lambda _seconds: None)
     reset_time(30)
     trends = {kind: client.trending(kind) for kind in ("movie", "series")}
+    trend_seconds = time.monotonic() - build_started
+    metadata_seconds = 0
+    episode_seconds = 0
     servers = []
     states = []
+    # Each provider gets an independent session, cache directory and fair quota.
+    # Refreshing three independent episode inventories can overlap their I/O;
+    # the shared TMDB client and catalogue publication remain sequential.
+    episode_elapsed = {}
+    def refresh_episodes(entry, quota, deadline=90, previous=None):
+        server_id, source, config = entry
+        episode_started = time.monotonic()
+        session = requests.Session() if fetch_episodes and config else None
+        if session:
+            session.trust_env = False
+        try:
+            return enrich_series(source, server_id, cache / "episodes", config,
+                                 session, max_requests=quota, now=now, deadline_seconds=deadline, previous=previous)
+        finally:
+            episode_elapsed[server_id] = episode_elapsed.get(server_id, 0) + time.monotonic() - episode_started
+            if session:
+                session.close()
+
+    episode_results = None
+    if fetch_episodes and len(sources) > 1:
+        episode_wall_started = time.monotonic()
+        quota, remainder = divmod(max_episode_requests, len(sources))
+        with ThreadPoolExecutor(max_workers=min(3, len(sources))) as executor:
+            futures = [executor.submit(refresh_episodes, entry, quota + (position < remainder))
+                       for position, entry in enumerate(sources)]
+            episode_results = [future.result() for future in futures]
+        # Keep unused quota useful. A second pass skips this run's freshly
+        # checked rows and uses only the provider's remaining active-I/O time.
+        unused = max_episode_requests - sum(stats["requests"] for _episodes, stats in episode_results)
+        eligible = [position for position, (server_id, _source, config) in enumerate(sources)
+                    if config and episode_results[position][1].get("budgetDeferred", 0)
+                    and not episode_results[position][1].get("deadlineReached")
+                    and episode_elapsed.get(server_id, 90) < 90]
+        for index, position in enumerate(eligible):
+            if unused <= 0:
+                break
+            previous = episode_results[position][1]
+            quota = unused // (len(eligible) - index)
+            if quota <= 0:
+                continue
+            server_id = sources[position][0]
+            episodes, stats = refresh_episodes(sources[position], quota,
+                max(0, 90 - episode_elapsed[server_id]), previous=episode_results[position])
+            unused -= stats["requests"]
+            stats["requests"] += previous["requests"]
+            stats["cacheHits"] += previous["cacheHits"]
+            episode_results[position] = (episodes, stats)
+        episode_seconds = time.monotonic() - episode_wall_started
     remaining = max_episode_requests
+    evidence = MovieEvidenceCollector(cache / "provider-evidence",
+        configs={server_id: config for server_id, _source, config in sources if config}, max_requests=0, max_seconds=0)
+    resolution_queue = ResolutionQueue(cache / "resolution-queue.json", policy_version=MATCH_STRATEGY, now=now)
     tmdb_limit = client.max_requests
     groups_remaining = len(sources) * 2
     for position, (server_id, source, config) in enumerate(sources):
         state_path = cache / f"{server_id}_inventory.json"
         state = load_state(state_path)
-        session = requests.Session() if fetch_episodes and config else None
-        if session:
-            session.trust_env = False
-        try:
-            episodes, episode_stats = enrich_series(source, server_id, cache / "episodes", config,
-                session, max_requests=remaining // (len(sources) - position), now=now)
-        finally:
-            if session:
-                session.close()
+        episode_started = time.monotonic()
+        episodes, episode_stats = (episode_results[position] if episode_results is not None else
+                                  refresh_episodes((server_id, source, config), remaining // (len(sources) - position)))
+        if episode_results is None:
+            episode_seconds += time.monotonic() - episode_started
         remaining -= episode_stats["requests"]
         catalogs = []
         for kind in ("movie", "series"):
@@ -494,8 +631,10 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
             used = client.stats.get("requests", 0)
             client.max_requests = used + max(0, tmdb_limit - used) // groups_remaining
             reset_time(45)
+            metadata_started = time.monotonic()
             catalogs.append(make_items(server_id, kind, source, state, client, now, config,
-                                       episodes, episode_stats["statusBySeries"]))
+                                       episodes, episode_stats["statusBySeries"], evidence, resolution_queue))
+            metadata_seconds += time.monotonic() - metadata_started
             groups_remaining -= 1
         client.max_requests = tmdb_limit
         movies, series = catalogs
@@ -512,7 +651,7 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
                  "home": write_artifact(output, f"{server_id}_home", home, count=len(home["items"])),
                  "epg": epg_references(epg_dir, server_id),
                  "episodeRefresh": {
-                     **{key: value for key, value in episode_stats.items() if key != "statusBySeries"},
+                     **{key: value for key, value in episode_stats.items() if key not in {"statusBySeries", "attemptedSeriesIds"}},
                      "statusCounts": {status: sum(value == status for value in episode_stats["statusBySeries"].values())
                                       for status in ("available", "stale", "pending", "unavailable")}}}
         vod.ensure_no_secret_reflection({"movies": movies, "series": series, "home": home}, config)
@@ -535,7 +674,27 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
     atomic_json(output / "index.json", index)
     for path, state in states:
         atomic_json(path, state)
+    if timings is not None:
+        total = time.monotonic() - build_started
+        timings.update(totalSeconds=round(total, 3), trendingSeconds=round(trend_seconds, 3),
+                       episodeSeconds=round(episode_seconds, 3), metadataSeconds=round(metadata_seconds, 3),
+                       writeAndValidationSeconds=round(max(0, total - trend_seconds - episode_seconds - metadata_seconds), 3))
     return index
+
+
+def _github_summary(title, values):
+    destination = os.environ.get("GITHUB_STEP_SUMMARY", "")
+    if not destination:
+        return
+    try:
+        lines = [f"### {title}", "", "| Measure | Value |", "| --- | ---: |"]
+        lines.extend(f"| {key} | {value} |" for key, value in values.items()
+                     if isinstance(key, str) and re.fullmatch(r"[A-Za-z0-9_ ]{1,80}", key)
+                     and type(value) in (int, float) and math.isfinite(value))
+        with Path(destination).open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n\n")
+    except OSError:
+        print("WARNING: GitHub build summary could not be updated.", file=sys.stderr)
 
 
 def read_artifact(output: Path, ref: Mapping[str, Any]) -> dict:
@@ -725,6 +884,11 @@ def main(argv=None):
     parser.add_argument("--backfill-release-dates", action="append", metavar="SERVER",
                         help="Warm current-year English movie metadata caches for selected offline servers; do not publish.")
     parser.add_argument("--backfill-max-seconds", type=float, default=600)
+    parser.add_argument("--resolution-report-dir", type=Path)
+    parser.add_argument("--resolution-limit", type=int, default=300)
+    parser.add_argument("--resolve-provider-details", action="store_true",
+                        help="Collect bounded private facts for unresolved selected-server movies only.")
+    parser.add_argument("--max-provider-detail-requests", type=int, default=40)
     parser.add_argument("--allow-insecure-http", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args(argv)
@@ -736,6 +900,9 @@ def main(argv=None):
         raise vod.CatalogBuildError("Each app server must be selected once.")
     if not math.isfinite(args.backfill_max_seconds) or not 1 <= args.backfill_max_seconds <= 900:
         raise vod.CatalogBuildError("Release-date backfill time budget is invalid.")
+    if (not 1 <= args.resolution_limit <= 1000 or not 0 <= args.max_provider_detail_requests <= 200
+            or args.resolve_provider_details and not args.backfill_release_dates):
+        raise vod.CatalogBuildError("Movie resolution limits or mode are invalid.")
     backfill_servers = [vod.normalize_server_id(value) for value in (args.backfill_release_dates or [])]
     if backfill_servers and (not args.input_dir or args.server or args.fetch_series_details or args.validate_only
                              or len(backfill_servers) != len(set(backfill_servers))):
@@ -750,15 +917,39 @@ def main(argv=None):
         if args.cache_dir.resolve() == args.output_dir.resolve() or args.output_dir.resolve() in args.cache_dir.resolve().parents:
             raise vod.CatalogBuildError("Private app caches must stay outside the publication directory.")
         offline = [(server_id, vod.load_offline_inputs(args.input_dir, server_id)) for server_id in backfill_servers]
+        now = vod.generated_timestamp(args.now_utc)
+        report_dir = args.resolution_report_dir or args.cache_dir.parent / "vod-resolution"
+        public_root = Path(__file__).resolve().parents[1] / "public"
+        if (report_dir.resolve() == args.output_dir.resolve() or args.output_dir.resolve() in report_dir.resolve().parents
+                or report_dir.resolve() == public_root.resolve() or public_root.resolve() in report_dir.resolve().parents):
+            raise vod.CatalogBuildError("Resolution reports must remain outside the publication directory.")
+        configs = {server_id: vod.load_server_config(server_id, allow_insecure_http=args.allow_insecure_http)
+                   for server_id in backfill_servers} if args.resolve_provider_details else {}
+        secrets = [os.environ.get("TMDB_READ_ACCESS_TOKEN", ""), os.environ.get("TMDB_API_KEY", "")]
+        for config in configs.values():
+            secrets.extend((config.username, config.password, config.base_url))
+        queue = ResolutionQueue(args.cache_dir / "resolution-queue.json", policy_version=MATCH_STRATEGY,
+                                now=now, secret_values=secrets)
+        evidence = MovieEvidenceCollector(args.cache_dir / "provider-evidence", configs=configs,
+            max_requests=args.max_provider_detail_requests if configs else 0,
+            max_seconds=min(60, args.backfill_max_seconds), secret_values=secrets)
         client = TmdbClient(args.cache_dir / "tmdb", token=os.environ.get("TMDB_READ_ACCESS_TOKEN", ""),
                             api_key=os.environ.get("TMDB_API_KEY", ""), max_requests=args.max_tmdb_requests,
                             max_elapsed_seconds=args.backfill_max_seconds)
         try:
-            report = backfill_release_dates(offline, client, vod.generated_timestamp(args.now_utc),
-                                            max_elapsed_seconds=args.backfill_max_seconds)
+            report = backfill_release_dates(offline, client, now,
+                max_elapsed_seconds=args.backfill_max_seconds, queue=queue, evidence=evidence,
+                report_dir=report_dir, max_due=args.resolution_limit)
         finally:
             client.close()
+            evidence.close()
         print(json.dumps(report, sort_keys=True))
+        _github_summary("Automatic movie metadata resolution", {
+            "processed": report["processedCount"], "newlyMatchedDates": report["newlyMatchedDates"],
+            "tmdbHttpAttempts": report["stats"]["requests"],
+            "providerHttpAttempts": report.get("providerEvidence", {}).get("requests", 0),
+            "elapsedSeconds": report["elapsedSeconds"],
+            **report.get("resolution", {}).get("reasonCounts", {})})
         return 0
     sources = []
     session = requests.Session()
@@ -781,12 +972,15 @@ def main(argv=None):
     client = TmdbClient(args.cache_dir / "tmdb", token=os.environ.get("TMDB_READ_ACCESS_TOKEN", ""),
                         api_key=os.environ.get("TMDB_API_KEY", ""), max_requests=args.max_tmdb_requests)
     try:
+        timings = {}
         index = build(args.output_dir, args.cache_dir, sources, client,
                       vod.generated_timestamp(args.now_utc), args.epg_dir,
-                      args.fetch_series_details, args.max_series_requests)
+                      args.fetch_series_details, args.max_series_requests, timings=timings)
     finally:
         client.close()
     print(f"SkyTVPlayer: published catalogs and Home feeds for {index['serverCount']} servers.")
+    print("SkyTVPlayer stage timings: " + json.dumps(timings, sort_keys=True))
+    _github_summary("SkyTVPlayer catalogue stage timings", timings)
     return 0
 
 
