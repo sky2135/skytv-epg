@@ -9,6 +9,7 @@ on:
         options:
           - live
           - vod_evidence
+          - vod_identity_coverage
         default: live
 
 permissions:
@@ -40,14 +41,31 @@ jobs:
           SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
           SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
           SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
+          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$DIAGNOSTIC_MODE" == "vod_evidence" ]]; then
             timeout --signal=TERM --kill-after=10s 60s python -u scripts/diagnose_vod_provider_evidence.py
+          elif [[ "$DIAGNOSTIC_MODE" == "vod_identity_coverage" ]]; then
+            mkdir -p .build/vod-identity-coverage
+            timeout --signal=TERM --kill-after=10s 7m python -u scripts/diagnose_vod_identity_coverage.py \
+              --output .build/vod-identity-coverage/report.json
           elif [[ "$DIAGNOSTIC_MODE" == "live" ]]; then
             python -u scripts/diagnose_provider_transport.py
           else
             echo "Unsupported diagnostic mode." >&2
             exit 2
           fi
+
+      - name: Retain aggregate VOD identity coverage
+        if: ${{ success() && inputs.mode == 'vod_identity_coverage' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-identity-coverage-${{ github.run_id }}
+          path: .build/vod-identity-coverage/report.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
