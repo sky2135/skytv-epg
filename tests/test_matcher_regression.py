@@ -280,6 +280,9 @@ class MatcherIntegrityTests(unittest.TestCase):
             ("vodReviewedCorrectionsSha256", "scripts/vod_reviewed_corrections.py"),
             ("vodReviewedFactsSha256", "data/vod_reviewed_corrections.json"),
             ("channelMetadataFactsSha256", "config/channel_metadata_facts.json"),
+            ("vodMatchDiagnosticsSha256", "scripts/diagnose_vod_matches.py"),
+            ("vodMatchDiagnosticsWorkflowSha256", ".github/workflows/vod-match-diagnostics.yml"),
+            ("vodMatchDiagnosticsInputSha256", "data/diagnostics/server1-unmatched-2026-10-21.json"),
         ):
             with self.subTest(protected_file=relative_path):
                 self.assertEqual(
