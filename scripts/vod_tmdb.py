@@ -35,9 +35,20 @@ IMAGE_PATH = re.compile(r"/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)\Z", re.I)
 YOUTUBE_KEY = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 STATUSES = {"matched_id", "matched_search", "no_match", "unavailable"}
 IDENTITY_POLICY = 2
+MATCH_STRATEGY = 2
+MAX_SEARCH_PAGES = 5
+MAX_ALIAS_CANDIDATES = 3
+DIAGNOSTIC_REASONS = frozenset({
+    "matched_id", "matched_search", "matched_alias", "ambiguous_title_year",
+    "no_search_results", "title_mismatch", "year_mismatch", "incomplete_search",
+    "alias_candidate_limit", "unavailable", "missing_identity",
+})
 # Only provider decoration is removed. Articles, subtitles, sequels and numbers
 # remain identity-bearing ("Doctor" must never become "Doctor Strange").
-PROVIDER_PREFIX = re.compile(r"^(?:[A-Z]{2,3}|4K|FHD|UHD|HD)\s*[-|:]\s+")
+# Locale labels are recognized only in the observed spaced-dash/pipe format.
+# An acronym followed by a colon can be part of the film's actual title.
+PROVIDER_LOCALES = "AR|BN|CS|DA|DE|EL|EN|ES|FA|FI|FR|GU|HE|HI|HU|ID|IT|JA|KM|KN|KO|LO|ML|MR|MS|NE|NL|NO|PA|PL|PT|RO|RU|SI|SK|SO|SV|SW|TA|TE|TH|TL|TR|UK|UR|VI|ZH"
+PROVIDER_PREFIX = re.compile(rf"^(?:(?:{PROVIDER_LOCALES})\s+[-|]\s+|(?:4K|FHD|UHD|HD|SD)\s*[-|:]\s+)")
 PROVIDER_SUFFIX = re.compile(r"\s*(?:\[(?:4K|FHD|UHD|HD|SD)\]|\((?:4K|FHD|UHD|HD|SD|HINDI|MARATHI|TAMIL|TELUGU|ENGLISH|DUBBED)\))\s*$", re.I)
 
 
@@ -117,7 +128,86 @@ def _enrichment_identity(item: Mapping[str, Any], kind: str) -> tuple[str, str |
         year = correction.get("year") or year
         identifier = _identifier(correction["metadata"].get("tmdbId")) if correction["rejectIdentity"] else identifier
     key = f"{kind}:identity-v{IDENTITY_POLICY}:id:{identifier or ''}:title:{_normalized_title(title)}:year:{year or ''}"
+    evidence = _identity_evidence(item, kind)
+    if evidence:
+        # Evidence is asset-specific. It must never resolve another row that
+        # happens to share this normalized title/year or a recycled provider ID.
+        key += f":record:{evidence['contentId']}:evidence:{evidence['fingerprint']}:{evidence['digest']}"
     return key, identifier, title, year
+
+
+def _identity_evidence(item: Mapping[str, Any], kind: str) -> dict[str, Any] | None:
+    raw = item.get("_identityEvidence")
+    if not isinstance(raw, Mapping):
+        return None
+    content_id = item.get("contentId")
+    fingerprint = raw.get("fingerprint")
+    if (not isinstance(content_id, str) or raw.get("contentId") != content_id
+            or not re.fullmatch(rf"server_[1-9][0-9]?:{kind}:[0-9]{{1,10}}", content_id)
+            or not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint)):
+        return None
+
+    def names(value: object) -> list[str]:
+        result = set()
+        for person in value[:40] if isinstance(value, list) else []:
+            name = person.get("name") if isinstance(person, Mapping) else person
+            if isinstance(name, str) and len(name) <= 100 and "://" not in name:
+                normalized = _normalized_title(name)
+                if normalized:
+                    result.add(normalized)
+        return sorted(result)
+
+    imdb = raw.get("imdbId")
+    imdb = imdb if isinstance(imdb, str) and re.fullmatch(r"tt[0-9]{7,10}", imdb) else None
+    directors, cast = names(raw.get("directors")), names(raw.get("cast"))
+    if not imdb and not (directors and len(cast) >= 2):
+        return None
+    runtime = _number(raw.get("runtimeMinutes"), 10_000)
+    runtime = round(runtime, 2) if runtime is not None and runtime >= 1 else None
+    facts = {"imdbId": imdb, "directors": directors, "cast": cast,
+             "displayTitle": _text(item.get("title") or item.get("name")),
+             "runtimeMinutes": runtime}
+    digest = hashlib.sha256(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {**facts, "contentId": content_id, "fingerprint": fingerprint, "digest": digest}
+
+
+def _evidence_matches(details: Mapping[str, Any], evidence: Mapping[str, Any]) -> bool:
+    imdb = details.get("imdb_id")
+    external = details.get("external_ids")
+    if not imdb and isinstance(external, Mapping):
+        imdb = external.get("imdb_id")
+    # A supplied external ID is a constraint, never an optional score bonus.
+    if evidence["imdbId"]:
+        return imdb == evidence["imdbId"]
+    credits = details.get("credits")
+    if not isinstance(credits, Mapping):
+        return False
+    crew, cast = credits.get("crew"), credits.get("cast")
+    directors = {_normalized_title(person.get("name")) for person in crew[:1000]
+                 if isinstance(person, Mapping) and person.get("job") == "Director"} if isinstance(crew, list) else set()
+    actors = {_normalized_title(person.get("name")) for person in cast[:100]
+              if isinstance(person, Mapping)} if isinstance(cast, list) else set()
+    if not (directors.intersection(evidence["directors"]) and len(actors.intersection(evidence["cast"])) >= 2):
+        return False
+    runtime = _integer(details.get("runtime"), 1, 10_000)
+    expected_runtime = evidence.get("runtimeMinutes")
+    return not (runtime and expected_runtime and abs(runtime - expected_runtime) > 5)
+
+
+def _match_diagnostic(value: object = None, *, cache_hit: bool = False) -> dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    reason = raw.get("reason")
+    result = {"reason": reason if isinstance(reason, str) and reason in DIAGNOSTIC_REASONS else "unavailable", "cacheHit": cache_hit,
+              "candidateIds": []}
+    identifiers = raw.get("candidateIds")
+    if isinstance(identifiers, list):
+        result["candidateIds"] = list(dict.fromkeys(identifier for value in identifiers[:100]
+                                                   if (identifier := _identifier(value))))
+    for field in ("searchPages", "candidateCount", "exactMatchCount", "aliasCandidatesChecked"):
+        result[field] = _integer(raw.get(field), 0, 100_000) or 0
+    result["evidenceMatched"] = raw.get("evidenceMatched") is True
+    result["searchComplete"] = raw.get("searchComplete") is True
+    return result
 
 
 def _reviewed(item: Mapping[str, Any], kind: str) -> dict[str, Any] | None:
@@ -294,6 +384,7 @@ class TmdbClient:
         self._owns_session = session is None
         self._now = now
         self.stats = {key: 0 for key in ("requests", "cacheHits", "cacheMisses", "staleFallbacks", "matches", "noMatches", "errors", "budgetExhausted", "elapsedBudgetExhausted", "retries", "cacheWriteErrors")}
+        self.last_match_diagnostic = _match_diagnostic()
 
     def __enter__(self) -> "TmdbClient":
         return self
@@ -449,6 +540,7 @@ class TmdbClient:
         translated original titles can be reused safely after an API check.
         """
         value, fresh = self._read_cache(key)
+        evidence = _identity_evidence(item, kind)
         correction = _reviewed(item, kind)
         rejected_ids = correction.get("rejectedTmdbIds", []) if correction else []
         if isinstance(value, dict) and value.get("identityPolicy") == IDENTITY_POLICY:
@@ -458,15 +550,22 @@ class TmdbClient:
                 if metadata["tmdbId"] in rejected_ids:
                     return None, False, True
                 if not metadata["matchStatus"].startswith("matched_"):
+                    if value.get("matchStrategy") != MATCH_STRATEGY:
+                        return None, False, False
                     return metadata, fresh, metadata["rejectedIdentity"]
                 if isinstance(proof, dict) and _identity_matches(proof, title, year) and (
                     proof.get("tmdbId") == metadata["tmdbId"]
                     and (identifier is None or metadata["tmdbId"] == identifier)
                     and proof.get("originalTitle") == _normalized_title(metadata["originalTitle"])
                     and proof.get("year") == ((metadata["releaseDate"] or "")[:4] or None)
+                    and (not evidence or (proof.get("evidenceDigest") == evidence["digest"]
+                                          and proof.get("evidenceFingerprint") == evidence["fingerprint"]
+                                          and proof.get("contentId") == evidence["contentId"]))
                 ):
                     return metadata, fresh, metadata["rejectedIdentity"]
             return None, False, True
+        if evidence:
+            return None, False, False
         # Only pre-policy entries use these keys. Never read them as unbound
         # payloads at the new key, and never migrate misses or unvalidated IDs.
         raw_identifier = _identifier(item.get("tmdbId") or item.get("tmdb_id") or item.get("tmdb"))
@@ -486,6 +585,8 @@ class TmdbClient:
     def _write_identity_cache(self, key: str, metadata: dict[str, Any], ttl: int,
                               proof: Mapping[str, Any] | None = None) -> None:
         self._write_cache(key, {"identityPolicy": IDENTITY_POLICY,
+                                "matchStrategy": MATCH_STRATEGY,
+                                "matchDiagnostic": _match_diagnostic(self.last_match_diagnostic),
                                 "identity": dict(proof or {}), "metadata": metadata}, ttl)
 
     def enrichment_priority(self, item: Mapping[str, Any], kind: str) -> int:
@@ -507,7 +608,9 @@ class TmdbClient:
 
     def enrich(self, item: Mapping[str, Any], kind: str) -> dict[str, Any]:
         api_kind = self._kind(kind)
+        self.last_match_diagnostic = _match_diagnostic()
         key, identifier, title, year = _enrichment_identity(item, kind)
+        evidence = _identity_evidence(item, kind)
         correction = _reviewed(item, kind)
         rejected_ids = correction.get("rejectedTmdbIds", []) if correction else []
         requests_before = self.stats["requests"]
@@ -517,10 +620,16 @@ class TmdbClient:
             fresh = False
         if fresh:
             self.stats["cacheHits"] += 1
+            stored, _fresh = self._read_cache(key)
+            diagnostic = stored.get("matchDiagnostic") if isinstance(stored, Mapping) else None
+            self.last_match_diagnostic = _match_diagnostic(diagnostic, cache_hit=True)
+            if not diagnostic:
+                self.last_match_diagnostic["reason"] = cached["matchStatus"] if cached["matchStatus"].startswith("matched_") else "unavailable"
             return cached
         self.stats["cacheMisses"] += 1
 
-        def unavailable() -> dict[str, Any]:
+        def unavailable(reason: str = "unavailable") -> dict[str, Any]:
+            self.last_match_diagnostic["reason"] = reason
             if cached is not None:
                 self.stats["staleFallbacks"] += 1
             result = cached if cached is not None else _empty(None if rejected else identifier)
@@ -538,7 +647,8 @@ class TmdbClient:
                 self._write_identity_cache(key, result, MISS_TTL, proof)
             return result
 
-        def no_match() -> dict[str, Any]:
+        def no_match(reason: str = "title_mismatch") -> dict[str, Any]:
+            self.last_match_diagnostic["reason"] = reason
             result = _empty(None, "no_match")
             result["rejectedIdentity"] = rejected
             self.stats["noMatches"] += 1
@@ -551,48 +661,132 @@ class TmdbClient:
         # title is deliberately never an identity fallback: it may be polluted.
         if not title or "://" in title or not _normalized_title(title):
             rejected = bool(identifier) or rejected
-            return no_match()
+            return no_match("missing_identity")
         match_status = "matched_id" if identifier else "matched_search"
+        details = None
+        alias_match = False
         if not identifier:
             # A year is necessary to distinguish remakes, reboots and common titles.
             if not title or not year or "://" in title or not _normalized_title(title):
-                return no_match()
-            params = {"query": title, "page": 1, "include_adult": "true", "year" if kind == "movie" else "first_air_date_year": year}
-            state, search = self._request(f"/search/{api_kind}", params)
-            if state != "ok" or search is None:
-                return unavailable()
-            results = search.get("results")
-            if not isinstance(results, list):
-                self.stats["errors"] += 1
-                return unavailable()
+                return no_match("missing_identity")
             matches: set[str] = set()
-            if _integer(search.get("total_pages", 1), 0, 100_000) in {0, 1}:
-                for candidate in results[:100]:
+            candidates: dict[str, tuple[tuple[str, ...], str | None]] = {}
+            eligible: set[str] = set()
+            same_title_other_year = False
+            total_pages, total_results, observed_results = None, None, 0
+            for page in range(1, MAX_SEARCH_PAGES + 1):
+                params = {"query": title, "page": page, "include_adult": "true", "year" if kind == "movie" else "first_air_date_year": year}
+                state, search = self._request(f"/search/{api_kind}", params)
+                if state != "ok" or search is None:
+                    return unavailable("incomplete_search")
+                results = search.get("results")
+                page_count = _integer(search.get("total_pages", 1), 0, 100_000)
+                result_count = _integer(search.get("total_results"), 0, 10_000_000)
+                if (not isinstance(results, list) or len(results) > 100 or page_count is None
+                        or _integer(search.get("page", page), 1, 100_000) != page
+                        or (page_count == 0 and results)
+                        or (page > 1 and (page_count != total_pages or not results))
+                        or (page > 1 and result_count != total_results)):
+                    self.stats["errors"] += 1
+                    return unavailable("incomplete_search")
+                total_pages, total_results = page_count, result_count
+                observed_results += len(results)
+                self.last_match_diagnostic["searchPages"] = page
+                for candidate in results:
                     if not isinstance(candidate, dict):
-                        continue
+                        self.stats["errors"] += 1
+                        return unavailable("incomplete_search")
                     names = (candidate.get("title"), candidate.get("original_title")) if kind == "movie" else (candidate.get("name"), candidate.get("original_name"))
                     release = _date(candidate.get("release_date" if kind == "movie" else "first_air_date"))
                     candidate_id = _identifier(candidate.get("id"))
-                    if candidate_id and candidate_id not in rejected_ids and release and release[:4] == year and _normalized_title(title) in {_normalized_title(name) for name in names}:
+                    if not candidate_id:
+                        self.stats["errors"] += 1
+                        return unavailable("incomplete_search")
+                    signature = (tuple(sorted({_normalized_title(name) for name in names if _normalized_title(name)})), release)
+                    if candidate_id in candidates and candidates[candidate_id] != signature:
+                        return unavailable("incomplete_search")
+                    candidates[candidate_id] = signature
+                    if candidate_id in rejected_ids:
+                        continue
+                    same_title = _normalized_title(title) in signature[0]
+                    if release is None or release[:4] == year:
+                        eligible.add(candidate_id)
+                    if same_title and release and release[:4] != year:
+                        same_title_other_year = True
+                    if same_title and release and release[:4] == year:
                         matches.add(candidate_id)
-            if len(matches) != 1:
+                self.last_match_diagnostic.update(candidateCount=len(candidates), exactMatchCount=len(matches),
+                                                  candidateIds=sorted(matches or eligible or set(candidates), key=int)[:100])
+                self.last_match_diagnostic["searchComplete"] = bool(
+                    page >= max(1, total_pages) and (total_results is None or observed_results == total_results))
+                # Two distinct exact IDs are enough to prove ambiguity. Evidence
+                # may resolve a small set, but never a partially inspected set.
+                if len(matches) > 1 and (not evidence or len(matches) > MAX_ALIAS_CANDIDATES):
+                    return no_match("ambiguous_title_year")
+                if total_pages > MAX_SEARCH_PAGES:
+                    return unavailable("incomplete_search")
+                if page >= max(1, total_pages):
+                    if total_results is not None and observed_results != total_results:
+                        return unavailable("incomplete_search")
+                    break
+            else:
+                return unavailable("incomplete_search")
+
+            if not candidates:
+                return no_match("no_search_results")
+            if len(matches) == 1 and not evidence:
+                identifier = next(iter(matches))
+            else:
+                # Search may find an official alternate title, while exposing
+                # only the primary/original title in its results. All eligible
+                # candidates must be checked before accepting such a match.
+                check_ids = eligible if evidence else matches or eligible
+                if not check_ids:
+                    return no_match("year_mismatch" if same_title_other_year else "title_mismatch")
+                if len(check_ids) > MAX_ALIAS_CANDIDATES:
+                    return no_match("ambiguous_title_year" if len(matches) > 1 else "alias_candidate_limit")
+                corroborated = []
+                for candidate_id in sorted(check_ids, key=int):
+                    append = "credits,videos,alternative_titles" + (",external_ids" if evidence and evidence["imdbId"] else "")
+                    state, candidate_details = self._request(f"/{api_kind}/{candidate_id}", {"append_to_response": append})
+                    if state != "ok" or not candidate_details or _identifier(candidate_details.get("id")) != candidate_id:
+                        if state == "ok":
+                            self.stats["errors"] += 1
+                        return unavailable("incomplete_search")
+                    self.last_match_diagnostic["aliasCandidatesChecked"] += 1
+                    if (_identity_matches(_detail_identity(candidate_details, kind), title, year)
+                            and (not evidence or _evidence_matches(candidate_details, evidence))):
+                        corroborated.append((candidate_id, candidate_details))
+                        if len(corroborated) > 1:
+                            return no_match("ambiguous_title_year")
+                if not corroborated:
+                    return no_match("ambiguous_title_year" if matches else "title_mismatch")
+                identifier, details = corroborated[0]
+                alias_match = not matches
+                self.last_match_diagnostic["evidenceMatched"] = bool(evidence)
+        if details is None:
+            append = "credits,videos,alternative_titles" + (",external_ids" if evidence and evidence["imdbId"] else "")
+            state, details = self._request(f"/{api_kind}/{identifier}", {"append_to_response": append})
+            if state == "not_found":
+                rejected = True
                 return no_match()
-            identifier = matches.pop()
-        state, details = self._request(f"/{api_kind}/{identifier}", {"append_to_response": "credits,videos,alternative_titles"})
-        if state == "not_found":
-            rejected = True
-            return no_match()
-        if state != "ok" or not details or _identifier(details.get("id")) != identifier:
-            if state == "ok":
-                self.stats["errors"] += 1
-            return unavailable()
+            if state != "ok" or not details or _identifier(details.get("id")) != identifier:
+                if state == "ok":
+                    self.stats["errors"] += 1
+                return unavailable()
         proof = _detail_identity(details, kind)
         if not _identity_matches(proof, title, year):
             rejected = True
-            return no_match()
+            return no_match("year_mismatch" if proof.get("year") != year else "title_mismatch")
+        if evidence:
+            if not _evidence_matches(details, evidence):
+                return no_match("title_mismatch")
+            self.last_match_diagnostic["evidenceMatched"] = True
+            proof.update(contentId=evidence["contentId"], evidenceFingerprint=evidence["fingerprint"], evidenceDigest=evidence["digest"])
         result = _metadata(details, kind, match_status)
         result["rejectedIdentity"] = rejected
         self.stats["matches"] += 1
+        self.last_match_diagnostic["reason"] = "matched_alias" if alias_match else match_status
         self._write_identity_cache(key, result, DETAIL_TTL, proof)
         return result
 

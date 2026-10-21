@@ -56,19 +56,19 @@ class VodMatchDiagnosticTests(unittest.TestCase):
 
     def test_exact_search_rejection_branches(self):
         cases = [
-            (search(pages=0), "no_search_results"),
-            (search(candidate(), pages=2), "multiple_search_pages"),
-            (search(candidate(101), candidate(102)), "multiple_exact_title_year_matches"),
-            (search(candidate(release=None)), "same_title_missing_full_date"),
-            (search(candidate(release="2025-10-10")), "same_title_different_primary_year"),
-            (search(candidate(title="A Different Film")), "returned_titles_do_not_match"),
+            ([search(pages=0)], "no_search_results"),
+            ([search(candidate(), pages=6)], "incomplete_search"),
+            ([search(candidate(101), candidate(102))], "ambiguous_title_year"),
+            ([search(candidate(release=None)), FakeResponse({**movie_details(), "release_date": None})], "title_mismatch"),
+            ([search(candidate(release="2025-10-10"))], "year_mismatch"),
+            ([search(candidate(title="A Different Film")), FakeResponse({**movie_details(), "title": "A Different Film", "release_date": "2026-10-10"})], "title_mismatch"),
         ]
-        for number, (response, expected) in enumerate(cases):
+        for number, (responses, expected) in enumerate(cases):
             with self.subTest(reason=expected):
                 client = diagnostic.TraceClient(self.root / str(number), token="read-token-secret",
-                                                session=FakeSession(response))
+                                                session=FakeSession(*responses))
                 self.assertEqual(self.reason(client), expected)
-                self.assertEqual(len(client.session.calls), 1)
+                self.assertEqual(len(client.session.calls), len(responses))
 
     def test_supplied_id_details_must_still_match_independent_title_and_year(self):
         for title, release in (("Another Film", "2026-10-10"), ("Example Film", "2025-10-10")):
@@ -78,24 +78,69 @@ class VodMatchDiagnosticTests(unittest.TestCase):
                 # Each variant must execute against a fresh cache.
                 client.cache_dir = self.root / title.replace(" ", "_") / release
                 reason = self.reason(client, entry(supplied_id="101"))
-                self.assertEqual(reason, "details_identity_conflict")
+                self.assertEqual(reason, "year_mismatch" if release.startswith("2025") else "title_mismatch")
                 self.assertEqual(client.session.calls[0][0], "https://api.themoviedb.org/3/movie/101")
 
     def test_missing_supplied_id_has_its_own_diagnostic(self):
         client = self.client(FakeResponse(status=404))
-        self.assertEqual(self.reason(client, entry(supplied_id="101")), "details_not_found")
+        self.assertEqual(self.reason(client, entry(supplied_id="101")), "title_mismatch")
+        self.assertEqual(client.trace[0]["state"], "not_found")
 
     def test_authoritative_matcher_input_preserves_provider_id_absent_from_public_catalog(self):
         client = self.client(FakeResponse({**movie_details(), "release_date": "2026-10-10"}))
         row = entry(supplied_id="101")
         report = diagnostic.diagnose(document(row), client, yearless=False)
         result = report["records"][0]
-        self.assertEqual(result["reason"], "matched_on_replay")
+        self.assertEqual(result["reason"], "matched_id")
         self.assertEqual(result["replayTmdbId"], "101")
         self.assertEqual(result["replayReleaseDate"], "2026-10-10")
         self.assertEqual(len(client.session.calls), 1)
         self.assertIn("/movie/101", client.session.calls[0][0])
         self.assertIsNone(row["tmdbId"])
+
+    def test_completed_pagination_reports_all_pages_and_uses_matcher_success(self):
+        first = FakeResponse({"page": 1, "total_pages": 2, "total_results": 2,
+                              "results": [candidate(90, title="Another Film")]})
+        second = FakeResponse({"page": 2, "total_pages": 2, "total_results": 2,
+                               "results": [candidate(101)]})
+        client = self.client(first, second, FakeResponse({**movie_details(), "release_date": "2026-10-10"}))
+        report = diagnostic.diagnose(document(), client, yearless=False)
+        row = report["records"][0]
+        self.assertEqual(report["schemaVersion"], 2)
+        self.assertEqual(report["matcherStrategy"], diagnostic.MATCH_STRATEGY)
+        self.assertEqual(row["reason"], "matched_search")
+        self.assertEqual(row["exactTitleYearIdsOnFirstPage"], [])
+        self.assertEqual(row["exactTitleYearIdsOnFetchedPages"], ["101"])
+        self.assertEqual(row["exactTitleYearIdsAcrossAllPages"], ["101"])
+        self.assertEqual(row["searchPagesFetched"], 2)
+        self.assertTrue(row["searchComplete"])
+        self.assertEqual([t["requestedPage"] for t in row["trace"][:2]], [1, 2])
+
+    def test_early_ambiguity_does_not_claim_a_complete_page_set(self):
+        client = self.client(search(candidate(101), candidate(102), pages=3))
+        row = diagnostic.diagnose(document(), client, yearless=False)["records"][0]
+        self.assertEqual(row["reason"], "ambiguous_title_year")
+        self.assertFalse(row["searchComplete"])
+        self.assertNotIn("exactTitleYearIdsAcrossAllPages", row)
+        self.assertEqual(row["exactTitleYearIdsOnFetchedPages"], ["101", "102"])
+        self.assertEqual(row["searchPagesFetched"], 1)
+
+    def test_failed_alias_detail_does_not_hide_completed_search_or_claim_a_match(self):
+        client = self.client(search(candidate(title="Different Primary Title")), FakeResponse(status=401))
+        row = diagnostic.diagnose(document(), client, yearless=False)["records"][0]
+        self.assertEqual(row["reason"], "incomplete_search")
+        self.assertEqual(row["replayStatus"], "unavailable")
+        self.assertTrue(row["searchComplete"])
+        self.assertEqual(row["exactTitleYearIdsAcrossAllPages"], [])
+
+    def test_alias_proof_success_is_authoritative_over_first_page_title_mismatch(self):
+        details = {**movie_details(), "title": "A Different Film", "release_date": "2026-10-10",
+                   "alternative_titles": {"titles": [{"title": "Example Film"}]}}
+        client = self.client(search(candidate(title="A Different Film")), FakeResponse(details))
+        row = diagnostic.diagnose(document(), client, yearless=False)["records"][0]
+        self.assertEqual(row["reason"], "matched_alias")
+        self.assertEqual(row["replayTmdbId"], "101")
+        self.assertEqual(row["exactTitleYearIdsAcrossAllPages"], [])
 
     def test_trace_and_report_exclude_authentication_api_urls_and_response_extras(self):
         extra = {"private_provider_url": "https://provider.invalid/user/password/1.mp4",

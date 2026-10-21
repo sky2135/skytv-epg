@@ -19,8 +19,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from vod_tmdb import (TmdbClient, _date, _detail_identity, _enrichment_identity,
-                      _identifier, _identity_matches, _integer, _normalized_title, _text)
+from vod_tmdb import (MATCH_STRATEGY, TmdbClient, _date, _detail_identity, _enrichment_identity,
+                      _identifier, _integer, _match_diagnostic, _normalized_title, _text)
 
 
 def public_candidate(value):
@@ -49,7 +49,9 @@ class TraceClient(TmdbClient):
         if state == "ok" and isinstance(body, dict):
             if row["kind"] == "search":
                 results = body.get("results")
-                row.update(totalPages=_integer(body.get("total_pages", 1), 0, 100_000),
+                row.update(requestedPage=_integer((params or {}).get("page", 1), 1, 100_000),
+                           responsePage=_integer(body.get("page"), 1, 100_000),
+                           totalPages=_integer(body.get("total_pages", 1), 0, 100_000),
                            totalResults=_integer(body.get("total_results"), 0, 10_000_000),
                            candidates=[public_candidate(x) for x in results[:100]] if isinstance(results, list) else [])
             else:
@@ -66,42 +68,6 @@ def exact_candidates(candidates, title, year):
     exact = [x for x in same_name if x.get("tmdbId") and x.get("releaseDate")
              and x["releaseDate"][:4] == year]
     return same_name, {x["tmdbId"] for x in exact}
-
-
-def rejection_reason(metadata, trace, title, year):
-    status = metadata.get("matchStatus")
-    if str(status).startswith("matched_"):
-        return "matched_on_replay"
-    if status == "unavailable":
-        return "lookup_unavailable"
-    searches = [x for x in trace if x["phase"] == "matcher" and x["kind"] == "search"]
-    details = [x for x in trace if x["phase"] == "matcher" and x["kind"] == "details"]
-    if searches:
-        search = searches[0]
-        if search["state"] != "ok":
-            return "lookup_unavailable"
-        pages = search.get("totalPages")
-        if pages not in {0, 1}:
-            return "multiple_search_pages"
-        candidates = search["candidates"]
-        same_name, exact = exact_candidates(candidates, title, year)
-        if len(exact) > 1:
-            return "multiple_exact_title_year_matches"
-        if not exact:
-            if not candidates:
-                return "no_search_results"
-            if any(x.get("releaseDate") and x["releaseDate"][:4] != year for x in same_name):
-                return "same_title_different_primary_year"
-            if same_name:
-                return "same_title_missing_full_date"
-            return "returned_titles_do_not_match"
-    if details:
-        detail = details[-1]
-        if detail["state"] == "not_found":
-            return "details_not_found"
-        if detail["state"] == "ok" and not _identity_matches(detail.get("identity", {}), title, year):
-            return "details_identity_conflict"
-    return "identity_not_usable_or_unexplained"
 
 
 def diagnose(document, client, *, max_seconds=600, yearless=True):
@@ -144,26 +110,38 @@ def diagnose(document, client, *, max_seconds=600, yearless=True):
             client.trace = []
             client.phase = "matcher"
             metadata = client.enrich(item, "movie")
-            reason = rejection_reason(metadata, client.trace, title, year)
+            matcher_diagnostic = _match_diagnostic(client.last_match_diagnostic,
+                                                    cache_hit=client.last_match_diagnostic.get("cacheHit") is True)
+            reason = matcher_diagnostic["reason"]
             result = {"searchTitle": title, "searchYear": year, "reason": reason,
+                      "matcherDiagnostic": matcher_diagnostic,
                       "replayStatus": metadata.get("matchStatus"), "replayTmdbId": metadata.get("tmdbId"),
                       "replayReleaseDate": metadata.get("releaseDate"), "reusedDiagnosticQuery": False}
-            if yearless and reason not in {"matched_on_replay", "lookup_unavailable", "multiple_exact_title_year_matches"}:
+            if (yearless and reason in {"no_search_results", "title_mismatch", "year_mismatch", "alias_candidate_limit"}
+                    and client.stats["requests"] < client.max_requests and time.monotonic() - started < max_seconds):
                 client.phase = "yearless_review"
                 client._request("/search/movie", {"query": title, "include_adult": "true", "page": 1})
             result["trace"] = copy.deepcopy(client.trace)
-            search = next((t for t in client.trace if t["phase"] == "matcher" and t["kind"] == "search"), None)
-            if search:
-                _same, exact = exact_candidates(search.get("candidates", []), title, year)
+            searches = [t for t in client.trace if t["phase"] == "matcher" and t["kind"] == "search"]
+            if searches:
+                first = searches[0]
+                _same, exact = exact_candidates(first.get("candidates", []), title, year)
                 result["exactTitleYearIdsOnFirstPage"] = sorted(exact)
-                result["searchTotalPages"] = search.get("totalPages")
-                result["searchTotalResults"] = search.get("totalResults")
+                result["searchTotalPages"] = first.get("totalPages")
+                result["searchTotalResults"] = first.get("totalResults")
+                result["searchPagesAttempted"] = len(searches)
+                result["searchPagesFetched"] = sum(t["state"] == "ok" for t in searches)
+                result["searchComplete"] = matcher_diagnostic["searchComplete"]
+                _same, fetched_exact = exact_candidates([candidate for t in searches for candidate in t.get("candidates", [])], title, year)
+                result["exactTitleYearIdsOnFetchedPages"] = sorted(fetched_exact)
+                if matcher_diagnostic["searchComplete"]:
+                    result["exactTitleYearIdsAcrossAllPages"] = sorted(fetched_exact)
             prior[key] = copy.deepcopy(result)
         output.append({"row": row.get("row"), "contentId": row["contentId"],
                        "providerTitle": row.get("providerTitle"), "publishedStatus": row.get("publishedStatus"), **result})
-    return {"schemaVersion": 1, "mode": "read_only_vod_match_diagnostic",
+    return {"schemaVersion": 2, "matcherStrategy": MATCH_STRATEGY, "mode": "read_only_vod_match_diagnostic",
             "queriedAt": datetime.now(timezone.utc).isoformat(), "snapshotGeneratedAt": document.get("snapshotGeneratedAt"),
-            "interpretation": "Current TMDB replay, not proof of the historical API response. No metadata was published or corrected.",
+            "interpretation": "Current TMDB replay using authoritative matcher reason codes, not proof of the historical API response. Schema-1 first-page rejection labels are not used. Yearless candidates are evidence only. No metadata was published or corrected.",
             "sourceProof": document.get("sourceProof"), "inputCount": len(records), "recordCount": len(output),
             "uniqueQueries": len(prior), "stoppedReason": stopped,
             "reasonCounts": dict(collections.Counter(row["reason"] for row in output)),

@@ -283,6 +283,10 @@ class MatcherIntegrityTests(unittest.TestCase):
             ("vodMatchDiagnosticsSha256", "scripts/diagnose_vod_matches.py"),
             ("vodMatchDiagnosticsWorkflowSha256", ".github/workflows/vod-match-diagnostics.yml"),
             ("vodMatchDiagnosticsInputSha256", "data/diagnostics/server1-unmatched-2026-10-21.json"),
+            ("vodResolutionQueueSha256", "scripts/vod_resolution_queue.py"),
+            ("vodProviderEvidenceSha256", "scripts/vod_provider_evidence.py"),
+            ("vodPreparedInstallerSha256", "scripts/install_vod_catalogs.py"),
+            ("vodSeriesSha256", "scripts/vod_series.py"),
         ):
             with self.subTest(protected_file=relative_path):
                 self.assertEqual(

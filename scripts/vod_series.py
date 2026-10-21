@@ -226,12 +226,15 @@ def enrich_series(
     max_requests: int = 600,
     now: str = "",
     deadline_seconds: float = 90,
+    previous: tuple[Mapping[str, Any], Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     """Return episodes and per-series availability using a bounded request budget.
 
     Missing inventories precede old inventories. Failed attempts are timestamped,
     so the same failing titles cannot consume every later run's request budget.
     Cached episodes survive transient errors with an explicit ``stale`` status.
+    A supplemental pass over the same source can retain its predecessor's
+    validated inventories and attempts even when an optional cache was too big.
     """
     server_id = vod.normalize_server_id(server_id)
     if config is not None and vod.normalize_server_id(config.server_id) != server_id:
@@ -245,16 +248,44 @@ def enrich_series(
     current = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     rows = vod.normalize_rows(source.get("get_series", []), f"{server_id} series")
     details = vod.normalize_detail_map(source.get("series_details", {}), kind="series", label=f"{server_id} series details")
+    prior_episodes, prior_statuses, prior_attempted = {}, {}, set()
+    if (isinstance(previous, tuple) and len(previous) == 2
+            and isinstance(previous[0], Mapping) and isinstance(previous[1], Mapping)):
+        prior_episodes = previous[0]
+        statuses_value = previous[1].get("statusBySeries")
+        prior_statuses = statuses_value if isinstance(statuses_value, Mapping) else {}
+        attempted_value = previous[1].get("attemptedSeriesIds")
+        if isinstance(attempted_value, list):
+            # A real first pass cannot attempt more series than its source has.
+            # Ignore excess/foreign identifiers rather than expanding work.
+            current_ids = {vod.normalize_item_id(row.get("series_id", row.get("id"))) for row in rows}
+            prior_attempted = {value for value in attempted_value[:len(rows)]
+                               if isinstance(value, str) and value in current_ids}
     result: dict[str, list[dict[str, Any]]] = {}
     statuses: dict[str, str] = {}
     queue: list[tuple[int, str, str, dict[str, Any] | None, Path, str]] = []
     requests_used = 0
     cache_hits = 0
     deadline_reached = False
+    attempted_series_ids = []
     for row in rows:
         series_id = vod.normalize_item_id(row.get("series_id", row.get("id")))
         if not series_id or series_id in statuses:
             continue
+        prior_status = prior_statuses.get(series_id)
+        if (isinstance(prior_status, str) and prior_status in {"available", "stale", "unavailable"}
+                and (prior_status == "available" or series_id in prior_attempted)):
+            prior_rows = prior_episodes.get(series_id)
+            if isinstance(prior_rows, list) and len(prior_rows) <= MAX_EPISODES_PER_SERIES:
+                try:
+                    normalized = normalize_episodes({"episodes": prior_rows}, config)
+                except (ValueError, TypeError, vod.CatalogBuildError):
+                    normalized = None
+                if (normalized is not None and normalized == prior_rows
+                        and (bool(normalized) if prior_status in {"available", "stale"} else not normalized)):
+                    result[series_id] = normalized
+                    statuses[series_id] = prior_status
+                    continue
         path = _cache_path(Path(cache_dir), server_id, series_id)
         fingerprint = _fingerprint(row)
         cached = _load_cache(path, server_id, series_id, config)
@@ -286,6 +317,7 @@ def enrich_series(
                 deadline_reached = True
                 break
             requests_used += 1
+            attempted_series_ids.append(series_id)
             episodes: list[dict[str, Any]] = []
             try:
                 detail = vod.request_panel_json(session, config, "get_series_info", item_id=series_id, maximum_bytes=vod.MAX_DETAIL_RESPONSE_BYTES, budget=budget)
@@ -300,4 +332,6 @@ def enrich_series(
                 statuses[series_id] = "stale" if result[series_id] else "unavailable"
                 fetched_at = cached.get("fetchedAt") if cached is not None else None
             _write_cache(path, {"schemaVersion": CACHE_SCHEMA, "serverId": server_id, "seriesId": series_id, "sourceFingerprint": fingerprint, "checkedAt": timestamp, "fetchedAt": fetched_at, "status": statuses[series_id], "episodes": result[series_id]})
-    return result, {"requests": requests_used, "cacheHits": cache_hits, "statusBySeries": statuses, "budgetDeferred": len(queue) - requests_used, "deadlineReached": deadline_reached}
+    return result, {"requests": requests_used, "cacheHits": cache_hits, "statusBySeries": statuses,
+                    "budgetDeferred": len(queue) - requests_used, "deadlineReached": deadline_reached,
+                    "attemptedSeriesIds": attempted_series_ids}

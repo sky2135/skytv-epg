@@ -162,6 +162,31 @@ jobs:
           SKYTV_CHANNEL_REGISTRY_DIR: ""
         run: python -m unittest discover -s tests -v
 
+      - name: Fetch and validate VOD inventories before expensive guide work
+        shell: bash
+        env:
+          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
+          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
+          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
+          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
+          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+        run: |
+          set -euo pipefail
+          vod_command=(
+            python -u scripts/build_vod_catalogs.py
+              --output-dir .build/vod-catalogs/public/VOD
+              --snapshot-dir .build/vod-inputs
+          )
+          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
+            vod_command+=(--allow-insecure-http)
+            echo "::warning::Provider VOD credentials may be sent over unencrypted HTTP."
+          fi
+          timeout --signal=TERM --kill-after=30s 15m "${vod_command[@]}"
+
       - name: Restore public channel enrichment cache
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
@@ -887,30 +912,13 @@ jobs:
               print("::warning::Guides passed publication validation, but provider discovery or native guide availability was degraded.")
           PY
 
-      - name: Build separate movie and series catalogs
+      - name: Install prepared movie and series catalogs
         shell: bash
-        env:
-          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
-          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
-          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
-          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
-          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
-          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
-          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
-          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
-          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
         run: |
           set -euo pipefail
-          vod_command=(
-            python -u scripts/build_vod_catalogs.py
-              --output-dir public/VOD
-              --snapshot-dir .build/vod-inputs
-          )
-          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
-            vod_command+=(--allow-insecure-http)
-            echo "::warning::Provider VOD credentials may be sent over unencrypted HTTP."
-          fi
-          timeout --signal=TERM --kill-after=30s 15m "${vod_command[@]}"
+          python scripts/install_vod_catalogs.py \
+            --source .build/vod-catalogs/public/VOD \
+            --output-dir public/VOD
 
       - name: Restore incremental SKYTVPlayer metadata cache
         id: vod_cache_restore
@@ -922,20 +930,41 @@ jobs:
           restore-keys: |
             skytvplayer-vod-v1-${{ runner.os }}-
 
-      - name: Backfill Server 1 current-year English movie release dates
+      - name: Resolve due Server 1 movie metadata and release dates
         shell: bash
         env:
           TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
         run: |
           set -euo pipefail
-          timeout --signal=TERM --kill-after=30s 12m \
-            python -u scripts/build_skytvplayer_catalog.py \
-              --input-dir .build/vod-inputs \
-              --cache-dir .build/vod-cache \
-              --backfill-release-dates server_1 \
-              --max-tmdb-requests 3000 \
+          resolve_command=(
+            python -u scripts/build_skytvplayer_catalog.py
+              --input-dir .build/vod-inputs
+              --cache-dir .build/vod-cache
+              --backfill-release-dates server_1
+              --max-tmdb-requests 3000
               --backfill-max-seconds 600
+              --resolution-limit 300
+              --resolution-report-dir .build/vod-resolution
+              --resolve-provider-details
+              --max-provider-detail-requests 40
+          )
+          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
+            resolve_command+=(--allow-insecure-http)
+          fi
+          timeout --signal=TERM --kill-after=30s 12m "${resolve_command[@]}"
+
+      - name: Retain sanitized movie resolution reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-resolution-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/vod-resolution/resolution_queue.*
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Build SKYTVPlayer movie and TV home database
         id: skytvplayer_catalog
