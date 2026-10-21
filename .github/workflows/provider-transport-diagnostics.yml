@@ -2,6 +2,14 @@ name: Diagnose provider transport
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Read-only diagnostic scope
+        type: choice
+        options:
+          - live
+          - vod_evidence
+        default: live
 
 permissions:
   contents: read
@@ -22,8 +30,9 @@ jobs:
       - name: Install pinned dependencies
         run: |
           python -m pip install --only-binary=:all: -r requirements.txt -r requirements-sync.txt
-      - name: Compare inventory identities and inspect anonymous XMLTV target
+      - name: Run the selected read-only transport diagnostic
         env:
+          DIAGNOSTIC_MODE: ${{ inputs.mode || 'live' }}
           ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
           SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
           SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
@@ -31,4 +40,14 @@ jobs:
           SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
           SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
           SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
-        run: python -u scripts/diagnose_provider_transport.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$DIAGNOSTIC_MODE" == "vod_evidence" ]]; then
+            timeout --signal=TERM --kill-after=10s 60s python -u scripts/diagnose_vod_provider_evidence.py
+          elif [[ "$DIAGNOSTIC_MODE" == "live" ]]; then
+            python -u scripts/diagnose_provider_transport.py
+          else
+            echo "Unsupported diagnostic mode." >&2
+            exit 2
+          fi

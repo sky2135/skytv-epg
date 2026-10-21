@@ -285,6 +285,8 @@ class MatcherIntegrityTests(unittest.TestCase):
             ("vodMatchDiagnosticsInputSha256", "data/diagnostics/server1-unmatched-2026-10-21.json"),
             ("vodResolutionQueueSha256", "scripts/vod_resolution_queue.py"),
             ("vodProviderEvidenceSha256", "scripts/vod_provider_evidence.py"),
+            ("vodProviderEvidenceDiagnosticSha256", "scripts/diagnose_vod_provider_evidence.py"),
+            ("vodProviderEvidenceDiagnosticWorkflowSha256", ".github/workflows/provider-transport-diagnostics.yml"),
             ("vodPreparedInstallerSha256", "scripts/install_vod_catalogs.py"),
             ("vodSeriesSha256", "scripts/vod_series.py"),
         ):

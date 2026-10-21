@@ -23,6 +23,43 @@ EVIDENCE_TTL = 7 * 86400
 FACT_KEYS = {"imdbId", "directors", "cast", "runtimeMinutes"}
 
 
+def _error_category(error, server_id):
+    """Reduce failures to fixed codes; never retain exception text or data."""
+    if isinstance(error, vod.TransientPanelRequestError):
+        status = error.http_status
+        if type(status) is int and 100 <= status <= 599:
+            return f"http_{status}"
+        return "transport" if status is None else "invalid_facts_or_internal"
+    if isinstance(error, requests.RequestException):
+        return "transport"
+    if isinstance(error, OSError):
+        return "cache_io"
+    if isinstance(error, vod.CatalogBuildError):
+        message = str(error)
+        http = re.fullmatch(rf"{re.escape(server_id)}: get_vod_info provider returned HTTP ([1-5][0-9]{{2}})\.", message)
+        if http:
+            return "http_" + http.group(1)
+        if message == f"{server_id}: provider credentials were rejected.":
+            return "auth_rejected"
+        if message == f"{server_id} provider response is not valid UTF-8 JSON.":
+            return "invalid_json"
+        if message in {f"{server_id}: too many provider redirects.",
+                       f"{server_id}: unsafe provider redirect refused."}:
+            return "redirect_refused"
+        if message in {f"{server_id}: provider response is too large.",
+                       f"{server_id}: provider downloads exceed the total size limit."}:
+            return "response_limit"
+        if message in {f"{server_id}: provider request failed.",
+                       f"{server_id}: provider response download failed."}:
+            return "transport"
+    if isinstance(error, ValueError):
+        if str(error) == "Movie evidence refresh returned no facts":
+            return "empty_refresh"
+        if str(error) == "Movie evidence exceeds size limit":
+            return "response_limit"
+    return "invalid_facts_or_internal"
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
                                     separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -125,7 +162,8 @@ class MovieEvidenceCollector:
         self._known_names = {path.name for path in self.cache_dir.glob("*.json")
                              if re.fullmatch(r"[0-9a-f]{64}\.json", path.name)}
         self.secrets = [x for x in secret_values if x]
-        self.stats = {"requests": 0, "lookups": 0, "cacheHits": 0, "errors": 0, "budgetDeferred": 0}
+        self.stats = {"requests": 0, "lookups": 0, "cacheHits": 0, "errors": 0, "budgetDeferred": 0,
+                      "errorCounts": {}, "errorStages": {}}
         self.budget = vod.DownloadBudget(limit=16 * 1024 * 1024)
 
     def close(self):
@@ -206,12 +244,15 @@ class MovieEvidenceCollector:
         self.stats["requests"] += 1
         self.stats["lookups"] += 1
         self.session.initial_reserved = True
+        error_stage = "request"
         try:
             # Optional disambiguation makes one attempt. The next due queue run
             # handles retries; list ingestion retains its normal retry policy.
             detail = vod._request_panel_json_once(self.session, config, "get_vod_info",
                 item_id=item["id"], maximum_bytes=512 * 1024, budget=self.budget)
+            error_stage = "normalize"
             facts = normalize_facts(detail)
+            error_stage = "validate"
             if value is not None and any(value["facts"].values()) and not any(facts.values()):
                 # An empty refresh cannot erase an unchanged asset's existing
                 # facts. Keep their original checkedAt so this failed refresh
@@ -223,6 +264,7 @@ class MovieEvidenceCollector:
             raw = json.dumps(value, sort_keys=True, ensure_ascii=False).encode()
             if len(raw) > MAX_CACHE_BYTES:
                 raise ValueError("Movie evidence exceeds size limit")
+            error_stage = "cache"
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             path = self._path(item)
             temporary = vod._temporary_path(self.cache_dir, "movie-evidence")
@@ -232,6 +274,9 @@ class MovieEvidenceCollector:
                 self._known_names.add(path.name)
             finally:
                 temporary.unlink(missing_ok=True)
-        except (vod.CatalogBuildError, requests.RequestException, OSError, ValueError, TypeError):
+        except (vod.CatalogBuildError, requests.RequestException, OSError, ValueError, TypeError) as error:
             self.stats["errors"] += 1
+            category = _error_category(error, server_id)
+            self.stats["errorCounts"][category] = self.stats["errorCounts"].get(category, 0) + 1
+            self.stats["errorStages"][error_stage] = self.stats["errorStages"].get(error_stage, 0) + 1
         return self.load(item)

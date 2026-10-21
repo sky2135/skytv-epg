@@ -82,3 +82,25 @@ The shared TMDB client remains sequential; no unsynchronized request counter or
 cache write is shared between workers. All ordinary identity, checksum, secret,
 size, full-server and final Pages validation gates remain in place. Measure the
 first deployed run and warm-cache runs before claiming a total speedup.
+
+## Deployed verification on October 21, 2026
+
+Run `39628360336` completed successfully: build 44m30s (previous 49m42s),
+app stage 7m50s (previous 9m39s), channel synchronization 19m09s and live output
+7m03s. This is one observed comparison. The 37-second resolution stage reused
+1,174 dated entries and processed 154 due rows, while the earlier 213-second
+stage processed 1,328 nearly cold rows. Cache warmth and workload differ.
+
+Public generation `2026-10-21T16:17:29Z` passed checks for all three servers'
+movie/series/Home manifests and all 132 Server 1 movie shards. Of the exact
+154 reviewed movies, 31 gained verified dates and 123 remained unresolved.
+All 1,559 previous verified English-tagged identities and dates were preserved;
+61 existing English-tagged movies gained dates overall, reaching 1,620.
+
+Optional provider-detail lookups failed in that run. Private collector summaries
+now distinguish fixed error categories and request/normalize/validate/cache
+stages without exposing exception text, raw responses or credentials. The manual
+provider transport workflow has a `vod_evidence` mode for one approved public
+movie identity, capped at one HTTP attempt and 15 seconds. It reports only
+sanitized counts and availability flags; the existing `live` mode remains the
+default. Optional lookup failure is an observation, not publication permission.
