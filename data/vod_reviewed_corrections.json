@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "reviewedAt": "2026-10-20",
+  "reviewedAt": "2026-10-21",
   "scope": "Exact published records and source-backed fields only. Original language never determines provider audio. Unknown TMDB IDs and artwork are not invented.",
   "corrections": [
     {
@@ -290,6 +290,36 @@
       "evidenceURLs": [
         "https://www.tataplaybinge.com/watch/shows/doree/32399"
       ]
+    },
+    {
+      "serverId": "server_1",
+      "kind": "movie",
+      "recordId": "824104",
+      "displayNames": [
+        "Deathgasm 2: Goremageddon (2026) (English)"
+      ],
+      "rejectIdentity": false,
+      "metadata": {},
+      "evidenceURLs": [
+        "https://deathgasm2.com/"
+      ],
+      "year": "2026",
+      "searchTitle": "Deathgasm II: Goremageddon"
+    },
+    {
+      "serverId": "server_1",
+      "kind": "movie",
+      "recordId": "712656",
+      "displayNames": [
+        "Bring Me the Horizon: L.I.V.E. in São Paulo (Live Immersive Virtual Experiment) (2026)"
+      ],
+      "rejectIdentity": false,
+      "metadata": {},
+      "evidenceURLs": [
+        "https://www.sonymusic.com/sonymusic/bring-me-the-horizon-unveil-trailer-and-launch-tickets-for-live-in-sao-paulo/"
+      ],
+      "year": "2026",
+      "searchTitle": "Bring Me the Horizon: L.I.V.E. in São Paulo"
     },
     {
       "serverId": "server_2",

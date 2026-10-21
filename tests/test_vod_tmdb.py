@@ -375,22 +375,20 @@ class TmdbEnrichmentTests(unittest.TestCase):
                 self.assertEqual(client.enrich(item, "movie")["matchStatus"], "unavailable")
 
     def test_external_id_evidence_is_corroborated_and_cannot_override_wrong_year(self):
-        search = {"results": [{"id": identifier, "title": "Example Film", "release_date": "2025-04-03"}
-                              for identifier in (101, 102)]}
+        found = {"movie_results": [{"id": 101}]}
         correct = {**movie_details(101), "imdb_id": "tt1234567"}
-        wrong = {**movie_details(102), "imdb_id": "tt7654321"}
         item = evidence_item(imdbId="tt1234567", directors=[], cast=[])
-        session = FakeSession(FakeResponse(search), FakeResponse(correct), FakeResponse(wrong))
+        session = FakeSession(FakeResponse(found), FakeResponse(correct))
         client = self.client(session)
         self.assertEqual(client.enrich(item, "movie")["tmdbId"], "101")
         self.assertTrue(session.calls[1][1]["params"]["append_to_response"].endswith(",external_ids"))
         with tempfile.TemporaryDirectory() as directory:
             wrong_year = {**correct, "release_date": "2024-04-03"}
-            client = tmdb.TmdbClient(Path(directory), token="key", session=FakeSession(FakeResponse(search), FakeResponse(wrong_year), FakeResponse(wrong)))
+            client = tmdb.TmdbClient(Path(directory), token="key", session=FakeSession(FakeResponse(found), FakeResponse(wrong_year)))
             self.assertEqual(client.enrich(item, "movie")["matchStatus"], "no_match")
 
     def test_conflicting_external_id_vetoes_even_a_unique_title_match(self):
-        session = FakeSession(FakeResponse({"results": [{"id": 101, "title": "Example Film", "release_date": "2025-04-03"}]}),
+        session = FakeSession(FakeResponse({"movie_results": [{"id": 101}]}),
                               FakeResponse({**movie_details(), "imdb_id": "tt7654321"}))
         client = self.client(session)
         self.assertEqual(client.enrich(evidence_item(imdbId="tt1234567"), "movie")["matchStatus"], "no_match")
@@ -734,7 +732,7 @@ class TmdbEnrichmentTests(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         document = json.loads(text)
         rules = reviewed._validate_document(document)
-        self.assertEqual(len(rules), 50)
+        self.assertEqual(len(rules), 52)
         self.assertEqual(sum(row["rejectIdentity"] for row in rules.values()), 7)
         for marker in ("password", "api_key", "direct_source", "rawSource", ".invalid", "playbackUrl"):
             self.assertNotIn(marker, text)

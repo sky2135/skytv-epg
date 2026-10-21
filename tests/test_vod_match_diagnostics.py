@@ -16,6 +16,7 @@ for directory in (ROOT / "scripts", ROOT / "tests"):
 
 import diagnose_vod_matches as diagnostic  # noqa: E402
 from test_vod_tmdb import FakeResponse, FakeSession, movie_details  # noqa: E402
+from vod_tmdb import MAX_SEARCH_PAGES  # noqa: E402
 
 
 def entry(number=1, *, title="Example Film (2026)", supplied_id=None):
@@ -57,7 +58,7 @@ class VodMatchDiagnosticTests(unittest.TestCase):
     def test_exact_search_rejection_branches(self):
         cases = [
             ([search(pages=0)], "no_search_results"),
-            ([search(candidate(), pages=6)], "incomplete_search"),
+            ([search(candidate(), pages=MAX_SEARCH_PAGES + 1)], "incomplete_search"),
             ([search(candidate(101), candidate(102))], "ambiguous_title_year"),
             ([search(candidate(release=None)), FakeResponse({**movie_details(), "release_date": None})], "title_mismatch"),
             ([search(candidate(release="2025-10-10"))], "year_mismatch"),

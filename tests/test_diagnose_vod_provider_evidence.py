@@ -5,6 +5,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +15,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import diagnose_vod_provider_evidence as diagnostic
+from vod_provider_evidence import MovieEvidenceCollector
 
 
 class ProviderEvidenceDiagnosticTests(unittest.TestCase):
@@ -79,6 +81,96 @@ class ProviderEvidenceDiagnosticTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(report["stats"]["errors"], 1)
         collector.close.assert_called_once()
+
+    def test_refused_same_host_rewrite_reports_constraints_without_following(self):
+        config = diagnostic.vod.ServerConfig("server_1", "https://private.invalid", "private-user", "private-password")
+        response = mock.Mock(status_code=302, is_redirect=True, is_permanent_redirect=False,
+                             headers={"Location": "/private-rewrite.php?username=private-user&password=private-password&action=get_vod_info&vod_id=817224"})
+        original = diagnostic.vod._safe_panel_redirect
+        with tempfile.TemporaryDirectory() as cache:
+            collector = MovieEvidenceCollector(cache, configs={"server_1": config}, max_requests=1)
+            with mock.patch("requests.Session.get", return_value=response) as request:
+                result, report, _, _ = self.invoke(collector)
+        self.assertEqual(result, 0)
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(report["stats"]["requests"], 1)
+        self.assertEqual(report["errorCounts"], {"redirect_refused": 1})
+        self.assertEqual(report["redirect"]["decision"], "refused")
+        self.assertEqual(report["redirect"]["reason"], "path_changed")
+        self.assertTrue(report["redirect"]["sameHost"])
+        self.assertTrue(report["redirect"]["samePort"])
+        self.assertTrue(report["redirect"]["queryEquivalent"])
+        self.assertFalse(report["redirect"]["samePath"])
+        self.assertNotIn("private-rewrite", json.dumps(report))
+        self.assertIs(diagnostic.vod._safe_panel_redirect, original)
+
+    def test_accepted_redirect_is_observed_but_one_http_attempt_is_still_enforced(self):
+        config = diagnostic.vod.ServerConfig("server_1", "https://private.invalid", "private-user", "private-password")
+        response = mock.Mock(status_code=301, is_redirect=True, is_permanent_redirect=True,
+                             headers={"Location": "/player_api.php"})
+        original = diagnostic.vod._safe_panel_redirect
+        with tempfile.TemporaryDirectory() as cache:
+            collector = MovieEvidenceCollector(cache, configs={"server_1": config}, max_requests=1)
+            with mock.patch("requests.Session.get", return_value=response) as request:
+                result, report, _, _ = self.invoke(collector)
+        self.assertEqual(result, 0)
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(report["stats"]["requests"], 1)
+        self.assertEqual(report["errorCounts"], {"transport": 1})
+        self.assertEqual(report["redirect"]["decision"], "accepted")
+        self.assertEqual(report["redirect"]["reason"], "accepted")
+        self.assertTrue(report["redirect"]["samePath"])
+        self.assertIs(diagnostic.vod._safe_panel_redirect, original)
+
+    def test_redirect_flags_distinguish_origin_scheme_query_and_user_info(self):
+        endpoint = "https://private.invalid/player_api.php"
+        params = {"username": "private-user", "password": "private-password", "action": "get_vod_info", "vod_id": "817224"}
+        cases = (("https://another.invalid/player_api.php", "sameHost", "host_changed"),
+                 ("https://private.invalid:8443/player_api.php", "portAllowed", "port_changed"),
+                 ("http://private.invalid/player_api.php", "upgradeOrSameScheme", "scheme_changed"),
+                 ("/player_api.php?action=get_series", "queryEquivalent", "query_changed"),
+                 ("/player_api.php#private-fragment", "hasFragment", "fragment"),
+                 ("https://private-user:private-password@private.invalid/player_api.php", "hasUserInfo", "user_info"))
+        for location, flag, reason in cases:
+            with self.subTest(reason=reason):
+                observations = []
+                observe = diagnostic._observe_redirect(diagnostic.vod._safe_panel_redirect, observations)
+                with self.assertRaises(diagnostic.vod.CatalogBuildError):
+                    observe(endpoint, location, params)
+                report = diagnostic._report(observations=observations)
+                self.assertEqual(report["redirect"]["reason"], reason)
+                self.assertEqual(report["redirect"][flag], flag in {"hasFragment", "hasUserInfo"})
+                for private in ("private.invalid", "private-user", "private-password", "817224", "player_api.php", "another.invalid"):
+                    self.assertNotIn(private, json.dumps(report))
+        flags = diagnostic._redirect_constraints("http://private.invalid/player_api.php", "https://private.invalid/player_api.php", params)
+        self.assertFalse(flags["samePort"])
+        self.assertTrue(flags["portAllowed"])
+        self.assertTrue(flags["upgradeOrSameScheme"])
+
+    def test_redirect_observer_is_restored_when_collector_raises(self):
+        original = diagnostic.vod._safe_panel_redirect
+        collector = mock.Mock(stats={})
+
+        def refuse_then_raise(*_args):
+            with self.assertRaises(diagnostic.vod.CatalogBuildError):
+                diagnostic.vod._safe_panel_redirect("https://private.invalid/player_api.php", "https://another.invalid/player_api.php", {})
+            raise RuntimeError("SECRET")
+
+        collector.collect.side_effect = refuse_then_raise
+        result, report, _, _ = self.invoke(collector)
+        self.assertEqual(result, 0)
+        self.assertEqual(report["redirect"]["reason"], "host_changed")
+        self.assertIs(diagnostic.vod._safe_panel_redirect, original)
+        collector.close.assert_called_once()
+
+    def test_redirect_report_rejects_extra_values_and_malformed_decision_codes(self):
+        report = diagnostic._report(observations=[{"decision": ["SECRET"], "reason": "SECRET",
+            "endpoint": "https://private.invalid", "location": "SECRET", "sameHost": "SECRET"}])
+        self.assertEqual(report["redirect"]["decision"], "refused")
+        self.assertEqual(report["redirect"]["reason"], "unclassified_refusal")
+        self.assertFalse(report["redirect"]["sameHost"])
+        self.assertNotIn("SECRET", json.dumps(report))
+        self.assertNotIn("private.invalid", json.dumps(report))
 
 
 if __name__ == "__main__":

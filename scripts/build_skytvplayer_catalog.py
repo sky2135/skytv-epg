@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -94,13 +95,8 @@ def load_state(path: Path) -> dict[str, Any]:
     return {"version": 1, "items": {}}
 
 
-def make_items(server_id: str, kind: str, source: Mapping[str, Any],
-               state: dict[str, Any], client: TmdbClient, now: str,
-               config: vod.ServerConfig | None = None,
-               episodes: Mapping[str, list] | None = None,
-               statuses: Mapping[str, str] | None = None,
-               evidence: MovieEvidenceCollector | None = None,
-               resolution_queue: ResolutionQueue | None = None) -> list[dict[str, Any]]:
+def _prepare_catalog(server_id, kind, source, config=None):
+    """Normalize once for both bounded metadata prefetch and publication."""
     movie = kind == "movie"
     rows_key = "get_vod_streams" if movie else "get_series"
     categories_key = "get_vod_categories" if movie else "get_series_categories"
@@ -114,13 +110,190 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
         provider_id = vod.normalize_item_id(row.get("stream_id" if movie else "series_id", row.get("id")))
         raw_rows[provider_id] = row
     details = vod.normalize_detail_map(source.get(details_key, {}), kind=kind, label=details_key)
-    baseline = not bool(state.get("initialized"))
-    result = []
     corrections = {}
     for position, base in enumerate(normalized):
         corrections[base["id"]] = correction_for(server_id, kind, base)
         normalized[position] = apply_reviewed_correction(server_id, kind, base)
         normalized[position]["contentId"] = f"{server_id}:{kind}:{base['id']}"
+    return {"normalized": normalized, "raw_rows": raw_rows, "details": details,
+            "corrections": corrections}
+
+
+def _matching_item(item, row, kind, evidence):
+    match_item = dict(item, providerLastModified=timestamp(row.get("last_modified")))
+    if kind == "movie" and evidence is not None:
+        facts = evidence.load(match_item)
+        if facts:
+            match_item["_identityEvidence"] = facts
+    return match_item
+
+
+def _resolve_metadata(client, server_id, kind, match_item, resolution_queue):
+    if resolution_queue is not None and resolution_queue.defer_cached_miss(server_id, kind, match_item):
+        reader = getattr(client, "_identity_cache", None)
+        if callable(reader):
+            key, identifier, title, year = _enrichment_identity(match_item, kind)
+            cached, _fresh, _rejected = reader(key, match_item, kind, identifier, title, year)
+            if cached and cached.get("matchStatus") == "no_match":
+                client.stats["cacheHits"] = client.stats.get("cacheHits", 0) + 1
+                client.stats["queueDeferred"] = client.stats.get("queueDeferred", 0) + 1
+                return dict(cached)
+    return client.enrich(match_item, kind)
+
+
+def _metadata_result_key(item, kind, resolution_queue):
+    physical_key = _enrichment_identity(item, kind)[0]
+    server_id = item["contentId"].split(":", 1)[0]
+    # A physical cache key does not encode all reviewed rejected-ID constraints.
+    constraints = {"correction": correction_for(server_id, kind, item),
+                   "evidence": item.get("_identityEvidence"),
+                   "queueDeferred": bool(resolution_queue and
+                       resolution_queue.defer_cached_miss(server_id, kind, item))}
+    return physical_key, hashlib.sha256(json_bytes(constraints)).hexdigest()
+
+
+class _TmdbPacer:
+    """One bounded request pace and 429 cooldown across isolated sessions."""
+    def __init__(self, requests_per_second=20):
+        self.interval = 1 / requests_per_second
+        self.lock = threading.Lock()
+        self.next_request = 0.0
+        self.cooldown_until = 0.0
+
+    def wait(self, deadline):
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                due = max(self.next_request, self.cooldown_until)
+                if now >= deadline:
+                    raise requests.Timeout()
+                if now >= due:
+                    self.next_request = now + self.interval
+                    return
+                delay = due - now
+                if now + delay >= deadline:
+                    raise requests.Timeout()
+            time.sleep(min(delay, 0.25))
+
+    def observe(self, response):
+        if response.status_code != 429:
+            return
+        try:
+            delay = float(response.headers.get("Retry-After", 1))
+        except (ValueError, TypeError):
+            delay = 1
+        delay = min(30, max(0, delay)) if math.isfinite(delay) else 1
+        with self.lock:
+            self.cooldown_until = max(self.cooldown_until, time.monotonic() + delay)
+
+
+class _PacedTmdbSession(requests.Session):
+    def __init__(self, pacer, deadline):
+        super().__init__()
+        self.trust_env = False
+        self.pacer, self.deadline = pacer, deadline
+
+    def get(self, url, **kwargs):
+        self.pacer.wait(self.deadline)
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise requests.Timeout()
+        kwargs["timeout"] = (min(5, remaining), min(15, remaining))
+        response = super().get(url, **kwargs)
+        self.pacer.observe(response)
+        return response
+
+
+class _PrefetchedMetadata:
+    def __init__(self, results, resolution_queue):
+        self.results = results
+        self.resolution_queue = resolution_queue
+
+    def enrichment_priority(self, _item, _kind):
+        return 0
+
+    def enrich(self, item, kind):
+        # Missing work is an implementation error, never an unbudgeted request.
+        return dict(self.results[_metadata_result_key(item, kind, self.resolution_queue)])
+
+
+def _prefetch_metadata(groups, client, workers, evidence, resolution_queue,
+                       *, client_factory=None, session_factory=None):
+    """Resolve each physical cache key on one owner, with fixed fair quotas."""
+    if type(workers) is not int or not 1 <= workers <= 3:
+        raise vod.CatalogBuildError("Metadata worker count must be between 1 and 3.")
+    factory = client_factory or TmdbClient
+    session_factory = session_factory or _PacedTmdbSession
+    owners, jobs = {}, [[] for _ in groups]
+    seen = set()
+    record_count = 0
+    for position, group in enumerate(groups):
+        prepared, kind = group["prepared"], group["kind"]
+        for base in prepared["normalized"]:
+            item = _matching_item(base, prepared["raw_rows"].get(base["id"], {}), kind, evidence)
+            key = _metadata_result_key(item, kind, resolution_queue)
+            record_count += 1
+            owner = owners.setdefault(key[0], position)
+            if key not in seen:
+                seen.add(key)
+                jobs[owner].append((key, item, kind))
+    available = max(0, client.max_requests - client.stats.get("requests", 0))
+    quota, remainder = divmod(available, len(groups)) if groups else (0, 0)
+    pacer = _TmdbPacer()
+    global_deadline = time.monotonic() + 45 * len(groups)
+
+    def resolve(position):
+        limit = quota + (position < remainder)
+        deadline = min(global_deadline, time.monotonic() + 45)
+        session = session_factory(pacer, deadline)
+        child = None
+        try:
+            child = factory(client.cache_dir.parent, token=client.token, api_key=client.api_key,
+                max_requests=limit, session=session, now=client._now,
+                max_elapsed_seconds=max(0, deadline - time.monotonic()))
+            work = sorted(jobs[position], key=lambda entry:
+                (child.enrichment_priority(entry[1], entry[2]), vod._sort_item_id(entry[1]), entry[0]))
+            results = {}
+            for key, item, kind in work:
+                server_id = item["contentId"].split(":", 1)[0]
+                results[key] = _resolve_metadata(child, server_id, kind, item, resolution_queue)
+            return results, dict(child.stats)
+        finally:
+            if child is not None:
+                child.close()
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(resolve, position) for position in range(len(groups))]
+        completed = [future.result() for future in futures]
+    results = {}
+    for values, stats in completed:
+        results.update(values)
+        for key, value in stats.items():
+            if type(value) is int and value >= 0:
+                client.stats[key] = client.stats.get(key, 0) + value
+    if client.stats.get("requests", 0) > client.max_requests:
+        raise vod.CatalogBuildError("Metadata requests exceeded their shared limit.")
+    client.stats.update(parallelWorkers=workers, parallelGroups=len(groups),
+        parallelUniqueIdentities=len(results), parallelResultReuse=record_count - len(results),
+        parallelUnusedRequests=max(0, client.max_requests - client.stats.get("requests", 0)))
+    return _PrefetchedMetadata(results, resolution_queue)
+
+
+def make_items(server_id: str, kind: str, source: Mapping[str, Any],
+               state: dict[str, Any], client: TmdbClient, now: str,
+               config: vod.ServerConfig | None = None,
+               episodes: Mapping[str, list] | None = None,
+               statuses: Mapping[str, str] | None = None,
+               evidence: MovieEvidenceCollector | None = None,
+               resolution_queue: ResolutionQueue | None = None,
+               prepared: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    movie = kind == "movie"
+    prepared = prepared if prepared is not None else _prepare_catalog(server_id, kind, source, config)
+    normalized, raw_rows, details = (prepared[key] for key in ("normalized", "raw_rows", "details"))
+    baseline = not bool(state.get("initialized"))
+    result = []
+    corrections = prepared["corrections"]
     priority = getattr(client, "enrichment_priority", lambda _item, _kind: 0)
     normalized.sort(key=lambda item: (priority(item, kind), vod._sort_item_id(item)))
     for base in normalized:
@@ -140,23 +313,8 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
         extension = vod.clean_text(vod._first_value(sources, ("container_extension",)), 8)
         if movie:
             item["containerExtension"] = extension.lower() if SAFE_EXTENSION.fullmatch(extension) else None
-        match_item = item
-        if movie and evidence is not None:
-            facts = evidence.load(item)
-            if facts:
-                match_item = dict(item, _identityEvidence=facts)
-        metadata = None
-        if resolution_queue is not None and resolution_queue.defer_cached_miss(server_id, kind, match_item):
-            reader = getattr(client, "_identity_cache", None)
-            if callable(reader):
-                key, identifier, title, year = _enrichment_identity(match_item, kind)
-                cached, _fresh, _rejected = reader(key, match_item, kind, identifier, title, year)
-                if cached and cached.get("matchStatus") == "no_match":
-                    metadata = dict(cached)
-                    client.stats["cacheHits"] = client.stats.get("cacheHits", 0) + 1
-                    client.stats["queueDeferred"] = client.stats.get("queueDeferred", 0) + 1
-        if metadata is None:
-            metadata = client.enrich(match_item, kind)
+        match_item = _matching_item(item, row, kind, evidence)
+        metadata = _resolve_metadata(client, server_id, kind, match_item, resolution_queue)
         correction = corrections.get(provider_id)
         rejected_identity = bool(metadata.get("rejectedIdentity")) or bool(correction and correction.get("rejectIdentity"))
         if rejected_identity:
@@ -556,8 +714,11 @@ def epg_references(epg_dir: Path | None, server_id: str) -> dict:
 
 def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClient,
           now: str, epg_dir: Path | None = None, fetch_episodes=False,
-          max_episode_requests=600, timings: dict | None = None) -> dict:
+          max_episode_requests=600, timings: dict | None = None,
+          tmdb_workers: int = 1) -> dict:
     build_started = time.monotonic()
+    if type(tmdb_workers) is not int or not 1 <= tmdb_workers <= 3:
+        raise vod.CatalogBuildError("Metadata worker count must be between 1 and 3.")
     output.mkdir(parents=True, exist_ok=True)
     if len({server_id for server_id, _source, _config in sources}) != len(sources):
         raise vod.CatalogBuildError("Each app server must be selected once.")
@@ -573,7 +734,7 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
     states = []
     # Each provider gets an independent session, cache directory and fair quota.
     # Refreshing three independent episode inventories can overlap their I/O;
-    # the shared TMDB client and catalogue publication remain sequential.
+    # Catalogue publication remains sequential after bounded enrichment.
     episode_elapsed = {}
     def refresh_episodes(entry, quota, deadline=90, previous=None):
         server_id, source, config = entry
@@ -623,6 +784,18 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
     evidence = MovieEvidenceCollector(cache / "provider-evidence",
         configs={server_id: config for server_id, _source, config in sources if config}, max_requests=0, max_seconds=0)
     resolution_queue = ResolutionQueue(cache / "resolution-queue.json", policy_version=MATCH_STRATEGY, now=now)
+    prefetched = None
+    prepared_groups = {}
+    if tmdb_workers > 1:
+        metadata_started = time.monotonic()
+        for server_id, source, config in sources:
+            for kind in ("movie", "series"):
+                prepared_groups[(server_id, kind)] = _prepare_catalog(server_id, kind, source, config)
+        groups = [{"serverId": server_id, "kind": kind, "prepared": prepared_groups[(server_id, kind)]}
+                  for server_id, _source, _config in sources for kind in ("movie", "series")]
+        prefetched = _prefetch_metadata(groups, client, tmdb_workers, evidence, resolution_queue)
+        del groups
+        metadata_seconds += time.monotonic() - metadata_started
     tmdb_limit = client.max_requests
     groups_remaining = len(sources) * 2
     for position, (server_id, source, config) in enumerate(sources):
@@ -639,12 +812,15 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
             # Give every server and content type a share of incremental metadata
             # work. Cached titles consume no HTTP budget. Never let server 1's
             # large library prevent later servers from being enriched.
-            used = client.stats.get("requests", 0)
-            client.max_requests = used + max(0, tmdb_limit - used) // groups_remaining
-            reset_time(45)
+            if prefetched is None:
+                used = client.stats.get("requests", 0)
+                client.max_requests = used + max(0, tmdb_limit - used) // groups_remaining
+                reset_time(45)
             metadata_started = time.monotonic()
-            catalogs.append(make_items(server_id, kind, source, state, client, now, config,
-                                       episodes, episode_stats["statusBySeries"], evidence, resolution_queue))
+            catalogs.append(make_items(server_id, kind, source, state, prefetched or client, now, config,
+                                       episodes, episode_stats["statusBySeries"], evidence,
+                                       None if prefetched else resolution_queue,
+                                       prepared_groups.pop((server_id, kind), None)))
             metadata_seconds += time.monotonic() - metadata_started
             groups_remaining -= 1
         client.max_requests = tmdb_limit
@@ -892,6 +1068,8 @@ def main(argv=None):
     parser.add_argument("--fetch-series-details", action="store_true")
     parser.add_argument("--max-series-requests", type=int, default=600)
     parser.add_argument("--max-tmdb-requests", type=int, default=1500)
+    parser.add_argument("--tmdb-workers", type=int, default=1,
+                        help="Parallel metadata groups (1-3); each keeps a fixed fair request quota.")
     parser.add_argument("--backfill-release-dates", action="append", metavar="SERVER",
                         help="Warm current-year English movie metadata caches for selected offline servers; do not publish.")
     parser.add_argument("--backfill-max-seconds", type=float, default=600)
@@ -909,6 +1087,8 @@ def main(argv=None):
     selected = [vod.normalize_server_id(value) for value in (args.server or vod.DEFAULT_SERVERS)]
     if len(selected) != len(set(selected)):
         raise vod.CatalogBuildError("Each app server must be selected once.")
+    if not 1 <= args.tmdb_workers <= 3:
+        raise vod.CatalogBuildError("Metadata worker count must be between 1 and 3.")
     if not math.isfinite(args.backfill_max_seconds) or not 1 <= args.backfill_max_seconds <= 900:
         raise vod.CatalogBuildError("Release-date backfill time budget is invalid.")
     if (not 1 <= args.resolution_limit <= 1000 or not 0 <= args.max_provider_detail_requests <= 200
@@ -916,6 +1096,7 @@ def main(argv=None):
         raise vod.CatalogBuildError("Movie resolution limits or mode are invalid.")
     backfill_servers = [vod.normalize_server_id(value) for value in (args.backfill_release_dates or [])]
     if backfill_servers and (not args.input_dir or args.server or args.fetch_series_details or args.validate_only
+                             or args.tmdb_workers != 1
                              or len(backfill_servers) != len(set(backfill_servers))):
         raise vod.CatalogBuildError("Release-date backfill requires only offline selected-server inputs.")
     if args.validate_only:
@@ -986,7 +1167,8 @@ def main(argv=None):
         timings = {}
         index = build(args.output_dir, args.cache_dir, sources, client,
                       vod.generated_timestamp(args.now_utc), args.epg_dir,
-                      args.fetch_series_details, args.max_series_requests, timings=timings)
+                      args.fetch_series_details, args.max_series_requests, timings=timings,
+                      tmdb_workers=args.tmdb_workers)
     finally:
         client.close()
     print(f"SkyTVPlayer: published catalogs and Home feeds for {index['serverCount']} servers.")

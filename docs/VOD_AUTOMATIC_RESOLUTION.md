@@ -8,19 +8,25 @@ publication validation and the frozen live-channel matching engine are preserved
 
 - Preserve identity-bearing colon prefixes such as `BTS:`, `NFT:` and `IT:`.
   Only established locale/technical decorations are removed.
-- Inspect at most five complete search pages. Deduplicate TMDB IDs, reject
+- Inspect at most eight complete search pages. Deduplicate TMDB IDs, reject
   inconsistent/partial responses, and stop early when ambiguity is established.
   Reaching a cap or transport failure is deferred rather than proof of no match.
 - Inspect official alternative-title proof for at most three eligible candidates.
   An alias or evidence-assisted acceptance requires checking every eligible
   candidate in that complete bounded search set.
+- A record-bound provider IMDb ID first uses TMDB `/find` in the correct movie
+  or TV lane. A unique ID must agree with any supplied/reviewed ID, and details
+  must corroborate the same IMDb ID, full title or official alias, and year.
+  Failed, malformed or contradictory discovery defers; only an empty correct-kind
+  result falls back to ordinary title search. Verified old positives survive
+  transient discovery failures.
 - Optional provider facts can distinguish a small ambiguous candidate set using
   the same IMDb ID, or a matching director plus two distinct cast members. The
   display title/year must still pass; runtime can veto but cannot select a film.
   Popularity, artwork and English provider labels never choose an identity.
 - Evidence-assisted caches additionally bind the provider content ID, full
   display title, source fingerprint and a derived digest of the actual facts.
-  Old negative results retry under strategy 2; verified positive caches remain
+  Old negative results retry under strategy 3; verified positive caches remain
   reusable under the existing identity proof policy.
 
 ## Daily queue and targeted details
@@ -78,10 +84,17 @@ live output 7m10s and current-year prewarm 3m33s. Cache restore/save took second
   candidate: 9.584s reparsing versus 0.256s prepared lookup. This is a local
   microbenchmark, not a promised end-to-end workflow speedup.
 
-The shared TMDB client remains sequential; no unsynchronized request counter or
-cache write is shared between workers. All ordinary identity, checksum, secret,
-size, full-server and final Pages validation gates remain in place. Measure the
-first deployed run and warm-cache runs before claiming a total speedup.
+The publisher enables `--tmdb-workers 3` (CLI default: 1). The six movie/series
+groups use isolated clients and sessions, fixed fair shares of the remaining
+1,500-request cap after trending, and 45 seconds of active I/O per group.
+One deterministic owner handles each physical cache key; different reviewed
+constraints and bound evidence remain distinct. Fixed shares are not rolled
+over, so unused requests are reported as `parallelUnusedRequests`. All sessions
+share a 20-request/second pace and bounded HTTP 429 cooldown. Normalization is
+prepared once, all enrichment joins before sequential serialization/validation,
+and only a fully validated publication switches the public index. All ordinary
+identity, checksum, secret, size, full-server and final Pages gates remain.
+Measure deployed runs before claiming an end-to-end speedup.
 
 ## Deployed verification on October 21, 2026
 
@@ -104,3 +117,11 @@ provider transport workflow has a `vod_evidence` mode for one approved public
 movie identity, capped at one HTTP attempt and 15 seconds. It reports only
 sanitized counts and availability flags; the existing `live` mode remains the
 default. Optional lookup failure is an observation, not publication permission.
+
+The single-request follow-up probe (`39643747184`) found a same-host redirect
+with a changed path and non-equivalent query. It was refused before credentials
+could be replayed to a different API route. This observation does not establish
+that every optional detail failure has the same cause; recovering provider facts
+requires an authenticated endpoint that satisfies the configured transport contract.
+The diagnostic now reports only fixed redirect decisions/reasons and boolean
+constraints, with no raw redirect URL, path, host or query.
