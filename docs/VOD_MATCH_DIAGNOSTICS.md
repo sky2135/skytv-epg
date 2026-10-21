@@ -22,7 +22,7 @@ provider records while sharing the diagnostic result.
 
 The original October 21 cache retained only generic `no_match` values. Its earlier
 response and rejection branch cannot be reconstructed from those values.
-Matching strategy 2 now retains a sanitized reason in private cache envelopes
+Matching strategy 3 retains a sanitized reason in private cache envelopes
 and the automatic resolution queue. Diagnostic schema 2 records that strategy's
 current decision, search completeness and fetched-page candidates. An incomplete
 or early ambiguity exit never claims uniqueness across unseen pages. None of

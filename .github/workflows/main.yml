@@ -990,6 +990,7 @@ jobs:
               --cache-dir .build/vod-cache
               --epg-dir public/EPG
               --fetch-series-details
+              --tmdb-workers 3
           )
           if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
             app_command+=(--allow-insecure-http)

@@ -35,8 +35,8 @@ IMAGE_PATH = re.compile(r"/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)\Z", re.I)
 YOUTUBE_KEY = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 STATUSES = {"matched_id", "matched_search", "no_match", "unavailable"}
 IDENTITY_POLICY = 2
-MATCH_STRATEGY = 2
-MAX_SEARCH_PAGES = 5
+MATCH_STRATEGY = 3
+MAX_SEARCH_PAGES = 8
 MAX_ALIAS_CANDIDATES = 3
 DIAGNOSTIC_REASONS = frozenset({
     "matched_id", "matched_search", "matched_alias", "ambiguous_title_year",
@@ -144,6 +144,7 @@ def _identity_evidence(item: Mapping[str, Any], kind: str) -> dict[str, Any] | N
     fingerprint = raw.get("fingerprint")
     if (not isinstance(content_id, str) or raw.get("contentId") != content_id
             or not re.fullmatch(rf"server_[1-9][0-9]?:{kind}:[0-9]{{1,10}}", content_id)
+            or ("id" in item and str(item["id"]) != content_id.rsplit(":", 1)[1])
             or not isinstance(fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", fingerprint)):
         return None
 
@@ -172,13 +173,14 @@ def _identity_evidence(item: Mapping[str, Any], kind: str) -> dict[str, Any] | N
 
 
 def _evidence_matches(details: Mapping[str, Any], evidence: Mapping[str, Any]) -> bool:
-    imdb = details.get("imdb_id")
     external = details.get("external_ids")
-    if not imdb and isinstance(external, Mapping):
-        imdb = external.get("imdb_id")
     # A supplied external ID is a constraint, never an optional score bonus.
     if evidence["imdbId"]:
-        return imdb == evidence["imdbId"]
+        identifiers = [details.get("imdb_id")]
+        if isinstance(external, Mapping):
+            identifiers.append(external.get("imdb_id"))
+        present = [value for value in identifiers if value not in (None, "")]
+        return bool(present) and all(value == evidence["imdbId"] for value in present)
     credits = details.get("credits")
     if not isinstance(credits, Mapping):
         return False
@@ -665,6 +667,43 @@ class TmdbClient:
         match_status = "matched_id" if identifier else "matched_search"
         details = None
         alias_match = False
+        if evidence and evidence["imdbId"]:
+            # Bound external identity avoids choosing among same-name works or
+            # an incomplete title search. It does not relax display title/year
+            # checks, supplied IDs, reviewed rejections, or the global budget.
+            if not year:
+                return no_match("missing_identity")
+            state, found = self._request(f"/find/{evidence['imdbId']}", {"external_source": "imdb_id"})
+            if state != "ok" or found is None:
+                return unavailable()
+            results = found.get("movie_results" if kind == "movie" else "tv_results")
+            if (not isinstance(results, list) or len(results) > 100
+                    or any(not isinstance(candidate, dict)
+                           or type(candidate.get("id")) is not int or not _identifier(candidate["id"])
+                           or candidate.get("media_type", api_kind) != api_kind for candidate in results)):
+                self.stats["errors"] += 1
+                return unavailable()
+            found_ids = {_identifier(candidate["id"]) for candidate in results}
+            self.last_match_diagnostic.update(candidateCount=len(found_ids),
+                                              candidateIds=sorted(found_ids, key=int))
+            if len(found_ids) > 1:
+                return unavailable("ambiguous_title_year")
+            if found_ids:
+                found_id = next(iter(found_ids))
+                if found_id in rejected_ids:
+                    rejected = True
+                    return no_match("title_mismatch")
+                if identifier is not None and found_id != identifier:
+                    rejected = True
+                    return unavailable()
+                identifier = found_id
+                state, details = self._request(f"/{api_kind}/{identifier}",
+                                               {"append_to_response": "credits,videos,alternative_titles,external_ids"})
+                if state != "ok" or not details or _identifier(details.get("id")) != identifier:
+                    if state == "ok":
+                        self.stats["errors"] += 1
+                    rejected = True
+                    return unavailable()
         if not identifier:
             # A year is necessary to distinguish remakes, reboots and common titles.
             if not title or not year or "://" in title or not _normalized_title(title):

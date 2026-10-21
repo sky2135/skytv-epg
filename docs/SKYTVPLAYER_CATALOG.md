@@ -303,7 +303,12 @@ publication.
 TMDB work shares its request budget across all six server and media-type
 groups, prioritizing uncached titles before stale metadata. It uses a
 30-second elapsed budget for trending and 45 seconds per group for title
-enrichment. Provider episode requests share the global budget across all
+enrichment. The scheduled publisher enables three metadata workers; standalone
+CLI builds remain serial unless `--tmdb-workers 2` or `3` is selected. Workers
+use isolated clients, deterministic cache ownership, fixed fair request quotas,
+and shared request pacing/429 cooldown. All enrichment finishes before final
+artifact validation and index publication. Unused quota is reported and does
+not increase the total request cap. Provider episode requests share the global budget across all
 three servers, with a 90-second elapsed budget per server. Individual in-flight
 requests remain subject to their network timeouts. Attempted uncached TMDB
 failures are cached for one day so one failing title cannot monopolize later
