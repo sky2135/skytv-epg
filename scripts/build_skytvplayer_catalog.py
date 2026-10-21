@@ -10,6 +10,7 @@ import math
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -18,7 +19,7 @@ from urllib.parse import urlsplit
 import requests
 
 import build_vod_catalogs as vod
-from vod_tmdb import TmdbClient
+from vod_tmdb import TmdbClient, _date as tmdb_date, _enrichment_identity
 from vod_series import enrich_series
 from vod_reviewed_corrections import apply_reviewed_correction, correction_for
 
@@ -199,6 +200,85 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
         result.append(item)
     result.sort(key=vod._sort_item_id)
     return result
+
+
+def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
+                          client: TmdbClient, now: str, *,
+                          max_elapsed_seconds: float = 600) -> dict[str, Any]:
+    """Warm only verified metadata caches from selected offline movie inputs.
+
+    Publication and normal per-group budgets are deliberately separate. A year
+    in a provider title selects work to check; it never supplies a release day.
+    """
+    seconds = float(max_elapsed_seconds)
+    if not math.isfinite(seconds) or not 1 <= seconds <= 900:
+        raise vod.CatalogBuildError("Release-date backfill time budget is invalid.")
+    year = datetime.fromisoformat(now.replace("Z", "+00:00")).year
+    started = time.monotonic()
+    getattr(client, "reset_elapsed_budget", lambda _seconds: None)(seconds)
+    priority = getattr(client, "enrichment_priority", lambda _item, _kind: 0)
+    cache_reader = getattr(client, "_identity_cache", None)
+    summaries, candidates = [], []
+    selected = [vod.normalize_server_id(server_id) for server_id, _source in sources]
+    if not selected or len(selected) != len(set(selected)):
+        raise vod.CatalogBuildError("Each backfill server must be selected once.")
+    for server_id, source in sources:
+        server_id = vod.normalize_server_id(server_id)
+        normalized, _stats = vod.normalize_catalog(
+            source["get_vod_streams"], source.get("get_vod_categories", []), source.get("vod_details", {}),
+            kind="movie", label=f"{server_id} release-date backfill", blocked_artwork_hostname="")
+        raw_rows = {vod.normalize_item_id(row.get("stream_id", row.get("id"))): row
+                    for row in vod.normalize_rows(source["get_vod_streams"], "get_vod_streams")}
+        details = vod.normalize_detail_map(source.get("vod_details", {}), kind="movie", label="vod_details")
+        summary = dict(serverId=server_id, movieCount=len(normalized), candidateCount=0, processedCount=0,
+                       knownCachedDatesBefore=0, matchedDates=0, newlyMatchedDates=0, noMatch=0, unavailable=0)
+        summaries.append(summary)
+        for base in normalized:
+            item = apply_reviewed_correction(server_id, "movie", base)
+            item["contentId"] = f"{server_id}:movie:{item['id']}"
+            if item.get("languages") != ["en"] or tmdb_date(item.get("releaseDate")):
+                continue
+            key, identifier, title, identity_year = _enrichment_identity(item, "movie")
+            if identity_year != str(year):
+                continue
+            known_before = None
+            if callable(cache_reader):
+                cached, _fresh, _rejected = cache_reader(key, item, "movie", identifier, title, identity_year)
+                known_before = bool(cached and str(cached.get("matchStatus", "")).startswith("matched_")
+                                    and tmdb_date(cached.get("releaseDate")))
+            provider_sources = vod._nested_sources(raw_rows.get(item["id"], {}), details.get(item["id"], {}))
+            added = timestamp(vod._first_value(provider_sources, ("added", "added_at", "created_at")))
+            added_epoch = datetime.fromisoformat(added.replace("Z", "+00:00")).timestamp() if added else 0
+            candidates.append((priority(item, "movie"), -added_epoch, vod._sort_item_id(item), item, summary, known_before))
+            summary["candidateCount"] += 1
+            summary["knownCachedDatesBefore"] += known_before is True
+    candidates.sort(key=lambda candidate: candidate[:3])
+    stopped = "complete"
+    for _priority, _added, _id, item, summary, known_before in candidates:
+        if time.monotonic() - started >= seconds:
+            stopped = "time_budget"
+            break
+        before = client.stats.get("requests", 0)
+        if before >= client.max_requests:
+            stopped = "request_budget"
+            break
+        metadata = client.enrich(item, "movie")
+        summary["processedCount"] += 1
+        status = str(metadata.get("matchStatus", ""))
+        date = tmdb_date(metadata.get("releaseDate"))
+        matched = status.startswith("matched_") and date is not None and date[:4] == str(year)
+        summary["matchedDates"] += matched
+        summary["newlyMatchedDates"] += matched and known_before is False and client.stats.get("requests", 0) > before
+        summary["noMatch"] += status == "no_match"
+        summary["unavailable"] += status == "unavailable"
+    fields = ("candidateCount", "processedCount", "knownCachedDatesBefore", "matchedDates", "newlyMatchedDates")
+    stats_fields = ("requests", "cacheHits", "cacheMisses", "staleFallbacks", "matches", "noMatches", "errors",
+                    "budgetExhausted", "elapsedBudgetExhausted", "retries", "cacheWriteErrors")
+    return {"schemaVersion": 1, "mode": "release_date_backfill", "generatedAt": now, "year": year,
+            "targetServers": selected, "servers": summaries, **{field: sum(row[field] for row in summaries) for field in fields},
+            "maxRequests": client.max_requests, "maxElapsedSeconds": seconds,
+            "elapsedSeconds": round(max(0, time.monotonic() - started), 3), "stoppedReason": stopped,
+            "stats": {field: client.stats.get(field, 0) for field in stats_fields}}
 
 
 def has_series_inventory(item: Mapping[str, Any]) -> bool:
@@ -642,6 +722,9 @@ def main(argv=None):
     parser.add_argument("--fetch-series-details", action="store_true")
     parser.add_argument("--max-series-requests", type=int, default=600)
     parser.add_argument("--max-tmdb-requests", type=int, default=1500)
+    parser.add_argument("--backfill-release-dates", action="append", metavar="SERVER",
+                        help="Warm current-year English movie metadata caches for selected offline servers; do not publish.")
+    parser.add_argument("--backfill-max-seconds", type=float, default=600)
     parser.add_argument("--allow-insecure-http", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args(argv)
@@ -651,12 +734,32 @@ def main(argv=None):
     selected = [vod.normalize_server_id(value) for value in (args.server or vod.DEFAULT_SERVERS)]
     if len(selected) != len(set(selected)):
         raise vod.CatalogBuildError("Each app server must be selected once.")
+    if not math.isfinite(args.backfill_max_seconds) or not 1 <= args.backfill_max_seconds <= 900:
+        raise vod.CatalogBuildError("Release-date backfill time budget is invalid.")
+    backfill_servers = [vod.normalize_server_id(value) for value in (args.backfill_release_dates or [])]
+    if backfill_servers and (not args.input_dir or args.server or args.fetch_series_details or args.validate_only
+                             or len(backfill_servers) != len(set(backfill_servers))):
+        raise vod.CatalogBuildError("Release-date backfill requires only offline selected-server inputs.")
     if args.validate_only:
         validate(args.output_dir, epg_dir=args.epg_dir, expected_servers=selected)
         print("SkyTVPlayer publication verified.")
         return 0
     if not 0 <= args.max_series_requests <= 5000 or not 0 <= args.max_tmdb_requests <= 20000:
         raise vod.CatalogBuildError("App enrichment request budgets are invalid.")
+    if backfill_servers:
+        if args.cache_dir.resolve() == args.output_dir.resolve() or args.output_dir.resolve() in args.cache_dir.resolve().parents:
+            raise vod.CatalogBuildError("Private app caches must stay outside the publication directory.")
+        offline = [(server_id, vod.load_offline_inputs(args.input_dir, server_id)) for server_id in backfill_servers]
+        client = TmdbClient(args.cache_dir / "tmdb", token=os.environ.get("TMDB_READ_ACCESS_TOKEN", ""),
+                            api_key=os.environ.get("TMDB_API_KEY", ""), max_requests=args.max_tmdb_requests,
+                            max_elapsed_seconds=args.backfill_max_seconds)
+        try:
+            report = backfill_release_dates(offline, client, vod.generated_timestamp(args.now_utc),
+                                            max_elapsed_seconds=args.backfill_max_seconds)
+        finally:
+            client.close()
+        print(json.dumps(report, sort_keys=True))
+        return 0
     sources = []
     session = requests.Session()
     session.trust_env = False

@@ -310,6 +310,26 @@ failures are cached for one day so one failing title cannot monopolize later
 runs; titles deferred by a budget remain eligible on the next run. Cached
 trending results older than seven days are not published as current trends.
 
+Before the normal app build, the workflow runs a separate release-date backfill
+for Server 1 movies tagged English-only (`languages == ["en"]`) whose displayed
+year is the current build year and whose full release date is missing. This
+phase has its own limit of 3,000 TMDB requests and 600 seconds. It uses the same
+title/year identity checks, reviewed corrections, and private metadata cache as
+the normal builder. Uncached candidates are processed before stale or fresh
+cache entries, with the newest provider additions first within each cache tier.
+The provider's added date only controls processing order; it never becomes a
+movie release date. Ambiguous matches remain unknown.
+
+The backfill writes only sanitized private cache entries and a count summary.
+The normal three-server build then consumes those entries and publishes verified
+`releaseDate` values in `YYYY-MM-DD` form. The normal per-server/type request and
+time allowances are unchanged. This phase does not fetch provider APIs or
+publish a separate Server 1 index. It can also be run against captured inputs:
+
+```text
+python scripts/build_skytvplayer_catalog.py --input-dir .build/vod-inputs --cache-dir .build/vod-cache --backfill-release-dates server_1 --max-tmdb-requests 3000 --backfill-max-seconds 600
+```
+
 Build from already captured private inventory snapshots:
 
 ```text
