@@ -389,4 +389,3 @@ class ResolutionQueue:
         self._atomic(directory / "resolution_queue.csv", csv_text)
         return {"recordCount": len(rows), "reasonCounts": report["reasonCounts"],
                 "jsonFile": "resolution_queue.json", "csvFile": "resolution_queue.csv"}
-
