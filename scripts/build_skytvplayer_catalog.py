@@ -287,6 +287,17 @@ def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
                     summary["knownCachedDatesBefore"] += 1
                     summary["candidateCount"] += 1
                     summary["cachedDatesReused"] = summary.get("cachedDatesReused", 0) + 1
+                    # Another publication phase may have resolved an existing
+                    # queue row. Reconcile only the identical source/evidence
+                    # key; resolved catalogue rows must not create new entries.
+                    try:
+                        queue_key, _prepared = queue._identity(server_id, "movie", item)
+                    except (ValueError, TypeError, KeyError, OverflowError):
+                        queue_key = None
+                    if queue_key in queue.entries:
+                        queue.record_result(server_id, "movie", item, cached,
+                            diagnostic={"reason": cached["matchStatus"], "candidateIds": [cached["tmdbId"]]},
+                            attempted=False)
                     continue
             provider_sources = vod._nested_sources(raw_rows.get(item["id"], {}), details.get(item["id"], {}))
             added = timestamp(vod._first_value(provider_sources, ("added", "added_at", "created_at")))

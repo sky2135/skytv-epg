@@ -85,6 +85,56 @@ class ResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(second.items, [])
         self.assertEqual(result["servers"][0]["queueDeferred"], 1)
 
+    def test_fresh_publisher_match_reconciles_only_an_existing_queue_identity(self):
+        queue = self.queue()
+        initial = RecordingClient(results={"1": {"matchStatus": "no_match", "releaseDate": None}})
+        initial.last_match_diagnostic = {"reason": "ambiguous_title_year", "candidateIds": ["101", "102"]}
+        app.backfill_release_dates([("server_1", source(movie(1)))], initial, NOW, queue=queue)
+        key, history = next(iter(queue.entries.items()))
+        history = copy.deepcopy(history)
+        data = source(movie(1), movie(2, "Another Film (2026)"))
+        responses = []
+        for identifier, title in ((101, "Example Film"), (102, "Another Film")):
+            responses.extend((FakeResponse({"results": [{"id": identifier, "title": title, "release_date": "2026-10-10"}]}),
+                              FakeResponse({**movie_details(identifier), "title": title, "release_date": "2026-10-10"})))
+        publisher = tmdb.TmdbClient(self.cache / "tmdb", token="private-token", session=FakeSession(*responses))
+        rows = app.make_items("server_1", "movie", data, app.load_state(self.cache / "inventory.json"), publisher, NOW)
+        self.assertEqual([row["releaseDate"] for row in rows], ["2026-10-10", "2026-10-10"])
+        replay = tmdb.TmdbClient(self.cache / "tmdb", session=FakeSession())
+        result = app.backfill_release_dates([("server_1", data)], replay, NOW,
+            queue=queue, report_dir=self.root / "reports")
+        self.assertEqual(result["processedCount"], 0)
+        self.assertEqual(result["servers"][0]["cachedDatesReused"], 2)
+        self.assertEqual(replay.stats["requests"], 0)
+        self.assertEqual(set(queue.entries), {key})
+        reconciled = queue.entries[key]
+        self.assertEqual(reconciled["reason"], "matched_search")
+        self.assertEqual(reconciled["candidateIds"], ["101"])
+        for field in ("attempts", "lastAttemptAt", "firstSeenAt", "sourceFingerprint", "selectionOrder"):
+            self.assertEqual(reconciled[field], history[field], field)
+        self.assertEqual(reconciled["failureStreak"], 0)
+        report = json.loads((self.root / "reports/resolution_queue.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["reasonCounts"], {"matched_search": 1})
+
+    def test_fresh_cache_reconciliation_does_not_cross_existing_evidence_binding(self):
+        data = source(movie(1))
+        prepared, _stats = vod.normalize_catalog(data["get_vod_streams"], [], {}, kind="movie", label="test")
+        item = dict(prepared[0], contentId="server_1:movie:1", providerLastModified=None,
+                    _identityEvidence={"contentId": "server_1:movie:1", "fingerprint": "f" * 64, "imdbId": "tt1234567"})
+        queue = self.queue()
+        queue.record_result("server_1", "movie", item, {"matchStatus": "no_match"},
+            {"reason": "ambiguous_title_year", "candidateIds": ["101", "102"]})
+        key, history = next(iter(queue.entries.items()))
+        history = copy.deepcopy(history)
+        session = FakeSession(FakeResponse({"results": [{"id": 101, "title": "Example Film", "release_date": "2026-10-10"}]}),
+                              FakeResponse({**movie_details(), "release_date": "2026-10-10"}))
+        publisher = tmdb.TmdbClient(self.cache / "tmdb", token="private-token", session=session)
+        app.make_items("server_1", "movie", data, app.load_state(self.cache / "inventory.json"), publisher, NOW)
+        replay = tmdb.TmdbClient(self.cache / "tmdb", session=FakeSession())
+        app.backfill_release_dates([("server_1", data)], replay, NOW, queue=queue)
+        self.assertEqual(set(queue.entries), {key})
+        self.assertEqual(queue.entries[key], history)
+
     def test_provider_failure_keeps_a_reportable_unresolved_record_and_does_not_raise(self):
         client = RecordingClient(results={"1": {"matchStatus": "no_match", "releaseDate": None}})
         client.last_match_diagnostic = {"reason": "ambiguous_title_year", "candidateIds": ["101", "102"]}

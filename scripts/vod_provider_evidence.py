@@ -212,6 +212,11 @@ class MovieEvidenceCollector:
             detail = vod._request_panel_json_once(self.session, config, "get_vod_info",
                 item_id=item["id"], maximum_bytes=512 * 1024, budget=self.budget)
             facts = normalize_facts(detail)
+            if value is not None and any(value["facts"].values()) and not any(facts.values()):
+                # An empty refresh cannot erase an unchanged asset's existing
+                # facts. Keep their original checkedAt so this failed refresh
+                # does not silently renew the evidence freshness period.
+                raise ValueError("Movie evidence refresh returned no facts")
             value = {"version": 1, "contentId": item["contentId"],
                      "sourceFingerprint": source_fingerprint(item), "checkedAt": self.now, "facts": facts}
             self._check_secrets(value, config)
