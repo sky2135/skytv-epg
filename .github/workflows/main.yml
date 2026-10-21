@@ -922,6 +922,21 @@ jobs:
           restore-keys: |
             skytvplayer-vod-v1-${{ runner.os }}-
 
+      - name: Backfill Server 1 current-year English movie release dates
+        shell: bash
+        env:
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 12m \
+            python -u scripts/build_skytvplayer_catalog.py \
+              --input-dir .build/vod-inputs \
+              --cache-dir .build/vod-cache \
+              --backfill-release-dates server_1 \
+              --max-tmdb-requests 3000 \
+              --backfill-max-seconds 600
+
       - name: Build SKYTVPlayer movie and TV home database
         id: skytvplayer_catalog
         shell: bash
