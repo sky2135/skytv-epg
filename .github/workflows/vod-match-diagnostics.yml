@@ -1,0 +1,50 @@
+name: Inspect unmatched VOD metadata
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.repository }}-vod-match-diagnostics
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Replay public movie identities without publishing
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned metadata client dependency
+        run: |
+          python -m pip install --only-binary=:all: requests==2.32.5
+      - name: Run offline diagnostic tests
+        run: python -m unittest discover -s tests -p test_vod_match_diagnostics.py -v
+      - name: Replay the reviewed public input snapshot
+        env:
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          timeout --signal=TERM --kill-after=30s 12m \
+            python -u scripts/diagnose_vod_matches.py \
+              --input data/diagnostics/server1-unmatched-2026-10-21.json \
+              --output .build/vod-match-diagnostics/report.json \
+              --max-requests 900 \
+              --max-seconds 600
+      - name: Retain public identity diagnostic report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-match-diagnostic-${{ github.run_id }}
+          path: .build/vod-match-diagnostics/report.json
+          if-no-files-found: warn
+          retention-days: 7
