@@ -3,8 +3,9 @@
 `main.yml` retains the existing daily live schedule and manual trigger. It
 refreshes provider channel inventories, Google Sheets mappings, real programme
 schedules, logos and live app metadata. It never fetches VOD inventories or
-waits for TMDB enrichment. `vod.yml` is manually dispatched when needed and
-refreshes all three servers' movie/series inventories, categories, languages,
+waits for TMDB enrichment. `vod.yml` runs daily at 4:47 a.m. America/New_York
+time and can also be manually dispatched. It refreshes all three servers'
+movie/series inventories, categories, languages,
 release dates, episode metadata and Home shelves. It never runs channel matching
 or rewrites Google Sheets. No new credentials are required.
 
@@ -28,6 +29,28 @@ Composition updates its paths, SHA-256 hashes and byte counts from the selected
 live guide. Movie, series and Home payloads remain unchanged. Component generation
 timestamps are never refreshed merely because the other component changed.
 All complete-site publication checks and configured-secret scans still run.
+
+## Poster-assisted VOD identity matching
+
+The VOD refresh builds a shared candidate index from identity-verified TMDB
+metadata already in its private cache. A provider's exact public TMDB poster
+filename can suggest an ID across servers. The matcher fetches current official
+details and requires the title or official alias, year, media kind and poster
+path to agree. Provider evidence, supplied IDs and reviewed rejections remain
+hard constraints. Known poster collisions do not establish an identity.
+
+A complete title/year search with at most three ambiguous candidates can also
+use their official default or alternate posters to resolve one unique match.
+Poster hashes do not encode TMDB IDs; a title without a known candidate still
+needs normal bounded search. The existing request limits, three-worker cap and
+per-group time limits remain in place. Daily runs gradually process the backlog.
+
+New poster proofs use a separate cache-key policy so old misses cannot hide the
+new evidence. Validated existing matches are reused. Each successful VOD build
+publishes `skytvplayer/identity_coverage.json`, with verified ID coverage by
+server, movie/series and published English/Hindi/Punjabi language labels.
+Provider ID hints are not verified IDs. Unknown languages are reported
+separately, and multilingual rows can appear in more than one language total.
 
 ## Incremental channel matching
 

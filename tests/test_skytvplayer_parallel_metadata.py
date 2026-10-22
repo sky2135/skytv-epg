@@ -43,17 +43,19 @@ class Response:
 
 
 class Sessions:
-    def __init__(self, *, failing=False, retry=False):
+    def __init__(self, *, failing=False, retry=False, posters=None):
         self.lock = threading.Lock()
         self.sessions, self.calls = [], []
         self.active = self.peak = 0
         self.failing, self.retry = failing, retry
+        self.posters = posters or {}
 
     def factory(self, *_args):
         parent = self
 
         class Session:
             closed = False
+            close_count = 0
 
             def get(self, url, **kwargs):
                 with parent.lock:
@@ -73,13 +75,15 @@ class Sessions:
                         "title" if movie else "name": title,
                         "original_title" if movie else "original_name": title,
                         "release_date" if movie else "first_air_date": "2026-01-02",
-                        "original_language": "en", "adult": False, "genres": []})
+                        "original_language": "en", "adult": False, "genres": [],
+                        "poster_path": parent.posters.get(identifier)})
                 finally:
                     with parent.lock:
                         parent.active -= 1
 
             def close(self):
                 self.closed = True
+                self.close_count += 1
 
         session = Session()
         with self.lock:
@@ -197,6 +201,173 @@ class ParallelMetadataTests(unittest.TestCase):
         self.assertEqual(client.stats["requests"], 6)
         self.assertEqual(len(sessions.calls), 6)
         self.assertTrue(all(session.closed for session in sessions.sessions))
+
+    def test_all_priority_reads_finish_before_any_group_resolves(self):
+        client, sessions = self.client(), Sessions()
+        warmed, children, reads, lock = set(), [], [], threading.Lock()
+
+        class Worker:
+            def __init__(self, *args, **kwargs):
+                self.stats, self.close_count = {"requests": 0}, 0
+                children.append(self)
+
+            def enrichment_priority(self, item, kind):
+                with lock:
+                    warmed.add(item["contentId"])
+                    reads.append(item["contentId"])
+                return 0
+
+            def enrich(self, item, kind):
+                self_test.assertEqual(len(warmed), 6)
+                return {"matchStatus": "unavailable"}
+
+            def close(self):
+                self.close_count += 1
+
+        self_test = self
+        app._prefetch_metadata(self.groups(), client, 3, None, None,
+                               client_factory=Worker, session_factory=sessions.factory)
+        self.assertEqual(len(children), 6)
+        self.assertEqual(len(reads), 6)
+        self.assertTrue(all(child.close_count == 1 for child in children))
+        self.assertTrue(all(session.close_count == 1 for session in sessions.sessions))
+        self.assertEqual(sessions.calls, [])
+
+    def test_priority_warm_failure_closes_every_context_before_any_http(self):
+        client, sessions = self.client(), Sessions()
+        children, calls = [], []
+
+        class Worker:
+            def __init__(self, *args, **kwargs):
+                self.stats, self.close_count = {"requests": 0}, 0
+                children.append(self)
+
+            def enrichment_priority(self, item, kind):
+                if item["contentId"].startswith("server_3:"):
+                    raise RuntimeError("fixture priority failure")
+                return 0
+
+            def enrich(self, item, kind):
+                calls.append(item["contentId"])
+                return {"matchStatus": "unavailable"}
+
+            def close(self):
+                self.close_count += 1
+
+        with self.assertRaisesRegex(RuntimeError, "fixture priority failure"):
+            app._prefetch_metadata(self.groups(), client, 3, None, None,
+                                   client_factory=Worker, session_factory=sessions.factory)
+        self.assertEqual(len(children), 6)
+        self.assertEqual(calls, [])
+        self.assertEqual(sessions.calls, [])
+        self.assertTrue(all(child.close_count == 1 for child in children))
+        self.assertTrue(all(session.close_count == 1 for session in sessions.sessions))
+
+    def test_poster_constraints_cannot_share_different_assets_at_one_physical_key(self):
+        first = self.groups(1)[0]["prepared"]["normalized"][0]
+        second = dict(first, artwork={"posterUrl": "https://image.tmdb.org/t/p/w500/second.jpg"})
+        first = dict(first, artwork={"posterUrl": "https://image.tmdb.org/t/p/w500/first.jpg"})
+        with mock.patch.object(app, "_enrichment_identity", return_value=("same-physical", None, "Film101", "2026")):
+            self.assertNotEqual(app._metadata_result_key(first, "movie", None),
+                                app._metadata_result_key(second, "movie", None))
+            same = dict(first, artwork={"posterUrl": "https://image.tmdb.org/t/p/original/first.jpg"})
+            self.assertEqual(app._metadata_result_key(first, "movie", None),
+                             app._metadata_result_key(same, "movie", None))
+
+    def test_later_verified_cache_warms_earlier_fresh_miss_and_prioritizes_bounded_retry(self):
+        poster = "/verified-poster-fixture.jpg"
+        groups = self.groups(2)
+        missing = groups[0]["prepared"]["normalized"][0]
+        missing.update(id="200", tmdbId=None, contentId="server_1:movie:200",
+                       artwork={"posterUrl": f"https://image.tmdb.org/t/p/w500{poster}", "backdropUrl": None})
+        unrelated = dict(missing, id="100", tmdbId="100", title="Film100 (2026)",
+                         contentId="server_1:movie:100", artwork={"posterUrl": None, "backdropUrl": None})
+        groups[0]["prepared"]["normalized"].append(unrelated)
+        known = groups[1]["prepared"]["normalized"][0]
+        known.update(title=missing["title"], tmdbId="101",
+                     artwork={"posterUrl": f"https://image.tmdb.org/t/p/original{poster}", "backdropUrl": None})
+        client = self.client(limit=2)
+        details = {"id": 101, "title": "Film101", "original_title": "Film101",
+                   "release_date": "2026-01-02", "original_language": "en",
+                   "poster_path": poster, "adult": False, "genres": []}
+        proof = tmdb._detail_identity(details, "movie")
+        proof.update(mediaKind="movie", posterPaths=[poster])
+        client._write_identity_cache(tmdb._enrichment_identity(known, "movie")[0],
+                                     tmdb._metadata(details, "movie", "matched_id"), tmdb.DETAIL_TTL, proof)
+        client._write_identity_cache(tmdb._enrichment_identity(missing, "movie")[0],
+                                     tmdb._empty(None, "no_match"), tmdb.MISS_TTL)
+        self.assertIsNone(client.poster_candidate(missing, "movie"))
+
+        class Deferred:
+            def defer_cached_miss(self, server, kind, item):
+                return item["id"] == "200"
+
+        sessions = Sessions(posters={101: poster})
+        result = app._prefetch_metadata(groups, client, 3, None, Deferred(),
+                                        session_factory=sessions.factory)
+        recovered = result.enrich(missing, "movie")
+        self.assertEqual(recovered["tmdbId"], "101")
+        self.assertEqual(recovered["matchStatus"], "matched_poster")
+        self.assertEqual(result.enrich(known, "movie")["matchStatus"], "matched_id")
+        self.assertEqual(client.stats["requests"], 1)
+        self.assertEqual(len(sessions.calls), 1)
+        self.assertTrue(sessions.calls[0][1].endswith("/movie/101"))
+        self.assertTrue(all(session.close_count == 1 for session in sessions.sessions))
+
+    def test_queue_backoff_remains_for_a_negative_without_verified_poster(self):
+        item = self.groups(1)[0]["prepared"]["normalized"][0]
+
+        class Deferred:
+            def defer_cached_miss(self, *_args):
+                return True
+
+        class Worker:
+            def __init__(self):
+                self.stats = {}
+                self.enrich = mock.Mock(return_value={"matchStatus": "unavailable"})
+            def poster_retry_candidate(self, *_args):
+                return None
+            def _identity_cache(self, *_args):
+                return {"matchStatus": "no_match"}, True, False
+
+        worker = Worker()
+        self.assertEqual(app._resolve_metadata(worker, "server_1", "movie", item, Deferred()),
+                         {"matchStatus": "no_match"})
+        worker.enrich.assert_not_called()
+        self.assertEqual(worker.stats["queueDeferred"], 1)
+
+    def test_serial_priority_warm_reuses_verified_later_cache_without_promoting_matches(self):
+        poster = "/serial-verified-poster.jpg"
+        groups = self.groups(2)
+        missing = groups[0]["prepared"]["normalized"][0]
+        missing.update(tmdbId=None, artwork={"posterUrl": f"https://image.tmdb.org/t/p/w500{poster}",
+                                             "backdropUrl": None})
+        known = groups[1]["prepared"]["normalized"][0]
+        known.update(title=missing["title"], tmdbId="101",
+                     artwork={"posterUrl": f"https://image.tmdb.org/t/p/original{poster}", "backdropUrl": None})
+        sessions = Sessions(posters={101: poster})
+        client = self.client(limit=1, session=sessions.factory())
+        details = {"id": 101, "title": "Film101", "original_title": "Film101",
+                   "release_date": "2026-01-02", "original_language": "en",
+                   "poster_path": poster, "adult": False, "genres": []}
+        proof = tmdb._detail_identity(details, "movie")
+        proof.update(mediaKind="movie", posterPaths=[poster])
+        client._write_identity_cache(tmdb._enrichment_identity(known, "movie")[0],
+                                     tmdb._metadata(details, "movie", "matched_id"), tmdb.DETAIL_TTL, proof)
+        client._write_identity_cache(tmdb._enrichment_identity(missing, "movie")[0],
+                                     tmdb._empty(None, "no_match"), tmdb.MISS_TTL)
+        app._warm_serial_priorities(groups, client, None)
+        self.assertEqual(sessions.calls, [])
+        self.assertEqual(groups[0]["prepared"]["priorities"][missing["id"]], -0.5)
+        self.assertEqual(groups[1]["prepared"]["priorities"][known["id"]], 3)
+        prepared = groups[0]["prepared"]
+        with mock.patch.object(client, "enrichment_priority", side_effect=AssertionError("Duplicate priority read")):
+            items = app.make_items("server_1", "movie", {}, {"items": {}}, client,
+                                   NOW, prepared=prepared)
+        self.assertEqual(items[0]["metadataMatch"], "matched_poster")
+        self.assertEqual(items[0]["tmdbId"], "101")
+        self.assertEqual(prepared["matching_items"], {})
+        self.assertEqual(client.stats["requests"], 1)
 
     def test_parallel_artifacts_equal_serial_and_normalize_only_once(self):
         inputs = source()

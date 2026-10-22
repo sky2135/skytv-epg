@@ -277,6 +277,8 @@ class MatcherIntegrityTests(unittest.TestCase):
             ("vodCatalogBuilderSha256", "scripts/build_vod_catalogs.py"),
             ("appCatalogBuilderSha256", "scripts/build_skytvplayer_catalog.py"),
             ("vodTmdbSha256", "scripts/vod_tmdb.py"),
+            ("vodPosterIndexSha256", "scripts/vod_poster_index.py"),
+            ("vodIdentityCoverageAuditSha256", "scripts/audit_vod_identity_coverage.py"),
             ("vodReviewedCorrectionsSha256", "scripts/vod_reviewed_corrections.py"),
             ("vodReviewedFactsSha256", "data/vod_reviewed_corrections.json"),
             ("channelMetadataFactsSha256", "config/channel_metadata_facts.json"),

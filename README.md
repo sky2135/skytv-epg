@@ -5,8 +5,8 @@
 Live EPG and VOD refreshes run independently. The scheduled **2 - Refresh live
 EPG** workflow updates channels, schedules, logos, and live metadata. Run
 **Refresh VOD catalogs** from GitHub Actions when movies, series, categories,
-languages, or release metadata need refreshing. Both workflows also support
-manual runs; VOD has no automatic schedule.
+languages, or release metadata need refreshing. VOD also runs daily at 4:47 a.m.
+America/New_York time. Both workflows support manual runs.
 
 Each refresh publishes alongside the other component's last validated snapshot.
 Builds can overlap; composition and deployment share one lock. The app index's

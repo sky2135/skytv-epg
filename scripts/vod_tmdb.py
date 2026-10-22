@@ -21,6 +21,7 @@ from typing import Any, Mapping
 import requests
 
 from vod_reviewed_corrections import correction_for
+from vod_poster_index import POSTER_POLICY, MAX_IMAGES, IMAGE_PATH as POSTER_PATH, official_paths, poster_identity, shared_index
 
 
 API_ROOT = "https://api.themoviedb.org/3"
@@ -33,13 +34,13 @@ MAX_RETRY_DELAY = 5.0
 MAX_ATTEMPTS = 3
 IMAGE_PATH = re.compile(r"/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)\Z", re.I)
 YOUTUBE_KEY = re.compile(r"[A-Za-z0-9_-]{11}\Z")
-STATUSES = {"matched_id", "matched_search", "no_match", "unavailable"}
+STATUSES = {"matched_id", "matched_search", "matched_poster", "no_match", "unavailable"}
 IDENTITY_POLICY = 2
 MATCH_STRATEGY = 3
 MAX_SEARCH_PAGES = 8
 MAX_ALIAS_CANDIDATES = 3
 DIAGNOSTIC_REASONS = frozenset({
-    "matched_id", "matched_search", "matched_alias", "ambiguous_title_year",
+    "matched_id", "matched_search", "matched_alias", "matched_poster", "ambiguous_title_year",
     "no_search_results", "title_mismatch", "year_mismatch", "incomplete_search",
     "alias_candidate_limit", "unavailable", "missing_identity",
 })
@@ -49,7 +50,7 @@ DIAGNOSTIC_REASONS = frozenset({
 # An acronym followed by a colon can be part of the film's actual title.
 PROVIDER_LOCALES = "AR|BN|CS|DA|DE|EL|EN|ES|FA|FI|FR|GU|HE|HI|HU|ID|IT|JA|KM|KN|KO|LO|ML|MR|MS|NE|NL|NO|PA|PL|PT|RO|RU|SI|SK|SO|SV|SW|TA|TE|TH|TL|TR|UK|UR|VI|ZH"
 PROVIDER_PREFIX = re.compile(rf"^(?:(?:{PROVIDER_LOCALES})\s+[-|]\s+|(?:4K|FHD|UHD|HD|SD)\s*[-|:]\s+)")
-PROVIDER_SUFFIX = re.compile(r"\s*(?:\[(?:4K|FHD|UHD|HD|SD)\]|\((?:4K|FHD|UHD|HD|SD|HINDI|MARATHI|TAMIL|TELUGU|ENGLISH|DUBBED)\))\s*$", re.I)
+PROVIDER_SUFFIX = re.compile(r"\s*(?:\[(?:4K|FHD|UHD|HD|SD)\]|\((?:4K|FHD|UHD|HD|SD|HINDI|MARATHI|TAMIL|TELUGU|ENGLISH|PUNJABI|DUBBED)\))\s*$", re.I)
 
 
 def _text(value: object, limit: int = 300) -> str | None:
@@ -133,6 +134,9 @@ def _enrichment_identity(item: Mapping[str, Any], kind: str) -> tuple[str, str |
         # Evidence is asset-specific. It must never resolve another row that
         # happens to share this normalized title/year or a recycled provider ID.
         key += f":record:{evidence['contentId']}:evidence:{evidence['fingerprint']}:{evidence['digest']}"
+    poster = poster_identity(item)
+    if poster:
+        key += f":poster-v{POSTER_POLICY}:" + hashlib.sha256(poster.encode()).hexdigest()
     return key, identifier, title, year
 
 
@@ -209,6 +213,8 @@ def _match_diagnostic(value: object = None, *, cache_hit: bool = False) -> dict[
         result[field] = _integer(raw.get(field), 0, 100_000) or 0
     result["evidenceMatched"] = raw.get("evidenceMatched") is True
     result["searchComplete"] = raw.get("searchComplete") is True
+    if raw.get("posterPolicy") == POSTER_POLICY or result["reason"] == "matched_poster":
+        result["posterPolicy"] = POSTER_POLICY
     return result
 
 
@@ -387,6 +393,8 @@ class TmdbClient:
         self._now = now
         self.stats = {key: 0 for key in ("requests", "cacheHits", "cacheMisses", "staleFallbacks", "matches", "noMatches", "errors", "budgetExhausted", "elapsedBudgetExhausted", "retries", "cacheWriteErrors")}
         self.last_match_diagnostic = _match_diagnostic()
+        self.poster_index = shared_index(self.cache_dir)
+        self._poster_cache_state = {}
 
     def __enter__(self) -> "TmdbClient":
         return self
@@ -542,6 +550,16 @@ class TmdbClient:
         translated original titles can be reused safely after an API check.
         """
         value, fresh = self._read_cache(key)
+        poster = poster_identity(item)
+        if poster:
+            self._poster_cache_state[key] = (False, False, None)
+        if value is None and poster_identity(item):
+            # Adopt old verified positives without refreshing the whole library.
+            # Old misses lack this new evidence and must not mask the new rule.
+            previous, previous_fresh = self._read_cache(key.rsplit(f":poster-v{POSTER_POLICY}:", 1)[0])
+            metadata = _cached_metadata(previous.get("metadata")) if isinstance(previous, dict) else None
+            if metadata and metadata["matchStatus"].startswith("matched_") and metadata["matchStatus"] != "matched_poster":
+                value, fresh = previous, previous_fresh
         evidence = _identity_evidence(item, kind)
         correction = _reviewed(item, kind)
         rejected_ids = correction.get("rejectedTmdbIds", []) if correction else []
@@ -554,16 +572,27 @@ class TmdbClient:
                 if not metadata["matchStatus"].startswith("matched_"):
                     if value.get("matchStrategy") != MATCH_STRATEGY:
                         return None, False, False
+                    attempted = proof.get("posterCandidate") if isinstance(proof, dict) else None
+                    if poster:
+                        self._poster_cache_state[key] = (False, fresh, _identifier(attempted))
                     return metadata, fresh, metadata["rejectedIdentity"]
                 if isinstance(proof, dict) and _identity_matches(proof, title, year) and (
                     proof.get("tmdbId") == metadata["tmdbId"]
                     and (identifier is None or metadata["tmdbId"] == identifier)
                     and proof.get("originalTitle") == _normalized_title(metadata["originalTitle"])
                     and proof.get("year") == ((metadata["releaseDate"] or "")[:4] or None)
+                    and (metadata["matchStatus"] != "matched_poster" or (
+                        proof.get("posterPolicy") == POSTER_POLICY and proof.get("posterPath") == poster
+                        and proof.get("mediaKind") == kind and not self.poster_index.collided(poster)))
                     and (not evidence or (proof.get("evidenceDigest") == evidence["digest"]
                                           and proof.get("evidenceFingerprint") == evidence["fingerprint"]
                                           and proof.get("contentId") == evidence["contentId"]))
                 ):
+                    self._remember_poster(kind, metadata, proof)
+                    if metadata["matchStatus"] == "matched_poster" and self.poster_index.collided(poster):
+                        return None, False, True
+                    if poster:
+                        self._poster_cache_state[key] = (True, fresh, None)
                     return metadata, fresh, metadata["rejectedIdentity"]
             return None, False, True
         if evidence:
@@ -582,7 +611,52 @@ class TmdbClient:
                      and _normalized_title(metadata["originalTitle"]) == _normalized_title(title)
                      and (metadata["releaseDate"] or "")[:4] == year
                      and (identifier is None or metadata["tmdbId"] == identifier))
-        return (metadata, legacy_fresh, False) if valid else (None, False, True)
+        if valid and metadata["matchStatus"] != "matched_poster":
+            self._remember_poster(kind, metadata, {"names": [_normalized_title(title)], "year": year})
+            if poster:
+                self._poster_cache_state[key] = (True, legacy_fresh, None)
+            return metadata, legacy_fresh, False
+        return None, False, True
+
+    def _remember_poster(self, kind, metadata, proof):
+        path = poster_identity({"artwork": {"posterUrl": metadata.get("posterUrl")}})
+        paths = {path} if path else set()
+        additional = proof.get("posterPaths")
+        if proof.get("mediaKind") == kind and isinstance(additional, list) and len(additional) <= MAX_IMAGES + 1:
+            paths.update(value for value in additional if isinstance(value, str) and POSTER_PATH.fullmatch(value))
+        if metadata.get("tmdbId"):
+            self.poster_index.add(kind, metadata["tmdbId"], paths, proof)
+
+    def warm_poster_index(self, items, kind):
+        """Seed once per prepared group from current identity-verified caches."""
+        self._kind(kind)
+        seeded = 0
+        for item in items:
+            key, identifier, title, year = _enrichment_identity(item, kind)
+            metadata, _fresh, _rejected = self._identity_cache(key, item, kind, identifier, title, year)
+            seeded += bool(metadata and metadata["matchStatus"].startswith("matched_"))
+        return seeded
+
+    def poster_candidate(self, item, kind):
+        """Cheap index candidate lookup; never performs HTTP or reads files."""
+        path = poster_identity(item)
+        if not path:
+            return None
+        _key, identifier, title, year = _enrichment_identity(item, kind)
+        candidate = self.poster_index.lookup(path, kind, _normalized_title(title), year)
+        correction = _reviewed(item, kind)
+        rejected = correction.get("rejectedTmdbIds", []) if correction else []
+        return candidate if candidate and candidate not in rejected and (identifier is None or candidate == identifier) else None
+
+    def poster_retry_candidate(self, item, kind):
+        """Prioritize missing identities, using the existing priority-read memo."""
+        candidate = self.poster_candidate(item, kind)
+        if candidate:
+            key = _enrichment_identity(item, kind)[0]
+            matched, fresh, attempted = self._poster_cache_state.get(key, (False, False, None))
+            if not matched and not (fresh and attempted == candidate):
+                return candidate
+        return None
 
     def _write_identity_cache(self, key: str, metadata: dict[str, Any], ttl: int,
                               proof: Mapping[str, Any] | None = None) -> None:
@@ -618,7 +692,10 @@ class TmdbClient:
         requests_before = self.stats["requests"]
         cached, fresh, rejected = self._identity_cache(key, item, kind, identifier, title, year)
         rejected = rejected or bool(correction and correction["rejectIdentity"])
+        poster_attempt = None
         if cached is None:
+            fresh = False
+        if fresh and cached and not cached["matchStatus"].startswith("matched_") and self.poster_retry_candidate(item, kind):
             fresh = False
         if fresh:
             self.stats["cacheHits"] += 1
@@ -654,7 +731,8 @@ class TmdbClient:
             result = _empty(None, "no_match")
             result["rejectedIdentity"] = rejected
             self.stats["noMatches"] += 1
-            self._write_identity_cache(key, result, MISS_TTL)
+            proof = {"posterCandidate": poster_attempt} if poster_attempt else None
+            self._write_identity_cache(key, result, MISS_TTL, proof)
             return result
 
         if not (self.token or self.api_key):
@@ -667,6 +745,9 @@ class TmdbClient:
         match_status = "matched_id" if identifier else "matched_search"
         details = None
         alias_match = False
+        poster = poster_identity(item)
+        poster_available = bool(poster and not self.poster_index.collided(poster))
+        poster_assisted = False
         if evidence and evidence["imdbId"]:
             # Bound external identity avoids choosing among same-name works or
             # an incomplete title search. It does not relax display title/year
@@ -704,6 +785,12 @@ class TmdbClient:
                         self.stats["errors"] += 1
                     rejected = True
                     return unavailable()
+        if not identifier and poster_available:
+            candidate = self.poster_candidate(item, kind)
+            if candidate:
+                identifier = candidate
+                poster_assisted = True
+                poster_attempt = candidate
         if not identifier:
             # A year is necessary to distinguish remakes, reboots and common titles.
             if not title or not year or "://" in title or not _normalized_title(title):
@@ -760,7 +847,7 @@ class TmdbClient:
                     page >= max(1, total_pages) and (total_results is None or observed_results == total_results))
                 # Two distinct exact IDs are enough to prove ambiguity. Evidence
                 # may resolve a small set, but never a partially inspected set.
-                if len(matches) > 1 and (not evidence or len(matches) > MAX_ALIAS_CANDIDATES):
+                if len(matches) > 1 and ((not evidence and not poster_available) or len(matches) > MAX_ALIAS_CANDIDATES):
                     return no_match("ambiguous_title_year")
                 if total_pages > MAX_SEARCH_PAGES:
                     return unavailable("incomplete_search")
@@ -785,8 +872,11 @@ class TmdbClient:
                 if len(check_ids) > MAX_ALIAS_CANDIDATES:
                     return no_match("ambiguous_title_year" if len(matches) > 1 else "alias_candidate_limit")
                 corroborated = []
+                poster_tie = bool(poster_available and len(matches) > 1 and not evidence)
                 for candidate_id in sorted(check_ids, key=int):
                     append = "credits,videos,alternative_titles" + (",external_ids" if evidence and evidence["imdbId"] else "")
+                    if poster_tie:
+                        append += ",images"
                     state, candidate_details = self._request(f"/{api_kind}/{candidate_id}", {"append_to_response": append})
                     if state != "ok" or not candidate_details or _identifier(candidate_details.get("id")) != candidate_id:
                         if state == "ok":
@@ -796,8 +886,20 @@ class TmdbClient:
                     if (_identity_matches(_detail_identity(candidate_details, kind), title, year)
                             and (not evidence or _evidence_matches(candidate_details, evidence))):
                         corroborated.append((candidate_id, candidate_details))
-                        if len(corroborated) > 1:
+                        if len(corroborated) > 1 and not poster_tie:
                             return no_match("ambiguous_title_year")
+                if poster_tie:
+                    with_poster = []
+                    for candidate_id, candidate_details in corroborated:
+                        paths, complete = official_paths(candidate_details)
+                        if not complete:
+                            return unavailable("incomplete_search")
+                        if poster in paths:
+                            with_poster.append((candidate_id, candidate_details))
+                    if len(with_poster) != 1:
+                        return no_match("ambiguous_title_year")
+                    corroborated = with_poster
+                    poster_assisted = True
                 if not corroborated:
                     return no_match("ambiguous_title_year" if matches else "title_mismatch")
                 identifier, details = corroborated[0]
@@ -805,6 +907,8 @@ class TmdbClient:
                 self.last_match_diagnostic["evidenceMatched"] = bool(evidence)
         if details is None:
             append = "credits,videos,alternative_titles" + (",external_ids" if evidence and evidence["imdbId"] else "")
+            if poster_assisted:
+                append += ",images"
             state, details = self._request(f"/{api_kind}/{identifier}", {"append_to_response": append})
             if state == "not_found":
                 rejected = True
@@ -822,10 +926,18 @@ class TmdbClient:
                 return no_match("title_mismatch")
             self.last_match_diagnostic["evidenceMatched"] = True
             proof.update(contentId=evidence["contentId"], evidenceFingerprint=evidence["fingerprint"], evidenceDigest=evidence["digest"])
+        paths, _complete = official_paths(details)
+        if poster_assisted:
+            if poster not in paths or self.poster_index.collided(poster):
+                return no_match("title_mismatch")
+            proof.update(posterPath=poster, posterPolicy=POSTER_POLICY)
+            match_status = "matched_poster"
+        proof.update(mediaKind=kind, posterPaths=sorted(paths))
         result = _metadata(details, kind, match_status)
+        self._remember_poster(kind, result, proof)
         result["rejectedIdentity"] = rejected
         self.stats["matches"] += 1
-        self.last_match_diagnostic["reason"] = "matched_alias" if alias_match else match_status
+        self.last_match_diagnostic["reason"] = "matched_poster" if poster_assisted else "matched_alias" if alias_match else match_status
         self._write_identity_cache(key, result, DETAIL_TTL, proof)
         return result
 
