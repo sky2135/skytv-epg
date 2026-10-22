@@ -1,0 +1,2008 @@
+{
+  "records": [
+    {
+      "contentId": "server_3:movie:1423903",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/kwbCAGU3yV06GLq9FZd6MVltWGo.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423903",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Hallowarrior (2026)",
+        "tmdbId": "1393929",
+        "contentId": "server_3:movie:1423903",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423903",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Hallowarrior (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423903",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423907",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/6PMMEU8eHSN0TlPG6koC8EEvavx.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423907",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - LEGO Friends: Heartlake the Musical (2026)",
+        "tmdbId": "1512493",
+        "contentId": "server_3:movie:1423907",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423907",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - LEGO Friends: Heartlake the Musical (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423907",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423908",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/dL3Tcv4FU2K85bgnGRBgLjFSrLr.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423908",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Love of Your Life (2026)",
+        "tmdbId": "1381078",
+        "contentId": "server_3:movie:1423908",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423908",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Love of Your Life (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423908",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423909",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/5xmXVd7nCK3tAo34XkO58SxUCip.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423909",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Masterplan (2026)",
+        "tmdbId": "1561726",
+        "contentId": "server_3:movie:1423909",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423909",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Masterplan (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423909",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423910",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/iXnjjvMZGyUm7KvgWuRDHJsQPIB.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423910",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Mermaid Beach (2026)",
+        "tmdbId": "1495114",
+        "contentId": "server_3:movie:1423910",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423910",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Mermaid Beach (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423910",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423911",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/sQw3m4hl1xyoT9zr7shnNCHDKI3.jpg"
+        },
+        "category": {
+          "id": "1544",
+          "name": "VOD - DOCUMENTARY [EN]"
+        },
+        "genre": "documentary",
+        "genres": [
+          "documentary"
+        ],
+        "id": "1423911",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Norm: The Tale of Norm Macdonald (2026)",
+        "tmdbId": "1620918",
+        "contentId": "server_3:movie:1423911",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1544",
+          "name": "VOD - DOCUMENTARY [EN]"
+        },
+        "genre": "documentary",
+        "genres": [
+          "documentary"
+        ],
+        "id": "1423911",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Norm: The Tale of Norm Macdonald (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423911",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423912",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/4liM7YBglVRk2UVuKsN7YQDmMpr.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423912",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - R.L. Stine's Pumpkinhead 2 (2026)",
+        "tmdbId": "1654998",
+        "contentId": "server_3:movie:1423912",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423912",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - R.L. Stine's Pumpkinhead 2 (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423912",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423913",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/hbApG0WSwgtaK7hXTZpwZDstDaR.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423913",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Seriously Single Too (2026)",
+        "tmdbId": "1773759",
+        "contentId": "server_3:movie:1423913",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423913",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Seriously Single Too (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423913",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423914",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/sh42XPI1MEKE6PTUmqDU0ZEC2jj.jpg"
+        },
+        "category": {
+          "id": "1544",
+          "name": "VOD - DOCUMENTARY [EN]"
+        },
+        "genre": "documentary",
+        "genres": [
+          "documentary"
+        ],
+        "id": "1423914",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Sky Defenders (2026)",
+        "tmdbId": "1768443",
+        "contentId": "server_3:movie:1423914",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1544",
+          "name": "VOD - DOCUMENTARY [EN]"
+        },
+        "genre": "documentary",
+        "genres": [
+          "documentary"
+        ],
+        "id": "1423914",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Sky Defenders (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423914",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423915",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/eI0QW02PYqhnmIvLRdn9vrfVVP7.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423915",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Tenzing (2026)",
+        "tmdbId": "1288069",
+        "contentId": "server_3:movie:1423915",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423915",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Tenzing (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423915",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423917",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/bBAeq5GAt6QKUL5eS0UalflLysH.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423917",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - The Militia (2026)",
+        "tmdbId": "1759875",
+        "contentId": "server_3:movie:1423917",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423917",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - The Militia (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423917",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423918",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/tDC1KDiL7ih6lDTaZBKjOxQOhmo.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423918",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - The Observance (2026)",
+        "tmdbId": "1575534",
+        "contentId": "server_3:movie:1423918",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423918",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - The Observance (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423918",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423919",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/1xgbu4WJMBv2eMJUpdSLyEOZYFG.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423919",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Theres a Man over There (2026)",
+        "tmdbId": "1752413",
+        "contentId": "server_3:movie:1423919",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423919",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Theres a Man over There (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423919",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423920",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/tN1X3MfKUqMKzZOhXmAK911vdaN.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423920",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - U.V.F: Underground Video Films (2026)",
+        "tmdbId": "1514378",
+        "contentId": "server_3:movie:1423920",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423920",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - U.V.F: Underground Video Films (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423920",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423992",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/6sLHJk5KNgqTGKhQ4hRabvG18HU.jpg"
+        },
+        "category": {
+          "id": "1544",
+          "name": "VOD - DOCUMENTARY [EN]"
+        },
+        "genre": "documentary",
+        "genres": [
+          "documentary"
+        ],
+        "id": "1423992",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - In the Company of Wolves: An American Journey (2026)",
+        "tmdbId": "1689398",
+        "contentId": "server_3:movie:1423992",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1544",
+          "name": "VOD - DOCUMENTARY [EN]"
+        },
+        "genre": "documentary",
+        "genres": [
+          "documentary"
+        ],
+        "id": "1423992",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - In the Company of Wolves: An American Journey (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423992",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423994",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/vkYoD8LmUMHFh7X4i7IBDh7PtCi.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423994",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Now Days (2026)",
+        "tmdbId": "1690399",
+        "contentId": "server_3:movie:1423994",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423994",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Now Days (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423994",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1423999",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/AdPO5XYc43ImZHeEBCSR0NHkspJ.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423999",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - The Reality Experiment (2026)",
+        "tmdbId": "1718985",
+        "contentId": "server_3:movie:1423999",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1423999",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - The Reality Experiment (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1423999",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424000",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/ycWlX8TDKm31owAeClxyOoP55uX.jpg"
+        },
+        "category": {
+          "id": "1487",
+          "name": "VOD - أفلام أجنبية 2025/2026"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424000",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "AR - Adored (2026)",
+        "tmdbId": "1748345",
+        "contentId": "server_3:movie:1424000",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1487",
+          "name": "VOD - أفلام أجنبية 2025/2026"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424000",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "AR - Adored (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424000",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424002",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/lNXeEpg4yLSRwXwOeR5lbPgwbqL.jpg"
+        },
+        "category": {
+          "id": "1487",
+          "name": "VOD - أفلام أجنبية 2025/2026"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424002",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "AR - Crawlers (2026)",
+        "tmdbId": "1376400",
+        "contentId": "server_3:movie:1424002",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1487",
+          "name": "VOD - أفلام أجنبية 2025/2026"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424002",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "AR - Crawlers (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424002",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424193",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/f1sxYpzsLLMnX1p5mpUKbPRBXt2.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424193",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Its Presence Between Us (2026)",
+        "tmdbId": "1620711",
+        "contentId": "server_3:movie:1424193",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424193",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Its Presence Between Us (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424193",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424194",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/uZajyFvX4MgIsYNuxMAg4GhLxjj.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424194",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Pay to Die (2026)",
+        "tmdbId": "1002280",
+        "contentId": "server_3:movie:1424194",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424194",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Pay to Die (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424194",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424195",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/wMSysl6cp67jdlF3YJXrTfYEs9P.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424195",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Spidernado (2026)",
+        "tmdbId": "1646119",
+        "contentId": "server_3:movie:1424195",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424195",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Spidernado (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424195",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424197",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/8xdLmP9ksISVyNg0kKUlI3DWtQg.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424197",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - The Leaching (2026)",
+        "tmdbId": "1723967",
+        "contentId": "server_3:movie:1424197",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424197",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - The Leaching (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424197",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424531",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/uIW4kicR0cxpMeRJqR104kbEgGW.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424531",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "13 Souls (2026)",
+        "tmdbId": "1686904",
+        "contentId": "server_3:movie:1424531",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424531",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "13 Souls (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424531",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424533",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/dgeSX7UDYAPSJDQaLOzm5EQ8jrT.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424533",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Beliath (2026)",
+        "tmdbId": "1605094",
+        "contentId": "server_3:movie:1424533",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424533",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Beliath (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424533",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424536",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/lNXeEpg4yLSRwXwOeR5lbPgwbqL.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424536",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Crawlers (2026)",
+        "tmdbId": "1376400",
+        "contentId": "server_3:movie:1424536",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424536",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Crawlers (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424536",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424537",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/gWeUbgZvrfbEFYra8omnqJQJZid.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424537",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Deadlocked: Dad of the Dead (2026)",
+        "tmdbId": "1752463",
+        "contentId": "server_3:movie:1424537",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424537",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Deadlocked: Dad of the Dead (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424537",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424540",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/duGE3IjHNaIoGMeC15Qvgc18VzD.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424540",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Don't F with Mary Jane (2026)",
+        "tmdbId": "1751522",
+        "contentId": "server_3:movie:1424540",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424540",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Don't F with Mary Jane (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424540",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424543",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/p0nF9yYKLKstjtc0wksGooDKMql.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424543",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Hunting Party (2026)",
+        "tmdbId": "1669135",
+        "contentId": "server_3:movie:1424543",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424543",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Hunting Party (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424543",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424544",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/u4ZAO2HkmuPbxfKvhluNpSOcGDl.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424544",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Night Terror (2026)",
+        "tmdbId": "1661855",
+        "contentId": "server_3:movie:1424544",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424544",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Night Terror (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424544",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424545",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/u7xO5ztIBvgN5xevGRQMVGpRVif.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424545",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Perfect Soul (2026)",
+        "tmdbId": "1741223",
+        "contentId": "server_3:movie:1424545",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424545",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Perfect Soul (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424545",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424548",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/mLAxffrOZkghXrmf98MZniy5prL.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424548",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Star One (2026)",
+        "tmdbId": "1750041",
+        "contentId": "server_3:movie:1424548",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424548",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "Star One (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424548",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424550",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/paoRPVNta4eYyPO1vsdHTK8dUYa.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424550",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - The Musical (2026)",
+        "tmdbId": "1579941",
+        "contentId": "server_3:movie:1424550",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424550",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - The Musical (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424550",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424552",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/3TUPK0tGANA4OmfcDn8j9O9oDzw.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424552",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Thingy (2026)",
+        "tmdbId": "1314832",
+        "contentId": "server_3:movie:1424552",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424552",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Thingy (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424552",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424553",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/unJWfg66bFwrGD31nBFoOQfkuba.jpg"
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424553",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Tiny Fugitives (2026)",
+        "tmdbId": "1513253",
+        "contentId": "server_3:movie:1424553",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1001",
+          "name": "VOD - NEW ADDED [EN]"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424553",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "EN - Tiny Fugitives (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424553",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424558",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/f1sxYpzsLLMnX1p5mpUKbPRBXt2.jpg"
+        },
+        "category": {
+          "id": "1487",
+          "name": "VOD - أفلام أجنبية 2025/2026"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424558",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "AR - Its Presence Between Us (2026)",
+        "tmdbId": "1620711",
+        "contentId": "server_3:movie:1424558",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1487",
+          "name": "VOD - أفلام أجنبية 2025/2026"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424558",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "AR - Its Presence Between Us (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424558",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:movie:1424559",
+      "kind": "movie",
+      "item": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/8xdLmP9ksISVyNg0kKUlI3DWtQg.jpg"
+        },
+        "category": {
+          "id": "1487",
+          "name": "VOD - أفلام أجنبية 2025/2026"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424559",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "AR - The Leaching (2026)",
+        "tmdbId": "1723967",
+        "contentId": "server_3:movie:1424559",
+        "providerLastModified": null
+      },
+      "beforeItem": {
+        "adult": false,
+        "artwork": {
+          "backdropUrl": null,
+          "posterUrl": null
+        },
+        "category": {
+          "id": "1487",
+          "name": "VOD - أفلام أجنبية 2025/2026"
+        },
+        "genre": "unknown",
+        "genres": [],
+        "id": "1424559",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": null,
+        "title": "AR - The Leaching (2026)",
+        "tmdbId": null,
+        "contentId": "server_3:movie:1424559",
+        "providerLastModified": null
+      },
+      "privateEvidenceMustLoadFromRestoredCache": true,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    },
+    {
+      "contentId": "server_3:series:7120",
+      "kind": "series",
+      "item": {
+        "adult": null,
+        "artwork": {
+          "backdropUrl": "https://image.tmdb.org/t/p/original/6aJMl28iBbhZLxDIj3Vqfaonzv2.jpg",
+          "posterUrl": "https://image.tmdb.org/t/p/w154/4cAN9ssi58CLuS3HCv3TfyVXPQp.jpg"
+        },
+        "category": {
+          "id": "886",
+          "name": "SRS - NETFLIX KIDS [FR]"
+        },
+        "genre": "science_fiction",
+        "genres": [
+          "science_fiction",
+          "fantastique",
+          "animation",
+          "action",
+          "adventure",
+          "drame",
+          "kids"
+        ],
+        "id": "7120",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": "2020-07-09",
+        "title": "FR - Japan Sinks : 2020",
+        "tmdbId": "94423",
+        "contentId": "server_3:series:7120",
+        "providerLastModified": "2026-01-11T11:42:38Z"
+      },
+      "beforeItem": {
+        "adult": null,
+        "artwork": {
+          "backdropUrl": "https://image.tmdb.org/t/p/original/6aJMl28iBbhZLxDIj3Vqfaonzv2.jpg",
+          "posterUrl": "https://image.tmdb.org/t/p/w154/4cAN9ssi58CLuS3HCv3TfyVXPQp.jpg"
+        },
+        "category": {
+          "id": "886",
+          "name": "SRS - NETFLIX KIDS [FR]"
+        },
+        "genre": "science_fiction",
+        "genres": [
+          "science_fiction",
+          "fantastique",
+          "animation",
+          "action",
+          "adventure",
+          "drame",
+          "kids"
+        ],
+        "id": "7120",
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "releaseDate": "2020-07-09",
+        "title": "FR - Japan Sinks : 2020",
+        "tmdbId": "94423",
+        "contentId": "server_3:series:7120",
+        "providerLastModified": "2026-01-11T11:42:38Z"
+      },
+      "privateEvidenceMustLoadFromRestoredCache": false,
+      "sourceNotes": "Normalized public VOD row, reviewed correction applied, providerLastModified from corresponding public app row. Raw provider detail evidence is private and not represented here; load MovieEvidenceCollector from restored cache."
+    }
+  ]
+}

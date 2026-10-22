@@ -11,6 +11,7 @@ on:
           - vod_evidence
           - vod_identity_coverage
           - vod_recent_samples
+          - vod_raw_samples
         default: live
 
 permissions:
@@ -58,6 +59,12 @@ jobs:
             mkdir -p .build/vod-recent-samples
             timeout --signal=TERM --kill-after=10s 8m python -u scripts/diagnose_vod_recent_samples.py \
               --output .build/vod-recent-samples/report.json
+          elif [[ "$DIAGNOSTIC_MODE" == "vod_raw_samples" ]]; then
+            python -m pip install --only-binary=:all: cryptography==50.0.2
+            mkdir -p .build/vod-raw-samples
+            timeout --signal=TERM --kill-after=10s 8m python -u scripts/capture_vod_raw_samples.py \
+              --recipient data/diagnostics/raw-sample-recipient.pem \
+              --output .build/vod-raw-samples/capture.enc.json
           elif [[ "$DIAGNOSTIC_MODE" == "live" ]]; then
             python -u scripts/diagnose_provider_transport.py
           else
@@ -74,6 +81,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 6
+
+      - name: Retain encrypted one-time provider capture
+        if: ${{ success() && inputs.mode == 'vod_raw_samples' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-raw-samples-encrypted-${{ github.run_id }}
+          path: .build/vod-raw-samples/capture.enc.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
 
       - name: Retain redacted recent movie samples
         if: ${{ success() && inputs.mode == 'vod_recent_samples' }}
