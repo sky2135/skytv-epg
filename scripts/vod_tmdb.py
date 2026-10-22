@@ -145,6 +145,7 @@ def _title_and_year(item: Mapping[str, Any]) -> tuple[str, str | None]:
             # Preserve standalone/numeric titles, obvious title-year phrases,
             # distant-future identity numbers and contradictory source dates.
             if (any(character.isalpha() for character in candidate_title)
+                    and not candidate_title.endswith(":")
                     and not re.search(r"\b(?:of|in|year|since|until|before|after|from|to)\s*$", candidate_title, re.I)
                     and int(candidate_year) <= date.today().year + 1
                     and (year is None or year == candidate_year)):
@@ -493,11 +494,13 @@ class TmdbClient:
     are left unmatched. Supplied sessions remain owned by their caller.
     """
 
-    def __init__(self, cache_dir: Path, token: str = "", api_key: str = "", max_requests: int = 1500, session: Any = None, now: Any = None, max_elapsed_seconds: float = 300):
+    def __init__(self, cache_dir: Path, token: str = "", api_key: str = "", max_requests: int | None = 1500, session: Any = None, now: Any = None, max_elapsed_seconds: float = 300):
         self.cache_dir = Path(cache_dir) / "tmdb-v1"
         self.token = token.strip()
         self.api_key = api_key.strip()
-        self.max_requests = max(0, int(max_requests))
+        # Long verification passes use a shared rate limit and resumable wall
+        # time batches. Normal publishers retain their existing explicit quota.
+        self.max_requests = None if max_requests is None else max(0, int(max_requests))
         self.reset_elapsed_budget(max_elapsed_seconds)
         self.session = session if session is not None else requests.Session()
         self._owns_session = session is None
@@ -596,7 +599,7 @@ class TmdbClient:
             if time.monotonic() - self._started_at >= self.max_elapsed_seconds:
                 self.stats["elapsedBudgetExhausted"] += 1
                 return "unavailable", None
-            if self.stats["requests"] >= self.max_requests:
+            if self.max_requests is not None and self.stats["requests"] >= self.max_requests:
                 self.stats["budgetExhausted"] += 1
                 return "unavailable", None
             self.stats["requests"] += 1

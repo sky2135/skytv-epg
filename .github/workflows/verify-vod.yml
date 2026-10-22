@@ -1,0 +1,149 @@
+name: Verify complete VOD catalog without publishing
+run-name: "VOD verification ${{ inputs.test-id }} (resumable batch)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-id:
+        description: Stable identity for this frozen full-catalog test
+        default: all-vod-20261022
+        type: string
+      source-artifact-id:
+        description: Validated production VOD component to freeze
+        default: '12447550657'
+        type: string
+      seed-cache-key:
+        description: Exact existing production cache to copy on the first batch
+        default: skytvplayer-vod-v1-Linux-39824081615-1
+        type: string
+      resume-artifact-id:
+        description: Saved verification checkpoint; empty starts the test
+        default: ''
+        type: string
+      rate:
+        description: Shared TMDB requests per second across all workers
+        default: '20'
+        type: string
+      workers:
+        description: Concurrent workers sharing the single rate limit
+        default: '8'
+        type: string
+      batch-seconds:
+        description: Maximum active verification time before saving and resuming
+        default: '900'
+        type: string
+      batch-records:
+        description: Maximum source records considered in one durable batch
+        default: '25000'
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ${{ github.repository }}-vod-verification-${{ inputs.test-id }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: '1'
+  PYTHONIOENCODING: utf-8
+  PYTHONHASHSEED: '0'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_NO_INPUT: '1'
+  TEST_ID: ${{ inputs.test-id }}
+  SOURCE_ARTIFACT_ID: ${{ inputs.source-artifact-id }}
+  SEED_CACHE_KEY: ${{ inputs.seed-cache-key }}
+  RESUME_ARTIFACT_ID: ${{ inputs.resume-artifact-id }}
+  RATE: ${{ inputs.rate }}
+  WORKERS: ${{ inputs.workers }}
+  BATCH_SECONDS: ${{ inputs.batch-seconds }}
+  BATCH_RECORDS: ${{ inputs.batch-records }}
+
+jobs:
+  verify:
+    name: Verify frozen movie and series identities with durable progress
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Check out verification revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install pinned dependencies
+        run: python -m pip install --only-binary=:all: -r requirements.txt -r requirements-sync.txt
+      - name: Restore saved verification checkpoint
+        if: inputs.resume-artifact-id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/vod_verification_artifacts.py restore-state \
+            --artifact-id "$RESUME_ARTIFACT_ID" --test-id "$TEST_ID" \
+            --destination .build/verification-state
+      - name: Read existing production cache for the initial isolated copy
+        if: inputs.resume-artifact-id == ''
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .build/vod-cache
+          key: ${{ inputs.seed-cache-key }}
+          fail-on-cache-miss: true
+      - name: Restore the frozen validated source component
+        if: inputs.resume-artifact-id == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/vod_verification_artifacts.py restore-component \
+            --artifact-id "$SOURCE_ARTIFACT_ID" --destination .build/verification-component
+      - name: Run the next rate-limited batch
+        id: batch
+        env:
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          command=(python -u scripts/verify_vod_catalog.py
+            --state-dir .build/verification-state --test-id "$TEST_ID"
+            --source-artifact-id "$SOURCE_ARTIFACT_ID" --seed-cache-key "$SEED_CACHE_KEY"
+            --rate "$RATE" --workers "$WORKERS"
+            --batch-seconds "$BATCH_SECONDS" --batch-records "$BATCH_RECORDS")
+          if [[ -z "$RESUME_ARTIFACT_ID" ]]; then
+            command+=(--component-dir .build/verification-component --seed-cache .build/vod-cache)
+          fi
+          timeout --signal=TERM --kill-after=30s 30m "${command[@]}"
+      - name: Seal the durable checkpoint
+        run: |
+          python scripts/vod_verification_artifacts.py seal \
+            --state-dir .build/verification-state --test-id "$TEST_ID"
+          mkdir -p .build/verification-package
+          tar -C .build/verification-state -cf .build/verification-package/state.tar .
+      - name: Retain the checkpoint before any continuation
+        id: checkpoint
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-verification-${{ inputs.test-id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/verification-package/state.tar
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
+      - name: Retain the aggregate report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-verification-report-${{ inputs.test-id }}-${{ github.run_id }}
+          path: .build/verification-state/report.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Resume pending work in the next durable batch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKPOINT_ARTIFACT_ID: ${{ steps.checkpoint.outputs.artifact-id }}
+          VERIFICATION_INPUTS: ${{ toJSON(inputs) }}
+        run: |
+          python scripts/vod_verification_artifacts.py continue \
+            --state-dir .build/verification-state --artifact-id "$CHECKPOINT_ARTIFACT_ID" \
+            --inputs-json "$VERIFICATION_INPUTS"
