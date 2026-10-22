@@ -23,13 +23,13 @@ from vod_provider_evidence import DeadlineSession, _error_category
 
 
 ALLOW = frozenset("""info movie_data metadata details streams video audio format
-id stream_id vod_id stream_type num name title original_title originalTitle category_id category_ids category_name
+id stream_id vod_id stream_type num name title o_name original_title originalTitle category_id category_ids category_name
 added added_at created_at last_modified year releaseDate release_date releasedate
 plot description overview genre genres country countries language languages lang original_language spoken_languages
 rating rating_5based vote_average vote_count adult is_adult container_extension extension
 tmdb tmdb_id tmdbId tmdb_url tmdbUrl imdb imdb_id imdbId imdb_url imdbUrl
 director directors cast actors duration duration_secs duration_seconds duration_minutes runtime runtimeMinutes
-age age_rating mpaa youtube_trailer trailer
+age age_rating mpaa mpaa_rating episode_run_time rating_count_kinopoisk kinopoisk_id kinopoisk_url youtube_trailer trailer
 stream_icon movie_image cover cover_big cover_url poster poster_url poster_path backdrop backdrop_url backdrop_path image image_url
 codec_name codec_long_name codec_type codec_tag_string codec_tag profile width height
 display_aspect_ratio sample_aspect_ratio r_frame_rate avg_frame_rate sample_rate channels channel_layout
@@ -41,7 +41,7 @@ MAX_REPORT_BYTES = 2 * 1024 * 1024
 MAX_VALUE_BYTES = 8 * 1024
 MAX_NODES = 512
 IMAGE_FIELDS = frozenset("stream_icon movie_image cover cover_big cover_url poster poster_url poster_path backdrop backdrop_url backdrop_path image image_url".split())
-URL_FIELDS = IMAGE_FIELDS | {"tmdb_url", "tmdbUrl", "imdb_url", "imdbUrl"}
+URL_FIELDS = IMAGE_FIELDS | {"tmdb_url", "tmdbUrl", "imdb_url", "imdbUrl", "kinopoisk_url"}
 PER_SERVER_SECONDS = 300
 GLOBAL_SECONDS = 420
 
@@ -194,6 +194,88 @@ def _added(value, now):
     return seconds if 0 < seconds <= now + 300 else None
 
 
+TITLE_LANGUAGE_ALIASES = {
+    code: tuple(words.split()) for code, words in {
+        "en": "EN ENG ENGLISH", "hi": "HI HIN HINDI", "pa": "PB PUN PUNJ PUNJABI PANJABI",
+        "fr": "FR FRN FRE FRA FRENCH", "zh": "ZH ZHO CHI CHS CHINESE MANDARIN",
+        "ta": "TA TAM TAMIL", "te": "TE TEL TELUGU", "ml": "ML MAL MALAYALAM",
+        "kn": "KN KAN KANNADA", "mr": "MR MAR MARATHI", "bn": "BN BEN BENGALI BANGLA",
+        "gu": "GU GUJ GUJARATI", "ur": "UR URD URDU", "ar": "AR ARA ARABIC",
+        "de": "DE GER DEU GERMAN", "es": "ES SPA SPANISH", "it": "IT ITA ITALIAN",
+        "pt": "PT POR PORTUGUESE", "ru": "RU RUS RUSSIAN", "ko": "KO KOR KOREAN",
+        "ja": "JA JPN JAPANESE", "tr": "TR TUR TURKISH", "fa": "FA FAS PER PERSIAN FARSI",
+        "id": "INDONESIAN", "ms": "MS MSA MALAY", "si": "SI SIN SINHALA",
+        "ne": "NE NEP NEPALI", "th": "TH THA THAI", "vi": "VI VIE VIETNAMESE",
+        "tl": "TL TAG TAGALOG FILIPINO", "nl": "NL DUT NLD DUTCH", "pl": "PL POL POLISH",
+    }.items()
+}
+TITLE_CODE_BY_ALIAS = {word: code for code, words in TITLE_LANGUAGE_ALIASES.items() for word in words}
+SUBTITLE_WORDS = {"SUB", "SUBS", "SUBTITLE", "SUBTITLES", "SUBBED", "SUBTITLED", "MULTISUB", "MULTISUBS"}
+TITLE_QUALIFIERS = SUBTITLE_WORDS | {"DUB", "DUBBED", "AUDIO", "DUAL", "MULTI", "LANGUAGE", "LANGUAGES", "ONLY"}
+
+
+def _language_segment(text):
+    """A metadata segment may contain only language names/codes/qualifiers."""
+    audio, subtitles, dubbed = set(), set(), False
+    for part in re.split(r"[,/|+;&]", text.upper()):
+        tokens = re.findall(r"[A-Z]+", part)
+        if not tokens or re.search(r"[^A-Za-z\s,./|+;&-]", part):
+            return None
+        if any(token not in TITLE_CODE_BY_ALIAS and token not in TITLE_QUALIFIERS for token in tokens):
+            return None
+        codes = {TITLE_CODE_BY_ALIAS[token] for token in tokens if token in TITLE_CODE_BY_ALIAS}
+        if not codes:
+            return None
+        (subtitles if set(tokens) & SUBTITLE_WORDS else audio).update(codes)
+        dubbed |= bool(set(tokens) & {"DUB", "DUBBED"})
+    return audio, subtitles, dubbed
+
+
+def _title_language_hints(title):
+    audio, subtitles, dubbed = set(), set(), False
+    if not isinstance(title, str) or len(title) > 1000:
+        return audio, subtitles, dubbed
+    remaining = title.strip()
+    # Walk only terminal metadata groups, crossing known year/quality tags.
+    for _ in range(12):
+        match = re.search(r"\s*(?:\(([^()]*)\)|\[([^\[\]]*)\])\s*$", remaining)
+        if not match:
+            break
+        segment = (match[1] if match[1] is not None else match[2]).strip()
+        parsed = _language_segment(segment)
+        if parsed:
+            audio.update(parsed[0]); subtitles.update(parsed[1]); dubbed |= parsed[2]
+        elif not re.fullmatch(r"(?i)(?:(?:19|20)[0-9]{2}|[0-9]{3,4}P|[48]K|UHD|FHD|HD|SD|HDTS|HDTC|TS|TC|CAM|HDCAM|WEB[- .]?DL|WEBRIP|BLURAY|BRRIP|HDRIP|DVDRIP|REMUX|HEVC|[XH]26[45]|AAC[0-9.]*|DDP[0-9.]*|DUAL AUDIO|MULTI AUDIO)", segment):
+            break
+        remaining = remaining[:match.start()].rstrip()
+    # Leading enclosed language markers and explicit "HIN - title" prefixes.
+    prefix = re.match(r"^\s*(?:\[([^\[\]]+)\]|\(([^()]+)\))\s*(?:[-|:]\s*)?\S", title)
+    if prefix:
+        parsed = _language_segment(prefix[1] or prefix[2])
+        if parsed:
+            audio.update(parsed[0]); subtitles.update(parsed[1]); dubbed |= parsed[2]
+    prefix = re.match(r"^\s*([A-Za-z]{2,15}(?:\s+(?:Dubbed|Sub|Subs|Subtitles))?)\s*(?::|\||-)\s+\S", title, re.I)
+    if prefix:
+        parsed = _language_segment(prefix[1])
+        if parsed:
+            audio.update(parsed[0]); subtitles.update(parsed[1]); dubbed |= parsed[2]
+    return audio, subtitles, dubbed
+
+
+def _selection_evidence(row, category):
+    name = vod.clean_text(row.get("category_name") or category.get("category_name", category.get("name", "")), 160)
+    category_codes, category_subtitles, ambiguous, _kind = _category_evidence(name)
+    title_codes, title_subtitles, dubbed = _title_language_hints(row.get("name", row.get("title", "")))
+    has_title_marker = bool(title_codes or title_subtitles)
+    effective = title_codes if has_title_marker else category_codes
+    return {"categoryLanguageCodes": sorted(category_codes), "titleLanguageCodes": sorted(title_codes),
+            "titleSubtitleCodes": sorted(title_subtitles), "effectiveLanguageCodes": sorted(effective),
+            "selectionConflict": has_title_marker and bool(category_codes) and title_codes != category_codes,
+            "selectionLanguageEvidence": "explicit_title_markers" if has_title_marker else "explicit_category_labels",
+            "titleDubbedLabelHint": dubbed, "categorySubtitleHint": bool(category_subtitles),
+            "ambiguousCategoryHint": bool(ambiguous)}
+
+
 def select_recent(categories_payload, movies_payload, *, now=None, deadline=None):
     now = time.time() if now is None else now
     category_rows = _rows(categories_payload)
@@ -206,7 +288,8 @@ def select_recent(categories_payload, movies_payload, *, now=None, deadline=None
             categories[key] = row
     selected, seen = {code: [] for code in TARGETS}, {}
     counts = {"inventoryRows": 0, "duplicateRows": 0, "invalidIdOrTitle": 0, "invalidAdded": 0,
-              "subtitleLabelExcluded": 0, "ambiguousLabelExcluded": 0, "unclassifiedLabelExcluded": 0}
+              "subtitleLabelExcluded": 0, "ambiguousLabelExcluded": 0, "unclassifiedLabelExcluded": 0,
+              "titleMarkerRows": 0, "titleCategoryConflicts": 0, "titleLanguageExcluded": 0, "titleSubtitleExcluded": 0}
     for position, row in enumerate(_rows(movies_payload)):
         if position % 128 == 0 and deadline is not None and time.monotonic() >= deadline:
             raise TimeoutError()
@@ -230,13 +313,19 @@ def select_recent(categories_payload, movies_payload, *, now=None, deadline=None
             counts["invalidAdded"] += 1
             continue
         category = categories.get(str(row.get("category_id", "")), {})
-        name = vod.clean_text(row.get("category_name") or category.get("category_name", category.get("name", "")), 160)
-        languages, subtitles, ambiguous, _kind = _category_evidence(name)
-        if subtitles:
+        evidence = _selection_evidence(row, category)
+        languages = set(evidence["effectiveLanguageCodes"]) & set(TARGETS)
+        title_marker = evidence["selectionLanguageEvidence"] == "explicit_title_markers"
+        counts["titleMarkerRows"] += int(title_marker)
+        counts["titleCategoryConflicts"] += int(evidence["selectionConflict"])
+        if title_marker and not languages:
+            counts["titleLanguageExcluded"] += 1
+            counts["titleSubtitleExcluded"] += int(bool(evidence["titleSubtitleCodes"]) and not evidence["titleLanguageCodes"])
+        if not languages and evidence["categorySubtitleHint"]:
             counts["subtitleLabelExcluded"] += 1
-        elif ambiguous and not languages:
+        elif not languages and evidence["ambiguousCategoryHint"]:
             counts["ambiguousLabelExcluded"] += 1
-        elif not languages:
+        elif not languages and not title_marker:
             counts["unclassifiedLabelExcluded"] += 1
         for code in languages:
             selected[code].append((added, identifier, row, category))
@@ -355,6 +444,7 @@ def main(argv=None):
                     safe = sanitize_record(row, secrets)
                     sample = {"listRecord": safe.pop("record"), "listRecordAudit": safe,
                               "categoryRecord": sanitize_record(category, secrets),
+                              "selectionEvidence": _selection_evidence(row, category),
                               **details[(server_id, identifier)]}
                     samples.append(sample)
                 languages[code] = {"requested": 5, "selected": len(samples), "samples": samples}
@@ -364,7 +454,7 @@ def main(argv=None):
                                   "bulkRedirectConstraints": data.get("redirectConstraints")}
         report = {"schemaVersion": 1, "capturedAtUtc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             "filteredProviderMetadata": True, "fullRawPayloadExported": False, "audioAvailabilityVerified": False,
-            "selectionUsesProviderAddedOnly": True, "selectionLanguageEvidence": "explicit_category_labels",
+            "selectionUsesProviderAddedOnly": True, "selectionLanguageEvidence": "explicit_title_markers_then_category_labels",
             "serverCount": 3, "uniqueDetailRequests": len(jobs), "servers": servers}
         raw = json.dumps(report, sort_keys=True, ensure_ascii=True, allow_nan=False).encode()
         if len(raw) > MAX_REPORT_BYTES:

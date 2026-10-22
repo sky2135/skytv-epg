@@ -33,10 +33,15 @@ an individual movie's detail response.
 ## Inspect recently added provider records
 
 Use mode `vod_recent_samples` to inspect the five most recently added movies
-in each explicit English, Hindi and Punjabi category group on every server.
+with explicit English, Hindi and Punjabi labels on every server. Clear language
+markers in the title take precedence over category labels, so a title marked
+`(Hindi)`, `[FRN]` or `[CHI]` is not selected as English because of its category.
+Ordinary words in film names are not language markers. The report retains the
+selection evidence and flags title/category conflicts without changing the
+provider metadata or production catalogue rules.
 Selection uses the provider's `added` timestamp, not a film's release date.
 Unclassified languages and entries with unusable added timestamps are reported
-rather than guessed. Subtitle categories remain separate.
+rather than guessed. Subtitle labels do not establish audio language.
 
 This mode also attempts a bounded `get_vod_info` request for each selected movie.
 The report keeps list metadata and detail metadata separate and adds no TMDB

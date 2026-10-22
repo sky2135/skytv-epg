@@ -80,5 +80,5 @@
   "vodProviderEvidenceDiagnosticSha256": "aa7b8f315dd52ab7382f639170b38aaec967fbad5db975f64a95c27f5aa82c26",
   "vodProviderEvidenceDiagnosticWorkflowSha256": "307002dcb92f781c20ace759c6c1b4b4856e9b80a9017d9e57b6b39240d07731",
   "vodIdentityCoverageDiagnosticSha256": "f77c5add6abc2ef11b13c8cbd7cee2634866e60d8af5fd6620879d43c3527ab7",
-  "vodRecentSamplesDiagnosticSha256": "13c5de95faa9153bd650d70419620b2cc6a210d64e2d5ac447209e335d202c27"
+  "vodRecentSamplesDiagnosticSha256": "77f794a369d33eb6d7badbf0dd4db5275dd47f42478ab2a3f6808e422f789756"
 }

@@ -53,6 +53,72 @@ class RecentProviderSamplesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             samples.select_recent(categories, [row(1, NOW - 1), row(1, NOW - 2)], now=NOW)
 
+    def test_live_title_language_conflicts_override_categories_without_changing_raw_records(self):
+        categories = [{"category_id": "1", "category_name": "English + Hindi"},
+                      {"category_id": "2", "category_name": "English"}]
+        actual = [row(1, NOW - 1, "1", name="Cerita Lila (2026) (Hindi)"),
+                  row(2, NOW - 2, "2", name="The Last Mistress (2007) [FRN]"),
+                  row(3, NOW - 3, "2", name="Vanishing Point (2026) [CHI]")]
+        original = copy.deepcopy(actual)
+        selected, counts = samples.select_recent(categories, actual, now=NOW)
+        self.assertEqual(selected["en"], [])
+        self.assertEqual([entry[1] for entry in selected["hi"]], ["1"])
+        self.assertEqual(selected["pa"], [])
+        self.assertEqual(actual, original)
+        self.assertEqual(counts["titleCategoryConflicts"], 3)
+        self.assertEqual(counts["titleLanguageExcluded"], 2)
+        evidence = samples._selection_evidence(actual[0], categories[0])
+        self.assertEqual(evidence["categoryLanguageCodes"], ["en", "hi"])
+        self.assertEqual(evidence["titleLanguageCodes"], ["hi"])
+        self.assertTrue(evidence["selectionConflict"])
+        self.assertEqual(evidence["selectionLanguageEvidence"], "explicit_title_markers")
+
+    def test_title_words_years_quality_and_unrelated_parentheses_are_not_language_markers(self):
+        for title in ("English Vinglish (2012)", "Tutt Paini English Ne (2025)",
+                      "The English Patient (1996)", "A Movie (2026) [HDTS]", "A Movie (The English Patient)"):
+            with self.subTest(title=title):
+                self.assertEqual(samples._title_language_hints(title), (set(), set(), False))
+        for title, expected in (("A Movie (Punjabi) (CAM)", "pa"), ("A Movie [HIN] [HDTS]", "hi"),
+                                ("PB - A Movie (2026)", "pa"), ("[ENG] A Movie (2026)", "en"),
+                                ("HIN: A Movie (2026)", "hi"), ("A Movie [TAM]", "ta"),
+                                ("A Movie [TEL]", "te"), ("A Movie [MAL]", "ml"), ("A Movie [KAN]", "kn")):
+            with self.subTest(title=title):
+                self.assertEqual(samples._title_language_hints(title)[0], {expected})
+        self.assertEqual(samples._title_language_hints("x" * 1001 + " (Hindi)")[0], set())
+
+    def test_subtitle_markers_never_supply_audio_and_dubbed_markers_do(self):
+        categories = [{"category_id": "1", "category_name": "English"}]
+        rows = [row(1, NOW - 1, name="A Movie (English Sub)"),
+                row(2, NOW - 2, name="A Movie (Hindi Dubbed)"),
+                row(3, NOW - 3, name="A Movie (Hindi) [English Subtitles]"),
+                row(4, NOW - 4, name="A Movie (Hindi/English Sub)")]
+        selected, counts = samples.select_recent(categories, rows, now=NOW)
+        self.assertEqual(selected["en"], [])
+        self.assertEqual([entry[1] for entry in selected["hi"]], ["2", "3", "4"])
+        self.assertEqual(counts["titleSubtitleExcluded"], 1)
+        self.assertTrue(samples._selection_evidence(rows[1], categories[0])["titleDubbedLabelHint"])
+
+    def test_live_hdtc_and_tc_quality_tags_do_not_hide_language_conflicts(self):
+        categories = [{"category_id": "1", "category_name": "English"}]
+        for quality in ("HDTC", "TC"):
+            with self.subTest(quality=quality):
+                selected, _counts = samples.select_recent(categories,
+                    [row(1, NOW - 1, name=f"Movie (2026) [FRN] [{quality}]"),
+                     row(2, NOW - 2, name=f"Movie (2026) [HIN] [{quality}]")], now=NOW)
+                self.assertEqual(selected["en"], [])
+                self.assertEqual([entry[1] for entry in selected["hi"]], ["2"])
+
+    def test_additional_known_xtream_metadata_stays_raw_and_legacy_url_key_stays_guarded(self):
+        raw = {"o_name": "Actual alternate title", "mpaa_rating": "R", "episode_run_time": [90],
+               "rating_count_kinopoisk": 3, "kinopoisk_id": "123", "kinopoisk_url": "https://private.invalid/movie/1"}
+        safe = samples.sanitize_record(raw)
+        self.assertEqual(safe["unknownFieldCount"], 0)
+        self.assertEqual(safe["record"]["episode_run_time"], [90])
+        self.assertEqual(safe["record"]["o_name"], raw["o_name"])
+        self.assertIsNone(safe["record"]["kinopoisk_url"])
+        public = "https://www.themoviedb.org/movie/123"
+        self.assertEqual(samples.sanitize_record({"kinopoisk_url": public})["record"]["kinopoisk_url"], public)
+
     def test_metadata_sanitizer_retains_raw_types_empty_values_and_original_nesting(self):
         original = {"stream_id": 101, "name": "Actual provider title", "stream_type": "movie",
             "added": "1799999999", "rating": 0, "genre": [], "director": None,
@@ -159,11 +225,12 @@ class RecentProviderSamplesTests(unittest.TestCase):
             report = json.loads(output.read_text())
             self.assertEqual(fetch.call_count, 3)
             self.assertEqual(report["uniqueDetailRequests"], 3)
-            self.assertEqual(report["selectionLanguageEvidence"], "explicit_category_labels")
+            self.assertEqual(report["selectionLanguageEvidence"], "explicit_title_markers_then_category_labels")
             first = report["servers"]["server_1"]["languages"]["en"]["samples"][0]
             self.assertNotIn("plot", first["listRecord"])
             self.assertEqual(first["detailRecord"]["info"]["plot"], "Provider detail")
             self.assertEqual(first["listRecord"]["added"], str(NOW - 1))
+            self.assertEqual(first["selectionEvidence"]["categoryLanguageCodes"], ["en", "hi"])
             self.assertNotIn("Real provider title", stream.getvalue())
             self.assertLess(output.stat().st_size, samples.MAX_REPORT_BYTES)
 
