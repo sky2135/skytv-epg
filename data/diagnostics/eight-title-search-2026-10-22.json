@@ -3,7 +3,7 @@
   "snapshotGeneratedAt": "2026-10-22T14:08:12Z",
   "capturedAtUtc": "2026-10-22T15:02:02Z",
   "captureRunId": 39800896118,
-  "recordCount": 8,
+  "recordCount": 2,
   "sourceProofs": {
     "catalogIndex": {
       "file": "index.json",
@@ -165,246 +165,8 @@
     "values": "Original provider JSON field values and types; rawProviderRecord is a JSON object, source exact bytes are identified by SHA256.",
     "replayMeaning": "Current cold matcher and direct-name query diagnostics; not evidence of historical TMDB search results."
   },
+  "detailProbeInterpretation": "Explicit candidate IDs from public film links. Their details do not themselves establish the provider asset identity.",
   "records": [
-    {
-      "contentId": "server_1:movie:826646",
-      "providerTitle": "The Bloodline of Bathory (2026) (English)",
-      "publishedStatus": "no_match",
-      "matcherInput": {
-        "id": "826646",
-        "title": "The Bloodline of Bathory (2026) (English)",
-        "category": {
-          "id": "749",
-          "name": "ENGLISH | FHD 2026"
-        },
-        "language": "en",
-        "languages": [
-          "en"
-        ],
-        "genre": "unknown",
-        "genres": [],
-        "releaseDate": null,
-        "adult": null,
-        "tmdbId": null,
-        "artwork": {
-          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/eLUBCr6e4iSxzhhIhXqjam9ECXp.jpg",
-          "backdropUrl": null
-        },
-        "contentId": "server_1:movie:826646",
-        "providerLastModified": null
-      },
-      "rawProviderRecord": {
-        "num": 65547,
-        "name": "The Bloodline of Bathory (2026) (English)",
-        "stream_type": "movie",
-        "stream_id": 826646,
-        "stream_icon": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/eLUBCr6e4iSxzhhIhXqjam9ECXp.jpg",
-        "rating": "",
-        "rating_5based": 0,
-        "added": "1792610907",
-        "category_id": "749",
-        "container_extension": "mp4",
-        "custom_sid": "",
-        "direct_source": ""
-      },
-      "directQuery": "The Bloodline of Bathory",
-      "detailProbeIds": [
-        "1756427"
-      ]
-    },
-    {
-      "contentId": "server_1:movie:825453",
-      "providerTitle": "Street Fighter (2026) (Hindi) (CAM)",
-      "publishedStatus": "no_match",
-      "matcherInput": {
-        "id": "825453",
-        "title": "Street Fighter (2026) (Hindi) (CAM)",
-        "category": {
-          "id": "623",
-          "name": "ENGLISH | HINDI DUBBED CAM"
-        },
-        "language": "mul",
-        "languages": [
-          "en",
-          "hi"
-        ],
-        "genre": "unknown",
-        "genres": [],
-        "releaseDate": null,
-        "adult": null,
-        "tmdbId": null,
-        "artwork": {
-          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/pwUb3gdkSrlyMZWs0MFOQg3N5s7.jpg",
-          "backdropUrl": null
-        },
-        "contentId": "server_1:movie:825453",
-        "providerLastModified": null
-      },
-      "rawProviderRecord": {
-        "num": 65485,
-        "name": "Street Fighter (2026) (Hindi) (CAM)",
-        "stream_type": "movie",
-        "stream_id": 825453,
-        "stream_icon": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/pwUb3gdkSrlyMZWs0MFOQg3N5s7.jpg",
-        "rating": "6.245",
-        "rating_5based": 3.1,
-        "added": "1792432882",
-        "category_id": "623",
-        "container_extension": "mp4",
-        "custom_sid": "",
-        "direct_source": ""
-      },
-      "directQuery": "Street Fighter",
-      "detailProbeIds": []
-    },
-    {
-      "contentId": "server_1:movie:824536",
-      "providerTitle": "Thaapi (2026) (Punjabi) (CAM)",
-      "publishedStatus": "no_match",
-      "matcherInput": {
-        "id": "824536",
-        "title": "Thaapi (2026) (Punjabi) (CAM)",
-        "category": {
-          "id": "631",
-          "name": "PUNJABI | 2026 CAM"
-        },
-        "language": "pa",
-        "languages": [
-          "pa"
-        ],
-        "genre": "unknown",
-        "genres": [],
-        "releaseDate": null,
-        "adult": null,
-        "tmdbId": null,
-        "artwork": {
-          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/cBTC5Avl6k23K0KCvPNywnqVSJo.jpg",
-          "backdropUrl": null
-        },
-        "contentId": "server_1:movie:824536",
-        "providerLastModified": null
-      },
-      "rawProviderRecord": {
-        "num": 65439,
-        "name": "Thaapi (2026) (Punjabi) (CAM)",
-        "stream_type": "movie",
-        "stream_id": 824536,
-        "stream_icon": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/cBTC5Avl6k23K0KCvPNywnqVSJo.jpg",
-        "rating": "",
-        "rating_5based": 0,
-        "added": "1792262814",
-        "category_id": "631",
-        "container_extension": "mp4",
-        "custom_sid": "",
-        "direct_source": ""
-      },
-      "directQuery": "Thaapi",
-      "detailProbeIds": [
-        "1784165"
-      ]
-    },
-    {
-      "contentId": "server_2:movie:2558871",
-      "providerTitle": "The Trap",
-      "publishedStatus": "no_match",
-      "matcherInput": {
-        "id": "2558871",
-        "title": "The Trap",
-        "category": {
-          "id": "7190",
-          "name": "VOD | English 2010-2019"
-        },
-        "language": "en",
-        "languages": [
-          "en"
-        ],
-        "genre": "unknown",
-        "genres": [],
-        "releaseDate": null,
-        "adult": false,
-        "tmdbId": null,
-        "artwork": {
-          "posterUrl": null,
-          "backdropUrl": null
-        },
-        "contentId": "server_2:movie:2558871",
-        "providerLastModified": null
-      },
-      "rawProviderRecord": {
-        "num": 13445,
-        "name": "The Trap",
-        "stream_type": "movie",
-        "stream_id": 2558871,
-        "stream_icon": "",
-        "rating": "0",
-        "rating_5based": "0",
-        "tmdb": "",
-        "trailer": "",
-        "added": "1782815113",
-        "is_adult": 0,
-        "category_id": "7190",
-        "category_ids": [
-          7190
-        ],
-        "container_extension": "mp4",
-        "custom_sid": null,
-        "direct_source": ""
-      },
-      "directQuery": "The Trap",
-      "detailProbeIds": []
-    },
-    {
-      "contentId": "server_2:movie:2353187",
-      "providerTitle": "Zombie Ka Aatank 2021",
-      "publishedStatus": "no_match",
-      "matcherInput": {
-        "id": "2353187",
-        "title": "Zombie Ka Aatank 2021",
-        "category": {
-          "id": "7476",
-          "name": "VOD | Hindi Trending"
-        },
-        "language": "hi",
-        "languages": [
-          "hi"
-        ],
-        "genre": "unknown",
-        "genres": [],
-        "releaseDate": null,
-        "adult": false,
-        "tmdbId": null,
-        "artwork": {
-          "posterUrl": null,
-          "backdropUrl": null
-        },
-        "contentId": "server_2:movie:2353187",
-        "providerLastModified": null
-      },
-      "rawProviderRecord": {
-        "num": 25055,
-        "name": "Zombie Ka Aatank 2021",
-        "stream_type": "movie",
-        "stream_id": 2353187,
-        "stream_icon": "",
-        "rating": "0",
-        "rating_5based": "0",
-        "tmdb": "",
-        "trailer": "",
-        "added": "1782403376",
-        "is_adult": 0,
-        "category_id": "7476",
-        "category_ids": [
-          7476
-        ],
-        "container_extension": "mkv",
-        "custom_sid": null,
-        "direct_source": ""
-      },
-      "directQuery": "Zombie Ka Aatank",
-      "detailProbeIds": [
-        "794362"
-      ]
-    },
     {
       "contentId": "server_2:movie:2464200",
       "providerTitle": "Solvan Saal 1958 Punjabi",
@@ -452,18 +214,18 @@
         "custom_sid": null,
         "direct_source": ""
       },
-      "directQuery": "Solvan Saal",
+      "directQuery": "Solva Saal",
       "detailProbeIds": [
         "275784"
       ]
     },
     {
-      "contentId": "server_3:movie:780271",
-      "providerTitle": "ENG - Eat Pray Love 2010",
-      "publishedStatus": "no_match",
+      "contentId": "server_3:movie:744220",
+      "providerTitle": "IN - Dangal  (2016)",
+      "publishedStatus": "unavailable",
       "matcherInput": {
-        "id": "780271",
-        "title": "ENG - Eat Pray Love 2010",
+        "id": "744220",
+        "title": "IN - Dangal (2016)",
         "category": {
           "id": "361",
           "name": "VOD - INDIA"
@@ -476,87 +238,32 @@
         "genres": [],
         "releaseDate": null,
         "adult": false,
-        "tmdbId": null,
+        "tmdbId": "360814",
         "artwork": {
-          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/9Hgiv1UEIjc8VwtOmFBCFzMs0er.jpg",
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/cJRPOLEexI7qp2DKtFfCh7YaaUG.jpg",
           "backdropUrl": null
         },
-        "contentId": "server_3:movie:780271",
+        "contentId": "server_3:movie:744220",
         "providerLastModified": null
       },
       "rawProviderRecord": {
-        "num": 57602,
-        "name": "ENG - Eat Pray Love 2010",
+        "num": 57984,
+        "name": "IN - Dangal  (2016)",
         "stream_type": "movie",
-        "stream_id": 780271,
-        "stream_icon": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/9Hgiv1UEIjc8VwtOmFBCFzMs0er.jpg",
-        "rating": "",
-        "rating_5based": "0",
-        "tmdb": "",
-        "trailer": "",
-        "added": "1663558020",
-        "is_adult": "0",
+        "stream_id": 744220,
+        "stream_icon": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/cJRPOLEexI7qp2DKtFfCh7YaaUG.jpg",
+        "rating": "8",
+        "rating_5based": 4,
+        "added": "1656668940",
         "category_id": "361",
-        "category_ids": [
-          361
-        ],
         "container_extension": "mp4",
-        "custom_sid": null,
-        "direct_source": ""
+        "tmdb": "360814"
       },
-      "directQuery": "Eat Pray Love",
-      "detailProbeIds": []
-    },
-    {
-      "contentId": "server_3:movie:611067",
-      "providerTitle": "PB - Thana Sadar 2021",
-      "publishedStatus": "no_match",
-      "matcherInput": {
-        "id": "611067",
-        "title": "PB - Thana Sadar 2021",
-        "category": {
-          "id": "1539",
-          "name": "VOD - PUNJABI"
-        },
-        "language": "pa",
-        "languages": [
-          "pa"
-        ],
-        "genre": "unknown",
-        "genres": [],
-        "releaseDate": null,
-        "adult": false,
-        "tmdbId": null,
-        "artwork": {
-          "posterUrl": null,
-          "backdropUrl": null
-        },
-        "contentId": "server_3:movie:611067",
-        "providerLastModified": null
-      },
-      "rawProviderRecord": {
-        "num": 60009,
-        "name": "PB - Thana Sadar 2021",
-        "stream_type": "movie",
-        "stream_id": 611067,
-        "stream_icon": "",
-        "rating": "",
-        "rating_5based": "0",
-        "tmdb": "",
-        "trailer": "",
-        "added": "1632375720",
-        "is_adult": "0",
-        "category_id": "1539",
-        "category_ids": [
-          1539
-        ],
-        "container_extension": "mp4",
-        "custom_sid": null,
-        "direct_source": ""
-      },
-      "directQuery": "Thana Sadar",
-      "detailProbeIds": []
+      "directQuery": "Dangal",
+      "detailProbeIds": [
+        "360814"
+      ]
     }
   ],
-  "detailProbeInterpretation": "Explicit candidate IDs from public film links. Their details do not themselves establish the provider asset identity."
+  "diagnosticScope": "Read-only follow-up: corrected Solva Saal spelling and provider-supplied Dangal ID."
 }
