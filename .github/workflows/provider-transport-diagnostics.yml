@@ -10,6 +10,7 @@ on:
           - live
           - vod_evidence
           - vod_identity_coverage
+          - vod_recent_samples
         default: live
 
 permissions:
@@ -53,6 +54,10 @@ jobs:
             mkdir -p .build/vod-identity-coverage
             timeout --signal=TERM --kill-after=10s 7m python -u scripts/diagnose_vod_identity_coverage.py \
               --output .build/vod-identity-coverage/report.json
+          elif [[ "$DIAGNOSTIC_MODE" == "vod_recent_samples" ]]; then
+            mkdir -p .build/vod-recent-samples
+            timeout --signal=TERM --kill-after=10s 8m python -u scripts/diagnose_vod_recent_samples.py \
+              --output .build/vod-recent-samples/report.json
           elif [[ "$DIAGNOSTIC_MODE" == "live" ]]; then
             python -u scripts/diagnose_provider_transport.py
           else
@@ -66,6 +71,16 @@ jobs:
         with:
           name: vod-identity-coverage-${{ github.run_id }}
           path: .build/vod-identity-coverage/report.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
+
+      - name: Retain redacted recent movie samples
+        if: ${{ success() && inputs.mode == 'vod_recent_samples' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-recent-samples-${{ github.run_id }}
+          path: .build/vod-recent-samples/report.json
           if-no-files-found: error
           retention-days: 7
           compression-level: 6
