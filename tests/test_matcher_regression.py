@@ -291,6 +291,15 @@ class MatcherIntegrityTests(unittest.TestCase):
             ("vodProviderEvidenceDiagnosticWorkflowSha256", ".github/workflows/provider-transport-diagnostics.yml"),
             ("vodPreparedInstallerSha256", "scripts/install_vod_catalogs.py"),
             ("vodSeriesSha256", "scripts/vod_series.py"),
+            ('aliasIndexSha256', 'scripts/matcher_alias_index.py'),
+            ('matcherDecisionCacheSha256', 'scripts/matcher_decision_cache.py'),
+            ('privateMatcherCacheSha256', 'scripts/private_matcher_cache.py'),
+            ('publicationSnapshotsSha256', 'scripts/publication_snapshots.py'),
+            ('componentArtifactsSha256', 'scripts/component_artifacts.py'),
+            ('publicSecretScannerSha256', 'scripts/scan_public_secrets.py'),
+            ('publicationChecksSha256', 'scripts/check_publication.sh'),
+            ('vodWorkflowSha256', '.github/workflows/vod.yml'),
+            ('componentPublisherWorkflowSha256', '.github/workflows/publish-component.yml'),
         ):
             with self.subTest(protected_file=relative_path):
                 self.assertEqual(
