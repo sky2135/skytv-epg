@@ -15,6 +15,9 @@ Each batch freezes its source records and baseline app identities, commits
 completed outcomes to SQLite, saves its own TMDB cache and complete checkpoint
 as a checksum-verified Actions artifact, then dispatches the next batch. No
 completed record is skipped merely because an integer cursor advanced.
+The initial batch checkpoints after at most two minutes of active matching
+following input/cache preparation, proving the handoff before the normal
+15-minute batches continue.
 Cross-server work is shared only when the actual matcher identity and its
 reviewed constraints agree. Negative caches are revisited for this pass.
 

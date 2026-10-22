@@ -199,6 +199,9 @@ def run_batch(*, state_dir, test_id, component_dir=None, seed_cache=None,
             # safely replays initialization and identical committed outcomes.
             checkpoint.set_meta('verificationConfig', config)
             del records, document, warmed
+            # Exercise a real cross-run checkpoint early, then use the normal
+            # longer batches. This is a time boundary, not an API quota.
+            batch_seconds = min(batch_seconds, 120)
         ready = True
         deadline = time.time() + batch_seconds
         limiter = SharedRateLimiter(rate=rate, deadline=deadline,
@@ -287,6 +290,7 @@ def run_batch(*, state_dir, test_id, component_dir=None, seed_cache=None,
                       sourceIdentity=checkpoint.get_meta('sourceIdentity'),
                       batchNumber=checkpoint.get_meta('batchNumber'),
                       batchCompletedGroups=completed_groups,
+                      batchDeadlineSeconds=batch_seconds,
                       initialVerifiedCacheReuse=checkpoint.get_meta('initialVerifiedCacheReuse', 0),
                       posterCollisionRechecks=checkpoint.get_meta('posterCollisionRechecks', 0),
                       api=limiter.snapshot(), requestQuota=None,
