@@ -39,7 +39,7 @@ class ReviewedMovieAliasesTests(unittest.TestCase):
 
     def test_document_contains_only_source_backed_search_aliases_for_these_records(self):
         document = json.loads((ROOT / "data/vod_reviewed_corrections.json").read_text(encoding="utf-8"))
-        self.assertEqual(document["reviewedAt"], "2026-10-21")
+        self.assertEqual(document["reviewedAt"], "2026-10-22")
         validated = reviewed._validate_document(document)
         for record_id, title, alias, evidence in CASES:
             with self.subTest(record_id=record_id):

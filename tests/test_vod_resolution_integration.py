@@ -204,7 +204,7 @@ class ResolutionIntegrationTests(unittest.TestCase):
         self.assertEqual(stats["requests"], 2)
 
     def test_normal_publisher_honors_queue_backoff_after_negative_cache_ttl(self):
-        data = source(movie(1, stream_icon="https://image.tmdb.org/t/p/w500/provider.jpg"))
+        data = source(movie(1, stream_icon="https://cdn.example.com/provider.jpg"))
         warm = tmdb.TmdbClient(self.cache / "tmdb", token="token", now=1_800_000_000,
                               session=FakeSession(FakeResponse({"total_pages": 0, "results": []})))
         app.backfill_release_dates([("server_1", data)], warm, NOW, queue=self.queue())

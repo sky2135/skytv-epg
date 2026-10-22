@@ -117,6 +117,20 @@ The release validator rejects known wrong IDs and lost reviewed facts.
 which audio tracks a provider supplies. Never offer a language option solely
 because TMDB lists it.
 
+Matching removes observed provider wrappers such as `IN -`, `ENG -`, `PB -`,
+language labels and `(CAM)` before extracting a wrapped or trailing release
+year. These wrappers do not determine the provider's audio language. Reviewed
+search-only corrections prioritize the checked records without supplying an
+unverified TMDB ID or changing their display titles.
+
+An otherwise unmatched movie with a genuine missing TMDB release date can use
+a separate title/poster proof: a complete yearless search must return exactly
+one exact-title movie, its current official poster must match the provider's,
+and TMDB must supply neither a primary nor regional release date. Poster
+collisions and supplied/rejected ID constraints still block approval. The app
+receives `matched_poster` with an unknown release date; the provider's year is
+only private source context. The same proof is revalidated when reusing cache.
+
 Confident TMDB matches can add original title, overview, release information,
 genres, rating, vote count, popularity, runtime, cast, directors, trailers,
 artwork, and TV status and episode summary fields. Title searches require
