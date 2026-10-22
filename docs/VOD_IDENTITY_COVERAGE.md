@@ -29,3 +29,22 @@ contains no raw movie titles, film IDs, provider URLs, credentials or payloads.
 The public app export can be audited separately for verified matches; absence
 of an IMDb field there does not establish absence in an upstream inventory or
 an individual movie's detail response.
+
+## Inspect recently added provider records
+
+Use mode `vod_recent_samples` to inspect the five most recently added movies
+in each explicit English, Hindi and Punjabi category group on every server.
+Selection uses the provider's `added` timestamp, not a film's release date.
+Unclassified languages and entries with unusable added timestamps are reported
+rather than guessed. Subtitle categories remain separate.
+
+This mode also attempts a bounded `get_vod_info` request for each selected movie.
+The report keeps list metadata and detail metadata separate and adds no TMDB
+enrichment. Detail failures are recorded using fixed error codes; the existing
+authentication, redirect and download checks remain in force.
+
+The `vod-recent-samples` artifact contains actual provider metadata with an
+explicit export allowlist. Credentials, authenticated/provider URLs, playback
+sources and unsupported fields are withheld. Redaction is reported, so this is
+an inspectable metadata sample rather than a complete unfiltered API response.
+Only the fixed `report.json` file is retained for seven days.

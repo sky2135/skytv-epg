@@ -287,6 +287,7 @@ class MatcherIntegrityTests(unittest.TestCase):
             ("vodProviderEvidenceSha256", "scripts/vod_provider_evidence.py"),
             ("vodProviderEvidenceDiagnosticSha256", "scripts/diagnose_vod_provider_evidence.py"),
             ("vodIdentityCoverageDiagnosticSha256", "scripts/diagnose_vod_identity_coverage.py"),
+            ("vodRecentSamplesDiagnosticSha256", "scripts/diagnose_vod_recent_samples.py"),
             ("vodProviderEvidenceDiagnosticWorkflowSha256", ".github/workflows/provider-transport-diagnostics.yml"),
             ("vodPreparedInstallerSha256", "scripts/install_vod_catalogs.py"),
             ("vodSeriesSha256", "scripts/vod_series.py"),
