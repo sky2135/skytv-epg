@@ -29,17 +29,27 @@ jobs:
           python -m pip install --only-binary=:all: requests==2.32.5
       - name: Run offline diagnostic tests
         run: python -m unittest discover -s tests -p test_vod_match_diagnostics.py -v
-      - name: Replay the reviewed public input snapshot
+      - name: Restore production VOD cache for read-only rejection evidence
+        id: vod_cache
+        continue-on-error: true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .build/vod-cache
+          key: eight-title-diagnostic-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            skytvplayer-vod-v1-${{ runner.os }}-
+      - name: Search eight public titles and trace matcher rejections
         env:
           TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          PRODUCTION_CACHE_KEY: ${{ steps.vod_cache.outputs.cache-matched-key }}
         run: |
           timeout --signal=TERM --kill-after=30s 12m \
-            python -u scripts/diagnose_vod_matches.py \
-              --input data/diagnostics/server1-unmatched-2026-10-21.json \
+            python -u scripts/diagnose_eight_title_searches.py \
+              --input data/diagnostics/eight-title-search-2026-10-22.json \
               --output .build/vod-match-diagnostics/report.json \
-              --max-requests 900 \
-              --max-seconds 600
+              --production-cache .build/vod-cache \
+              --compare-adult
       - name: Retain public identity diagnostic report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

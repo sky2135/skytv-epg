@@ -1,0 +1,506 @@
+{
+  "schemaVersion": 1,
+  "snapshotGeneratedAt": "2026-10-22T14:08:12Z",
+  "capturedAtUtc": "2026-10-22T15:02:02Z",
+  "captureRunId": 39800896118,
+  "recordCount": 7,
+  "sourceProofs": {
+    "catalogIndex": {
+      "file": "index.json",
+      "bytes": 4633,
+      "sha256": "7349f8e637372c0f4365a518574fa4323935ef1cc7cd4886b14a158e0a633297",
+      "generatedAt": "2026-10-22T14:08:12Z"
+    },
+    "movieManifests": [
+      {
+        "serverId": "server_1",
+        "file": "server_1_movies_manifest.a8bef33e667309c6.json",
+        "sha256": "a8bef33e667309c639c4c21d304a9b03d6b32a12bf79b77288f6de15043ecf17",
+        "compressedBytes": 42106
+      },
+      {
+        "serverId": "server_2",
+        "file": "server_2_movies_manifest.512ba11dfc044c2c.json",
+        "sha256": "512ba11dfc044c2cc3cd43992ebfebf5a0be399e91b0076dcb46d31ceed56a48",
+        "compressedBytes": 35861
+      },
+      {
+        "serverId": "server_3",
+        "file": "server_3_movies_manifest.da2da3543ea83bad.json",
+        "sha256": "da2da3543ea83bad00ac388e35dea3ea160eb107832264e57d14487479753b9e",
+        "compressedBytes": 62939
+      }
+    ],
+    "selectedMovieShards": [
+      {
+        "serverId": "server_1",
+        "file": "server_1_movies_052000.b2cfe57e528004f4.json.gz",
+        "sha256": "b2cfe57e528004f4e3665932e7224b7fcfe6222661a2dac4a3ded31cbc7fc695",
+        "compressedBytes": 45480,
+        "uncompressedBytes": 441293,
+        "contentIds": [
+          "server_1:movie:825453",
+          "server_1:movie:824536"
+        ]
+      },
+      {
+        "serverId": "server_1",
+        "file": "server_1_movies_054000.b1d532655bfaa00a.json.gz",
+        "sha256": "b1d532655bfaa00ae32e46e4434e24ec4eb86f86f3fa977807ced74b4ded2464",
+        "compressedBytes": 146255,
+        "uncompressedBytes": 678545,
+        "contentIds": [
+          "server_1:movie:826646"
+        ]
+      },
+      {
+        "serverId": "server_2",
+        "file": "server_2_movies_019000.2971c989272e9abb.json.gz",
+        "sha256": "2971c989272e9abb54b235a3f9e322dc700f70c7b9b2520ff58dea8cc36e9117",
+        "compressedBytes": 59193,
+        "uncompressedBytes": 484092,
+        "contentIds": [
+          "server_2:movie:2558871"
+        ]
+      },
+      {
+        "serverId": "server_2",
+        "file": "server_2_movies_050500.0f66b4929d3288e4.json.gz",
+        "sha256": "0f66b4929d3288e490d0b3dfa399bb309088fb36b9072d9f18bb3db10418718a",
+        "compressedBytes": 48350,
+        "uncompressedBytes": 451251,
+        "contentIds": [
+          "server_2:movie:2353187"
+        ]
+      },
+      {
+        "serverId": "server_2",
+        "file": "server_2_movies_051000.56fa4038215331f9.json.gz",
+        "sha256": "56fa4038215331f99b009ec8654d955096a6fcd2d042fe79c347c8bc4e984dd3",
+        "compressedBytes": 24465,
+        "uncompressedBytes": 410471,
+        "contentIds": [
+          "server_2:movie:2464200"
+        ]
+      },
+      {
+        "serverId": "server_3",
+        "file": "server_3_movies_077500.d37fd4c361d2d6a8.json.gz",
+        "sha256": "d37fd4c361d2d6a81d4b82eee32142a63cc8e493c5a01f808ca7b82bb1548423",
+        "compressedBytes": 31299,
+        "uncompressedBytes": 419557,
+        "contentIds": [
+          "server_3:movie:611067"
+        ]
+      },
+      {
+        "serverId": "server_3",
+        "file": "server_3_movies_090000.a027f8ece8a582f3.json.gz",
+        "sha256": "a027f8ece8a582f3dd4cedab9e47f6a6cab83dbdac2dc1e1cc708312833c42ee",
+        "compressedBytes": 26713,
+        "uncompressedBytes": 410106,
+        "contentIds": [
+          "server_3:movie:780271"
+        ]
+      }
+    ],
+    "rawProviderRecords": [
+      {
+        "contentId": "server_1:movie:826646",
+        "file": "unfiltered-provider-data/server_1/en/selectedlistrecord.raw.json",
+        "bytes": 341,
+        "sha256": "e6c2800197bf46a721fd599840e072ba298dba39b4efafd7e96ae28dd471ebb9"
+      },
+      {
+        "contentId": "server_1:movie:825453",
+        "file": "unfiltered-provider-data/server_1/hi/selectedlistrecord.raw.json",
+        "bytes": 342,
+        "sha256": "1afc30ba927b53cb0cca8df96b53cb63d5e7a776d62906834dd977c3c69b1665"
+      },
+      {
+        "contentId": "server_1:movie:824536",
+        "file": "unfiltered-provider-data/server_1/pa/selectedlistrecord.raw.json",
+        "bytes": 329,
+        "sha256": "c7b4fdb2c2bac42e035f02d08ab716bcfc0dc4e4e4a67ccb58c74d643c8c20e2"
+      },
+      {
+        "contentId": "server_2:movie:2558871",
+        "file": "unfiltered-provider-data/server_2/en/selectedlistrecord.raw.json",
+        "bytes": 288,
+        "sha256": "958c759d26d997cb0728af01d97898bb1bc824a6276c456d8e7d0a3497e9f534"
+      },
+      {
+        "contentId": "server_2:movie:2353187",
+        "file": "unfiltered-provider-data/server_2/hi/selectedlistrecord.raw.json",
+        "bytes": 301,
+        "sha256": "b19a61d81d674fd89cecdb625f6a81fbdda62d7ea86180695aed7e13deae18c0"
+      },
+      {
+        "contentId": "server_2:movie:2464200",
+        "file": "unfiltered-provider-data/server_2/pa/selectedlistrecord.raw.json",
+        "bytes": 304,
+        "sha256": "00034a396fc2fe9aabc81868e439b09e00bcc8dc9561ed9cc15db6157291e584"
+      },
+      {
+        "contentId": "server_3:movie:780271",
+        "file": "unfiltered-provider-data/server_3/en/selectedlistrecord.raw.json",
+        "bytes": 387,
+        "sha256": "c9c7fd72a95f49ce779dc6afb0d14017e8c6bdb49181b42adb532f66f031da2a"
+      },
+      {
+        "contentId": "server_3:movie:611067",
+        "file": "unfiltered-provider-data/server_3/pa/selectedlistrecord.raw.json",
+        "bytes": 301,
+        "sha256": "94c630ea714b7bbd506f9808b85e2147db26a3f4c971d2406fd7e21311382cc9"
+      }
+    ],
+    "captureProvenanceSha256": "8cba57d26e93cf044bcab3dc462326b0ba5e13f409660003879f5aa21c1be016"
+  },
+  "reconstruction": {
+    "method": "build_skytvplayer_catalog._prepare_catalog then _matching_item",
+    "categorySource": "hash-verified published movie category",
+    "providerDetailsIncluded": false,
+    "privateProviderIdentityEvidenceIncluded": false,
+    "productionTmdbCacheIncluded": false,
+    "values": "Original provider JSON field values and types; rawProviderRecord is a JSON object, source exact bytes are identified by SHA256.",
+    "replayMeaning": "Current cold matcher and direct-name query diagnostics; not evidence of historical TMDB search results."
+  },
+  "records": [
+    {
+      "contentId": "server_1:movie:826646",
+      "providerTitle": "The Bloodline of Bathory (2026) (English)",
+      "publishedStatus": "no_match",
+      "matcherInput": {
+        "id": "826646",
+        "title": "The Bloodline of Bathory (2026) (English)",
+        "category": {
+          "id": "749",
+          "name": "ENGLISH | FHD 2026"
+        },
+        "language": "en",
+        "languages": [
+          "en"
+        ],
+        "genre": "unknown",
+        "genres": [],
+        "releaseDate": null,
+        "adult": null,
+        "tmdbId": null,
+        "artwork": {
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/eLUBCr6e4iSxzhhIhXqjam9ECXp.jpg",
+          "backdropUrl": null
+        },
+        "contentId": "server_1:movie:826646",
+        "providerLastModified": null
+      },
+      "rawProviderRecord": {
+        "num": 65547,
+        "name": "The Bloodline of Bathory (2026) (English)",
+        "stream_type": "movie",
+        "stream_id": 826646,
+        "stream_icon": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/eLUBCr6e4iSxzhhIhXqjam9ECXp.jpg",
+        "rating": "",
+        "rating_5based": 0,
+        "added": "1792610907",
+        "category_id": "749",
+        "container_extension": "mp4",
+        "custom_sid": "",
+        "direct_source": ""
+      },
+      "directQuery": "The Bloodline of Bathory",
+      "detailProbeIds": [
+        "1756427"
+      ]
+    },
+    {
+      "contentId": "server_1:movie:825453",
+      "providerTitle": "Street Fighter (2026) (Hindi) (CAM)",
+      "publishedStatus": "no_match",
+      "matcherInput": {
+        "id": "825453",
+        "title": "Street Fighter (2026) (Hindi) (CAM)",
+        "category": {
+          "id": "623",
+          "name": "ENGLISH | HINDI DUBBED CAM"
+        },
+        "language": "mul",
+        "languages": [
+          "en",
+          "hi"
+        ],
+        "genre": "unknown",
+        "genres": [],
+        "releaseDate": null,
+        "adult": null,
+        "tmdbId": null,
+        "artwork": {
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/pwUb3gdkSrlyMZWs0MFOQg3N5s7.jpg",
+          "backdropUrl": null
+        },
+        "contentId": "server_1:movie:825453",
+        "providerLastModified": null
+      },
+      "rawProviderRecord": {
+        "num": 65485,
+        "name": "Street Fighter (2026) (Hindi) (CAM)",
+        "stream_type": "movie",
+        "stream_id": 825453,
+        "stream_icon": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/pwUb3gdkSrlyMZWs0MFOQg3N5s7.jpg",
+        "rating": "6.245",
+        "rating_5based": 3.1,
+        "added": "1792432882",
+        "category_id": "623",
+        "container_extension": "mp4",
+        "custom_sid": "",
+        "direct_source": ""
+      },
+      "directQuery": "Street Fighter",
+      "detailProbeIds": []
+    },
+    {
+      "contentId": "server_1:movie:824536",
+      "providerTitle": "Thaapi (2026) (Punjabi) (CAM)",
+      "publishedStatus": "no_match",
+      "matcherInput": {
+        "id": "824536",
+        "title": "Thaapi (2026) (Punjabi) (CAM)",
+        "category": {
+          "id": "631",
+          "name": "PUNJABI | 2026 CAM"
+        },
+        "language": "pa",
+        "languages": [
+          "pa"
+        ],
+        "genre": "unknown",
+        "genres": [],
+        "releaseDate": null,
+        "adult": null,
+        "tmdbId": null,
+        "artwork": {
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/cBTC5Avl6k23K0KCvPNywnqVSJo.jpg",
+          "backdropUrl": null
+        },
+        "contentId": "server_1:movie:824536",
+        "providerLastModified": null
+      },
+      "rawProviderRecord": {
+        "num": 65439,
+        "name": "Thaapi (2026) (Punjabi) (CAM)",
+        "stream_type": "movie",
+        "stream_id": 824536,
+        "stream_icon": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/cBTC5Avl6k23K0KCvPNywnqVSJo.jpg",
+        "rating": "",
+        "rating_5based": 0,
+        "added": "1792262814",
+        "category_id": "631",
+        "container_extension": "mp4",
+        "custom_sid": "",
+        "direct_source": ""
+      },
+      "directQuery": "Thaapi",
+      "detailProbeIds": [
+        "1784165"
+      ]
+    },
+    {
+      "contentId": "server_2:movie:2464200",
+      "providerTitle": "Solvan Saal 1958 Punjabi",
+      "publishedStatus": "no_match",
+      "matcherInput": {
+        "id": "2464200",
+        "title": "Solvan Saal 1958 Punjabi",
+        "category": {
+          "id": "7502",
+          "name": "VOD | Punjabi Modern"
+        },
+        "language": "pa",
+        "languages": [
+          "pa"
+        ],
+        "genre": "unknown",
+        "genres": [],
+        "releaseDate": null,
+        "adult": false,
+        "tmdbId": null,
+        "artwork": {
+          "posterUrl": null,
+          "backdropUrl": null
+        },
+        "contentId": "server_2:movie:2464200",
+        "providerLastModified": null
+      },
+      "rawProviderRecord": {
+        "num": 47497,
+        "name": "Solvan Saal 1958 Punjabi",
+        "stream_type": "movie",
+        "stream_id": 2464200,
+        "stream_icon": "",
+        "rating": "0",
+        "rating_5based": "0",
+        "tmdb": "",
+        "trailer": "",
+        "added": "1782546489",
+        "is_adult": 0,
+        "category_id": "7502",
+        "category_ids": [
+          7502
+        ],
+        "container_extension": "mp4",
+        "custom_sid": null,
+        "direct_source": ""
+      },
+      "directQuery": "Solva Saal",
+      "detailProbeIds": [
+        "275784"
+      ]
+    },
+    {
+      "contentId": "server_3:movie:780271",
+      "providerTitle": "ENG - Eat Pray Love 2010",
+      "publishedStatus": "no_match",
+      "matcherInput": {
+        "id": "780271",
+        "title": "ENG - Eat Pray Love 2010",
+        "category": {
+          "id": "361",
+          "name": "VOD - INDIA"
+        },
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "genre": "unknown",
+        "genres": [],
+        "releaseDate": null,
+        "adult": false,
+        "tmdbId": null,
+        "artwork": {
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/9Hgiv1UEIjc8VwtOmFBCFzMs0er.jpg",
+          "backdropUrl": null
+        },
+        "contentId": "server_3:movie:780271",
+        "providerLastModified": null
+      },
+      "rawProviderRecord": {
+        "num": 57602,
+        "name": "ENG - Eat Pray Love 2010",
+        "stream_type": "movie",
+        "stream_id": 780271,
+        "stream_icon": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/9Hgiv1UEIjc8VwtOmFBCFzMs0er.jpg",
+        "rating": "",
+        "rating_5based": "0",
+        "tmdb": "",
+        "trailer": "",
+        "added": "1663558020",
+        "is_adult": "0",
+        "category_id": "361",
+        "category_ids": [
+          361
+        ],
+        "container_extension": "mp4",
+        "custom_sid": null,
+        "direct_source": ""
+      },
+      "directQuery": "Eat Pray Love",
+      "detailProbeIds": []
+    },
+    {
+      "contentId": "server_3:movie:611067",
+      "providerTitle": "PB - Thana Sadar 2021",
+      "publishedStatus": "no_match",
+      "matcherInput": {
+        "id": "611067",
+        "title": "PB - Thana Sadar 2021",
+        "category": {
+          "id": "1539",
+          "name": "VOD - PUNJABI"
+        },
+        "language": "pa",
+        "languages": [
+          "pa"
+        ],
+        "genre": "unknown",
+        "genres": [],
+        "releaseDate": null,
+        "adult": false,
+        "tmdbId": null,
+        "artwork": {
+          "posterUrl": null,
+          "backdropUrl": null
+        },
+        "contentId": "server_3:movie:611067",
+        "providerLastModified": null
+      },
+      "rawProviderRecord": {
+        "num": 60009,
+        "name": "PB - Thana Sadar 2021",
+        "stream_type": "movie",
+        "stream_id": 611067,
+        "stream_icon": "",
+        "rating": "",
+        "rating_5based": "0",
+        "tmdb": "",
+        "trailer": "",
+        "added": "1632375720",
+        "is_adult": "0",
+        "category_id": "1539",
+        "category_ids": [
+          1539
+        ],
+        "container_extension": "mp4",
+        "custom_sid": null,
+        "direct_source": ""
+      },
+      "directQuery": "Thana Sadar",
+      "detailProbeIds": []
+    },
+    {
+      "contentId": "server_3:movie:744220",
+      "providerTitle": "IN - Dangal  (2016)",
+      "publishedStatus": "unavailable",
+      "matcherInput": {
+        "id": "744220",
+        "title": "IN - Dangal (2016)",
+        "category": {
+          "id": "361",
+          "name": "VOD - INDIA"
+        },
+        "language": "und",
+        "languages": [
+          "und"
+        ],
+        "genre": "unknown",
+        "genres": [],
+        "releaseDate": null,
+        "adult": false,
+        "tmdbId": "360814",
+        "artwork": {
+          "posterUrl": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/cJRPOLEexI7qp2DKtFfCh7YaaUG.jpg",
+          "backdropUrl": null
+        },
+        "contentId": "server_3:movie:744220",
+        "providerLastModified": null
+      },
+      "rawProviderRecord": {
+        "num": 57984,
+        "name": "IN - Dangal  (2016)",
+        "stream_type": "movie",
+        "stream_id": 744220,
+        "stream_icon": "https://image.tmdb.org/t/p/w600_and_h900_bestv2/cJRPOLEexI7qp2DKtFfCh7YaaUG.jpg",
+        "rating": "8",
+        "rating_5based": 4,
+        "added": "1656668940",
+        "category_id": "361",
+        "container_extension": "mp4",
+        "tmdb": "360814"
+      },
+      "directQuery": "Dangal",
+      "detailProbeIds": [
+        "360814"
+      ]
+    }
+  ],
+  "detailProbeInterpretation": "Explicit candidate IDs from public film links. Their details do not themselves establish the provider asset identity.",
+  "diagnosticScope": "Read-only rollout proof of seven previously unmatched records using current matching rules."
+}
