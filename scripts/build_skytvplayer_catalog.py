@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 import requests
 
 import build_vod_catalogs as vod
-from vod_tmdb import TmdbClient, _date as tmdb_date, _enrichment_identity
+from vod_tmdb import TmdbClient, _date as tmdb_date, _enrichment_identity, poster_identity
 from vod_series import enrich_series
 from vod_reviewed_corrections import apply_reviewed_correction, correction_for
 from vod_resolution_queue import ResolutionQueue
@@ -129,7 +129,12 @@ def _matching_item(item, row, kind, evidence):
 
 
 def _resolve_metadata(client, server_id, kind, match_item, resolution_queue):
-    if resolution_queue is not None and resolution_queue.defer_cached_miss(server_id, kind, match_item):
+    poster_lookup = getattr(client, "poster_retry_candidate", None)
+    if not callable(poster_lookup):
+        poster_lookup = getattr(client, "poster_candidate", None)
+    poster_retry = bool(callable(poster_lookup) and poster_lookup(match_item, kind))
+    if (not poster_retry and resolution_queue is not None
+            and resolution_queue.defer_cached_miss(server_id, kind, match_item)):
         reader = getattr(client, "_identity_cache", None)
         if callable(reader):
             key, identifier, title, year = _enrichment_identity(match_item, kind)
@@ -147,9 +152,45 @@ def _metadata_result_key(item, kind, resolution_queue):
     # A physical cache key does not encode all reviewed rejected-ID constraints.
     constraints = {"correction": correction_for(server_id, kind, item),
                    "evidence": item.get("_identityEvidence"),
+                   "poster": poster_identity(item),
                    "queueDeferred": bool(resolution_queue and
                        resolution_queue.defer_cached_miss(server_id, kind, item))}
     return physical_key, hashlib.sha256(json_bytes(constraints)).hexdigest()
+
+
+def _poster_retry_priority(client, item, kind, priority):
+    """Promote verified poster retries without moving cached matches forward."""
+    if priority < 0 or poster_identity(item) is None:
+        return priority
+    retry = getattr(client, "poster_retry_candidate", None)
+    if callable(retry):
+        candidate = retry(item, kind)
+    else:
+        # Older/custom clients cannot distinguish a fresh match from a fresh
+        # miss at priority 3. Leave that priority unchanged without extra I/O.
+        lookup = getattr(client, "poster_candidate", None)
+        candidate = lookup(item, kind) if priority in {0, 2} and callable(lookup) else None
+    return -0.5 if candidate else priority
+
+
+def _warm_serial_priorities(groups, client, evidence):
+    """Move the existing serial priority reads ahead of all metadata requests."""
+    priority = getattr(client, "enrichment_priority", lambda _item, _kind: 0)
+    for group in groups:
+        prepared, kind = group["prepared"], group["kind"]
+        items, priorities = {}, {}
+        for base in prepared["normalized"]:
+            item = _matching_item(base, prepared["raw_rows"].get(base["id"], {}), kind, evidence)
+            items[base["id"]] = item
+            priorities[base["id"]] = priority(item, kind)
+        prepared["matching_items"], prepared["priorities"] = items, priorities
+    # All positive caches are now represented, including later servers/kinds.
+    for group in groups:
+        prepared, kind = group["prepared"], group["kind"]
+        prepared["priorities"] = {
+            identifier: _poster_retry_priority(client, item, kind, prepared["priorities"][identifier])
+            for identifier, item in prepared["matching_items"].items()
+        }
 
 
 class _TmdbPacer:
@@ -240,32 +281,58 @@ def _prefetch_metadata(groups, client, workers, evidence, resolution_queue,
     available = max(0, client.max_requests - client.stats.get("requests", 0))
     quota, remainder = divmod(available, len(groups)) if groups else (0, 0)
     pacer = _TmdbPacer()
-    global_deadline = time.monotonic() + 45 * len(groups)
+    contexts = []
+    try:
+        # The existing priority reads also validate cached positive identities
+        # and seed the shared poster index. Complete every group before HTTP
+        # work so a later provider can supply evidence for an earlier provider.
+        for position in range(len(groups)):
+            deadline = time.monotonic() + 45 * len(groups)
+            session = session_factory(pacer, deadline)
+            context = {"session": session, "client": None}
+            contexts.append(context)
+            context["client"] = factory(client.cache_dir.parent, token=client.token, api_key=client.api_key,
+                max_requests=quota + (position < remainder), session=session,
+                now=client._now, max_elapsed_seconds=45)
 
-    def resolve(position):
-        limit = quota + (position < remainder)
-        deadline = min(global_deadline, time.monotonic() + 45)
-        session = session_factory(pacer, deadline)
-        child = None
-        try:
-            child = factory(client.cache_dir.parent, token=client.token, api_key=client.api_key,
-                max_requests=limit, session=session, now=client._now,
-                max_elapsed_seconds=max(0, deadline - time.monotonic()))
-            work = sorted(jobs[position], key=lambda entry:
-                (child.enrichment_priority(entry[1], entry[2]), vod._sort_item_id(entry[1]), entry[0]))
+        def prioritize(position):
+            child = contexts[position]["client"]
+            priority = getattr(child, "enrichment_priority", lambda _item, _kind: 0)
+            return [(key, item, kind, priority(item, kind))
+                    for key, item, kind in jobs[position]]
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(prioritize, position) for position in range(len(groups))]
+            ranked = [future.result() for future in futures]
+        jobs.clear()
+
+        global_deadline = time.monotonic() + 45 * len(groups)
+
+        def resolve(position):
+            child, session = contexts[position]["client"], contexts[position]["session"]
+            deadline = min(global_deadline, time.monotonic() + 45)
+            if hasattr(session, "deadline"):
+                session.deadline = deadline
+            reset = getattr(child, "reset_elapsed_budget", None)
+            if callable(reset):
+                reset(max(0, deadline - time.monotonic()))
+            work = sorted(ranked[position], key=lambda entry:
+                (_poster_retry_priority(child, entry[1], entry[2], entry[3]),
+                 vod._sort_item_id(entry[1]), entry[0]))
             results = {}
-            for key, item, kind in work:
+            for key, item, kind, _priority in work:
                 server_id = item["contentId"].split(":", 1)[0]
                 results[key] = _resolve_metadata(child, server_id, kind, item, resolution_queue)
             return results, dict(child.stats)
-        finally:
-            if child is not None:
-                child.close()
-            session.close()
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [executor.submit(resolve, position) for position in range(len(groups))]
-        completed = [future.result() for future in futures]
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(resolve, position) for position in range(len(groups))]
+            completed = [future.result() for future in futures]
+    finally:
+        for context in contexts:
+            if context["client"] is not None:
+                context["client"].close()
+            context["session"].close()
     results = {}
     for values, stats in completed:
         results.update(values)
@@ -295,7 +362,10 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
     result = []
     corrections = prepared["corrections"]
     priority = getattr(client, "enrichment_priority", lambda _item, _kind: 0)
-    normalized.sort(key=lambda item: (priority(item, kind), vod._sort_item_id(item)))
+    priorities = prepared.get("priorities")
+    normalized.sort(key=lambda item: (
+        priorities[item["id"]] if priorities is not None else priority(item, kind),
+        vod._sort_item_id(item)))
     for base in normalized:
         provider_id = base["id"]
         content_id = f"{server_id}:{kind}:{provider_id}"
@@ -313,7 +383,9 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
         extension = vod.clean_text(vod._first_value(sources, ("container_extension",)), 8)
         if movie:
             item["containerExtension"] = extension.lower() if SAFE_EXTENSION.fullmatch(extension) else None
-        match_item = _matching_item(item, row, kind, evidence)
+        matching_items = prepared.get("matching_items")
+        match_item = (matching_items.pop(provider_id) if matching_items is not None
+                      else _matching_item(item, row, kind, evidence))
         metadata = _resolve_metadata(client, server_id, kind, match_item, resolution_queue)
         correction = corrections.get(provider_id)
         rejected_identity = bool(metadata.get("rejectedIdentity")) or bool(correction and correction.get("rejectIdentity"))
@@ -786,14 +858,18 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
     resolution_queue = ResolutionQueue(cache / "resolution-queue.json", policy_version=MATCH_STRATEGY, now=now)
     prefetched = None
     prepared_groups = {}
-    if tmdb_workers > 1:
+    warm_serial = tmdb_workers == 1 and callable(getattr(client, "poster_candidate", None))
+    if tmdb_workers > 1 or warm_serial:
         metadata_started = time.monotonic()
         for server_id, source, config in sources:
             for kind in ("movie", "series"):
                 prepared_groups[(server_id, kind)] = _prepare_catalog(server_id, kind, source, config)
         groups = [{"serverId": server_id, "kind": kind, "prepared": prepared_groups[(server_id, kind)]}
                   for server_id, _source, _config in sources for kind in ("movie", "series")]
-        prefetched = _prefetch_metadata(groups, client, tmdb_workers, evidence, resolution_queue)
+        if tmdb_workers > 1:
+            prefetched = _prefetch_metadata(groups, client, tmdb_workers, evidence, resolution_queue)
+        else:
+            _warm_serial_priorities(groups, client, evidence)
         del groups
         metadata_seconds += time.monotonic() - metadata_started
     tmdb_limit = client.max_requests

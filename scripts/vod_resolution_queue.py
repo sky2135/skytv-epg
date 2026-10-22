@@ -28,7 +28,7 @@ MAX_ENTRIES = 10_000
 MAX_CACHE_BYTES = 32 * 1024 * 1024
 MAX_CANDIDATES = 100
 DAY = 86_400
-MATCHED = {"matched_id", "matched_search", "matched_alias"}
+MATCHED = {"matched_id", "matched_search", "matched_alias", "matched_poster"}
 STABLE = {"ambiguous_title_year", "no_search_results", "title_mismatch", "year_mismatch",
           "incomplete_search", "alias_candidate_limit"}
 REASONS = MATCHED | STABLE | {"pending", "unavailable", "missing_identity"}

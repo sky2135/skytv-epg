@@ -2,6 +2,9 @@ name: Refresh VOD catalogs
 run-name: "VOD refresh (${{ github.event_name }} #${{ github.run_number }})"
 
 on:
+  schedule:
+    - cron: "47 4 * * *"
+      timezone: "America/New_York"
   workflow_dispatch:
 
 concurrency:
@@ -169,6 +172,9 @@ jobs:
             app_command=(/usr/bin/time -f "SkyTVPlayer peak RSS KiB: %M" "${app_command[@]}")
           fi
           timeout --signal=TERM --kill-after=30s 15m "${app_command[@]}"
+
+      - name: Audit verified identities by server and language
+        run: python scripts/audit_vod_identity_coverage.py --catalog-dir public/skytvplayer --output public/skytvplayer/identity_coverage.json --github-summary
 
       - name: Verify files contain no passwords, private URLs, or credential fields
         id: public_secret_scan

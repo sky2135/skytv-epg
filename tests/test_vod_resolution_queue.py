@@ -29,6 +29,21 @@ def movie(identifier=1, title="Example Film (2026)", **extra):
 
 
 class ResolutionQueueTests(unittest.TestCase):
+    def test_verified_poster_result_is_terminal_and_clears_retry_failure_streak(self):
+        queue = self.queue()
+        self.record(queue, "ambiguous_title_year")
+        self.assertEqual(self.row(queue)["failureStreak"], 1)
+        queue.record_result("server_1", "movie", movie(),
+                            {"matchStatus": "matched_poster", "tmdbId": "1307078"},
+                            {"reason": "matched_poster", "candidateIds": ["1307078"]})
+        row = self.row(queue)
+        self.assertEqual(row["reason"], "matched_poster")
+        self.assertEqual(row["failureStreak"], 0)
+        self.assertEqual(row["nextAttemptAt"], EPOCH + 14 * resolution.DAY)
+        self.assertFalse(queue.defer_cached_miss("server_1", "movie", movie()))
+        self.assertTrue(queue.save())
+        self.assertEqual(self.row(self.queue())["reason"], "matched_poster")
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
