@@ -12,7 +12,6 @@ on:
           - vod_identity_coverage
           - vod_recent_samples
           - vod_raw_samples
-          - cache_probe
         default: live
 
 permissions:
@@ -20,7 +19,6 @@ permissions:
 
 jobs:
   diagnose:
-    if: ${{ inputs.mode != 'cache_probe' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -35,91 +33,6 @@ jobs:
       - name: Install pinned dependencies
         run: |
           python -m pip install --only-binary=:all: -r requirements.txt -r requirements-sync.txt
-      - name: Run the selected read-only transport diagnostic
-        env:
-          DIAGNOSTIC_MODE: ${{ inputs.mode || 'live' }}
-          ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
-          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
-          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
-          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
-          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
-          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
-          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
-          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
-          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
-          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$DIAGNOSTIC_MODE" == "vod_evidence" ]]; then
-            timeout --signal=TERM --kill-after=10s 60s python -u scripts/diagnose_vod_provider_evidence.py
-          elif [[ "$DIAGNOSTIC_MODE" == "vod_identity_coverage" ]]; then
-            mkdir -p .build/vod-identity-coverage
-            timeout --signal=TERM --kill-after=10s 7m python -u scripts/diagnose_vod_identity_coverage.py \
-              --output .build/vod-identity-coverage/report.json
-          elif [[ "$DIAGNOSTIC_MODE" == "vod_recent_samples" ]]; then
-            mkdir -p .build/vod-recent-samples
-            timeout --signal=TERM --kill-after=10s 8m python -u scripts/diagnose_vod_recent_samples.py \
-              --output .build/vod-recent-samples/report.json
-          elif [[ "$DIAGNOSTIC_MODE" == "vod_raw_samples" ]]; then
-            python -m pip install --only-binary=:all: cryptography==50.0.2
-            mkdir -p .build/vod-raw-samples
-            timeout --signal=TERM --kill-after=10s 8m python -u scripts/capture_vod_raw_samples.py \
-              --recipient data/diagnostics/raw-sample-recipient.pem \
-              --output .build/vod-raw-samples/capture.enc.json
-          elif [[ "$DIAGNOSTIC_MODE" == "live" ]]; then
-            python -u scripts/diagnose_provider_transport.py
-          else
-            echo "Unsupported diagnostic mode." >&2
-            exit 2
-          fi
-
-      - name: Retain aggregate VOD identity coverage
-        if: ${{ success() && inputs.mode == 'vod_identity_coverage' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: vod-identity-coverage-${{ github.run_id }}
-          path: .build/vod-identity-coverage/report.json
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 6
-
-      - name: Retain encrypted one-time provider capture
-        if: ${{ success() && inputs.mode == 'vod_raw_samples' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: vod-raw-samples-encrypted-${{ github.run_id }}
-          path: .build/vod-raw-samples/capture.enc.json
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-
-      - name: Retain redacted recent movie samples
-        if: ${{ success() && inputs.mode == 'vod_recent_samples' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: vod-recent-samples-${{ github.run_id }}
-          path: .build/vod-recent-samples/report.json
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 6
-
-  inspect:
-    if: ${{ inputs.mode == 'cache_probe' }}
-    name: Read-only inspection of 38 changed cache identities
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Check out diagnostic revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
-        with:
-          python-version: '3.12'
-      - name: Install pinned dependencies
-        run: python -m pip install --only-binary=:all: -r requirements.txt -r requirements-sync.txt
       - name: Restore exact preceding VOD cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
