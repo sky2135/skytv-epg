@@ -18,7 +18,8 @@ import os
 import re
 import stat
 import sys
-from dataclasses import dataclass, replace
+import time
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -35,6 +36,8 @@ for import_path in (SCRIPT_DIR, SRC_DIR):
 
 import build_epg_streaming as streaming  # noqa: E402
 import epg_catalog_stream as catalog_stream  # noqa: E402
+import matcher_decision_cache as decision_cache  # noqa: E402
+from matcher_alias_index import install_alias_index  # noqa: E402
 from epg_selection_spool import EpgSelectionSpoolWriter, SpoolError  # noqa: E402
 from skytv_epg_auto_match_v1 import (  # noqa: E402
     CatalogSnapshot as MatcherCatalogSnapshot,
@@ -57,6 +60,7 @@ from skytv_epg_auto_match_v1 import (  # noqa: E402
 )
 from skytv_epg_contextual_v8 import (  # noqa: E402
     CandidateContextV8,
+    ContextualMatcherV8,
     _normalize_key_v8,
     _is_decorative_heading_v84 as _matcher_is_decorative_heading,
     install_contextual_v8,
@@ -457,9 +461,15 @@ class AutoMatchOutcome:
     new_approval_deferred_rows: int = 0
     ai_review_retry_candidate_rows: int = 0
     ai_review_active_fallback_candidate_rows: int = 0
+    matcher_cache_stats: Mapping[str, int] = field(default_factory=dict)
+    matcher_phase_milliseconds: Mapping[str, int] = field(default_factory=dict)
+    matcher_alias_index_stats: Mapping[str, int] = field(default_factory=dict)
 
     def summary_fields(self) -> dict[str, Any]:
         return {
+            **{f"matcher_cache_{key}": int(value) for key, value in self.matcher_cache_stats.items()},
+            **{f"matcher_phase_{key}_ms": int(value) for key, value in self.matcher_phase_milliseconds.items()},
+            **{f"matcher_alias_index_{key}": int(value) for key, value in self.matcher_alias_index_stats.items()},
             # Preserve the original public summary meaning: these fields refer
             # only to newly discovered rows. Existing REVIEW rechecks have
             # dedicated fields below so the two populations cannot be mixed.
@@ -3323,10 +3333,19 @@ def auto_match_and_spool(
     coverage_fallback_protected_native_keys: frozenset[
         tuple[str, str]
     ] = frozenset()
+    match_cache = decision_cache.DecisionCache.from_environment()
+    phase_milliseconds: dict[str, int] = {}
+    alias_index_box: list[Any] = []
+
+    def finish_phase(label: str, started: float) -> None:
+        elapsed = max(0, round((time.monotonic() - started) * 1000))
+        phase_milliseconds[label] = elapsed
+        print(f"Matcher phase {label}: {elapsed / 1000:.3f}s", flush=True)
 
     def select_provisional_ids(
         source_catalog: catalog_stream.CatalogSnapshot,
     ) -> Iterable[str]:
+        callback_started = time.monotonic()
         xml_ids = frozenset(channel.epg_id for channel in source_catalog.channels)
         text_ids = frozenset(entry.epg_id for entry in text_catalog.entries)
         corroboration = _corroborate_catalog_ids(
@@ -3431,7 +3450,9 @@ def auto_match_and_spool(
                 }
             )
             occupied_folds.add(folded)
+        phase_started = time.monotonic()
         runtime = runtime_factory(runtime_candidates, runtime_dummy_ids)
+        finish_phase("prepare_runtime", phase_started)
         if not runtime.identity.is_expected or not runtime.preflight.ready:
             raise AutoMatchError("The Version 1 matcher verification failed safely.")
         verification_candidates: list[VerificationCatalogCandidateEvidence] = []
@@ -3463,6 +3484,7 @@ def auto_match_and_spool(
                 )
             )
         verification_candidates_box.append(tuple(verification_candidates))
+        phase_started = time.monotonic()
         learned_alias_memory = _learn_cross_server_approved_aliases(
             resolver=runtime.resolver,
             mapping_rows=mapping_rows,
@@ -3470,6 +3492,13 @@ def auto_match_and_spool(
             quarantined_keys=canonical_quarantined_keys,
             current_unchanged_keys=current_unchanged_keys,
         )
+        finish_phase("learn_aliases", phase_started)
+        # Install after every current-run alias has been registered. Fake or
+        # custom test resolvers retain their original lookup implementation.
+        lookup = getattr(runtime.resolver, "_approved_alias_match", None)
+        if getattr(lookup, "__func__", None) is ContextualMatcherV8._approved_alias_match:
+            alias_index_box.append(install_alias_index(runtime.resolver))
+        phase_started = time.monotonic()
         all_route_ambiguity = (
             _all_route_ambiguity_labels(runtime)
             if any(
@@ -3490,20 +3519,80 @@ def auto_match_and_spool(
         )
         if not matcher_catalog.usable:
             raise AutoMatchError("The ALL_SOURCES1 catalog is not safe for matching.")
+        finish_phase("catalog_ambiguity", phase_started)
+        global_cache_dependency = ""
+        if match_cache.stats["enabled"]:
+            try:
+                # Programme bytes intentionally are not a decision dependency:
+                # current-run gates below must always independently recheck them.
+                global_cache_dependency = decision_cache.dependency_sha256({
+                    "rules": decision_cache.rules_sha256([
+                        *sorted(SRC_DIR.glob("*.py")), Path(__file__),
+                        SCRIPT_DIR / "matcher_decision_cache.py",
+                        SCRIPT_DIR / "matcher_alias_index.py",
+                        APPROVED_ALIASES_PATH, SCHEDULE_EQUIVALENCES_PATH,
+                    ]),
+                    "matcher_identity": runtime.identity,
+                    "xml_catalog": source_catalog.fingerprint_sha256,
+                    "text_catalog": text_catalog.fingerprint_sha256,
+                    "runtime_candidates": runtime_candidates,
+                    "runtime_dummy_ids": runtime_dummy_ids,
+                    "aliases": getattr(runtime.resolver, "approved_aliases", ()),
+                    "schedule_groups": getattr(runtime.resolver, "schedule_group_by_id", {}),
+                    "knowledge_hashes": (runtime.approved_aliases_sha256,
+                                         runtime.schedule_equivalences_sha256),
+                    "learned_alias_sha256": learned_alias_memory.sha256,
+                    "learned_support_rows": learned_alias_memory.support_rows,
+                    "quarantine": canonical_quarantined_keys,
+                })
+            except (OSError, ValueError, TypeError):
+                # Optional acceleration must not affect current-run decisions.
+                match_cache.stats["enabled"] = 0
+        phase_started = time.monotonic()
         for server_id, channels, categories in safe_inventories:
+            server_keys = frozenset(key for key in rows_by_key if key[0] == server_id)
+            scope = None
+            cached_proposals: dict[tuple[str, str], Any] = {}
+            if global_cache_dependency:
+                provider = next(item for item in inventories if str(item.server_id) == server_id)
+                dependency = decision_cache.dependency_sha256({
+                    "global": global_cache_dependency,
+                    "channels": channels, "categories": categories,
+                    # Native IDs remain forbidden matcher input. Changes still
+                    # invalidate cached decisions, including on Server 1.
+                    "native_ids": [
+                        (streaming.clean_identifier(raw.get("stream_id", ""), 120),
+                         streaming.clean_identifier(raw.get("epg_channel_id", ""), 300))
+                        for raw in provider.channels
+                    ],
+                })
+                scope = match_cache.scope(server_id, dependency)
+                for channel in channels:
+                    key = (server_id, channel["stream_id"])
+                    if key not in server_keys:
+                        continue
+                    hit = scope.get(
+                        key[1], channel_name=channel["name"],
+                        category_name=categories.get(channel["category_id"], ""),
+                        identity=runtime.identity, catalog=matcher_catalog,
+                    )
+                    if hit is not None:
+                        cached_proposals[key] = hit
             server_proposals = propose_new_channel_matches(
                 runtime.resolver,
                 server_id=server_id,
                 channels=channels,
                 category_names=categories,
                 existing_keys=existing_keys,
-                target_keys=(
-                    key for key in rows_by_key if key[0] == server_id
-                ),
+                target_keys=server_keys.difference(cached_proposals),
                 catalog=matcher_catalog,
                 matcher_identity=runtime.identity,
                 preflight=runtime.preflight,
             )
+            if scope is not None:
+                for proposal in server_proposals.values():
+                    scope.put(proposal)
+            server_proposals.update(cached_proposals)
             server_proposals = {
                 key: _apply_catalog_ambiguity_veto(
                     proposal,
@@ -3516,8 +3605,10 @@ def auto_match_and_spool(
             if overlap:
                 raise AutoMatchError("The matcher returned duplicate stream identities.")
             proposals.update(server_proposals)
+        finish_phase("deterministic_proposals", phase_started)
         if set(proposals) != set(rows_by_key):
             raise AutoMatchError("The matcher result did not cover the exact candidate set.")
+        phase_started = time.monotonic()
         staged_shortlists = (
             _stage_ai_review_shortlists_with_metrics(
                 resolver=runtime.resolver,
@@ -3544,6 +3635,8 @@ def auto_match_and_spool(
             all_route_labels=all_route_ambiguity,
             same_market_ids=same_market_family_ambiguity,
         )
+        finish_phase("ai_shortlists", phase_started)
+        finish_phase("catalog_callback", callback_started)
         runtime_box.append(runtime)
         matcher_catalog_box.append(matcher_catalog)
         corroboration_box.append(corroboration)
@@ -3948,6 +4041,10 @@ def auto_match_and_spool(
         if key not in coverage_fallback_keys
         if patched_by_key[key].get("action") in {"AUTO_DUMMY", "IGNORE"}
     )
+    match_cache.save()
+    print("Matcher decision cache: " + ", ".join(
+        f"{key}={value}" for key, value in match_cache.stats.items()
+    ), flush=True)
     return AutoMatchOutcome(
         rows=tuple(patched_rows),
         considered_rows=len(proposals),
@@ -4104,6 +4201,9 @@ def auto_match_and_spool(
         ai_review_active_fallback_candidate_rows=len(
             unresolved_review_keys.intersection(synthetic_upgrade_keys)
         ),
+        matcher_cache_stats=dict(match_cache.stats),
+        matcher_phase_milliseconds=phase_milliseconds,
+        matcher_alias_index_stats=(dict(alias_index_box[0].stats) if alias_index_box else {}),
     )
 
 

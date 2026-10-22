@@ -1,5 +1,5 @@
-name: 2 - Build and publish EPG
-run-name: "Version 1 EPG refresh (${{ github.event_name }} #${{ github.run_number }})"
+name: 2 - Refresh live EPG
+run-name: "Live EPG refresh (${{ github.event_name }} #${{ github.run_number }})"
 
 on:
   # Run away from the top of the hour, when scheduled Actions traffic is lower.
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 # Share this group with the manual inventory workflow. This prevents concurrent
-# Sheet appends and Pages deployments; a run already in progress may finish.
+# Sheet appends. VOD builds have their own group; final publication is serialized.
 concurrency:
   group: ${{ github.repository }}-skytv-epg-v1
   cancel-in-progress: false
@@ -42,6 +42,7 @@ env:
     https://epgshare01.online/epgshare01/epg_ripper_ALL_SOURCES1.txt
   EPG_PUBLIC_BASE_URL: ${{ vars.EPG_PUBLIC_BASE_URL }}
   SKYTV_CHANNEL_REGISTRY_DIR: .build/channel-registry
+  SKYTV_MATCH_CACHE_DIR: .build/matcher-cache
   EPG_MINIMUM_COVERAGE: ${{ vars.EPG_MINIMUM_COVERAGE || '80' }}
   EPG_COVERAGE_FALLBACK_LIMIT: ${{ vars.EPG_COVERAGE_FALLBACK_LIMIT || '30000' }}
   REVIEW_APPLY_LIMIT: ${{ vars.EPG_REVIEW_APPLY_LIMIT || '30000' }}
@@ -54,8 +55,10 @@ jobs:
     name: Stream, validate, and package EPG outputs
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # Preserve the existing inventory/EPG budgets and allow 30m for VOD/app output.
+    # Live schedules and channel metadata never wait for a VOD refresh.
     timeout-minutes: 240
+    outputs:
+      artifact_id: ${{ steps.component_snapshot.outputs.artifact-id }}
 
     steps:
       - name: Check out repository
@@ -162,31 +165,6 @@ jobs:
           SKYTV_CHANNEL_REGISTRY_DIR: ""
         run: python -m unittest discover -s tests -v
 
-      - name: Fetch and validate VOD inventories before expensive guide work
-        shell: bash
-        env:
-          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
-          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
-          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
-          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
-          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
-          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
-          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
-          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
-          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
-        run: |
-          set -euo pipefail
-          vod_command=(
-            python -u scripts/build_vod_catalogs.py
-              --output-dir .build/vod-catalogs/public/VOD
-              --snapshot-dir .build/vod-inputs
-          )
-          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
-            vod_command+=(--allow-insecure-http)
-            echo "::warning::Provider VOD credentials may be sent over unencrypted HTTP."
-          fi
-          timeout --signal=TERM --kill-after=30s 15m "${vod_command[@]}"
-
       - name: Restore public channel enrichment cache
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
@@ -239,6 +217,20 @@ jobs:
               allowed_host_suffixes=("epgshare01.online",),
           )
           PY
+
+      - name: Restore encrypted incremental channel matching cache
+        continue-on-error: true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .build/matcher-cache.enc
+          key: private-matching-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            private-matching-v1-${{ runner.os }}-
+
+      - name: Open private matching hints
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python scripts/private_matcher_cache.py restore
 
       - name: Refresh the private Google Sheet and create this run's mapping snapshot
         shell: bash
@@ -912,94 +904,6 @@ jobs:
               print("::warning::Guides passed publication validation, but provider discovery or native guide availability was degraded.")
           PY
 
-      - name: Install prepared movie and series catalogs
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/install_vod_catalogs.py \
-            --source .build/vod-catalogs/public/VOD \
-            --output-dir public/VOD
-
-      - name: Restore incremental SKYTVPlayer metadata cache
-        id: vod_cache_restore
-        continue-on-error: true
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: .build/vod-cache
-          key: skytvplayer-vod-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            skytvplayer-vod-v1-${{ runner.os }}-
-
-      - name: Resolve due Server 1 movie metadata and release dates
-        shell: bash
-        env:
-          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
-          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
-          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
-          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
-        run: |
-          set -euo pipefail
-          resolve_command=(
-            python -u scripts/build_skytvplayer_catalog.py
-              --input-dir .build/vod-inputs
-              --cache-dir .build/vod-cache
-              --backfill-release-dates server_1
-              --max-tmdb-requests 3000
-              --backfill-max-seconds 600
-              --resolution-limit 300
-              --resolution-report-dir .build/vod-resolution
-              --resolve-provider-details
-              --max-provider-detail-requests 40
-          )
-          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
-            resolve_command+=(--allow-insecure-http)
-          fi
-          timeout --signal=TERM --kill-after=30s 12m "${resolve_command[@]}"
-
-      - name: Retain sanitized movie resolution reports
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: vod-resolution-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .build/vod-resolution/resolution_queue.*
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Build SKYTVPlayer movie and TV home database
-        id: skytvplayer_catalog
-        shell: bash
-        env:
-          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
-          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
-          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
-          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
-          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
-          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
-          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
-          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
-          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
-          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
-          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-        run: |
-          set -euo pipefail
-          app_command=(
-            python -u scripts/build_skytvplayer_catalog.py
-              --input-dir .build/vod-inputs
-              --output-dir public/skytvplayer
-              --cache-dir .build/vod-cache
-              --epg-dir public/EPG
-              --fetch-series-details
-              --tmdb-workers 3
-          )
-          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
-            app_command+=(--allow-insecure-http)
-          fi
-          if [[ -x /usr/bin/time ]]; then
-            app_command=(/usr/bin/time -f "SkyTVPlayer peak RSS KiB: %M" "${app_command[@]}")
-          fi
-          timeout --signal=TERM --kill-after=30s 15m "${app_command[@]}"
-
       - name: Verify files contain no passwords, private URLs, or credential fields
         id: public_secret_scan
         if: always()
@@ -1020,451 +924,10 @@ jobs:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: |
           set -euo pipefail
-          if [[ -d public ]]; then
-            mkdir -p .build/reports
-            find public -type f -print0 \
-              | LC_ALL=C sort -z \
-              | xargs -0 -r sha256sum \
-              > .build/reports/public-sha256.txt
-          fi
+          python scripts/scan_public_secrets.py
 
-          python - <<'PY'
-          import base64
-          from collections import Counter
-          import gzip
-          import html
-          import json
-          import math
-          import os
-          import re
-          import stat
-          import zlib
-          from pathlib import Path
-          from urllib.parse import quote, quote_plus, urlsplit
-
-          failure = "Generated file failed its credential-safety check."
-          roots = (Path("public"), Path(".build/reports"))
-          raw_account = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-          try:
-              account = json.loads(raw_account)
-          except (TypeError, json.JSONDecodeError):
-              raise SystemExit(failure) from None
-          if not isinstance(account, dict):
-              raise SystemExit(failure)
-
-          def encoded_variants(value: str) -> set[bytes]:
-              variants = {value}
-              for ensure_ascii in (False, True):
-                  rendered = json.dumps(value, ensure_ascii=ensure_ascii)
-                  variants.update((rendered, rendered[1:-1]))
-              csv_inner = value.replace('"', '""')
-              variants.update((csv_inner, f'"{csv_inner}"'))
-              variants.update(
-                  (
-                      html.escape(value, quote=False),
-                      html.escape(value, quote=True),
-                      value.replace("&", "&amp;")
-                      .replace("<", "&lt;")
-                      .replace(">", "&gt;")
-                      .replace('"', "&quot;")
-                      .replace("'", "&apos;"),
-                  )
-              )
-              for rendered in (quote(value, safe=""), quote_plus(value, safe="")):
-                  variants.add(rendered)
-                  variants.add(
-                      re.sub(
-                          r"%[0-9A-Fa-f]{2}",
-                          lambda match: match.group(0).lower(),
-                          rendered,
-                      )
-                  )
-              return {item.encode("utf-8") for item in variants if item}
-
-          def url_variants(value: str) -> set[bytes]:
-              variants = {value, quote(value, safe=""), quote_plus(value, safe="")}
-              for rendered in tuple(variants):
-                  variants.add(
-                      re.sub(
-                          r"%[0-9A-Fa-f]{2}",
-                          lambda match: match.group(0).lower(),
-                          rendered,
-                      )
-                  )
-              return {item.encode("utf-8") for item in variants if item}
-
-          # Usernames can be ordinary words, so short/common usernames are
-          # matched only in credential-shaped fields and URLs. Passwords are
-          # always matched globally below: a false alarm is safer than ever
-          # publishing a configured password.
-          def distinctive_provider_value(value: str) -> bool:
-              raw = value.encode("utf-8")
-              if len(raw) < 10:
-                  return False
-              counts = Counter(raw)
-              entropy_bits = -sum(
-                  count * math.log2(count / len(raw))
-                  for count in counts.values()
-              )
-              classes = sum(
-                  (
-                      any(character.islower() for character in value),
-                      any(character.isupper() for character in value),
-                      any(character.isdigit() for character in value),
-                      any(not character.isalnum() for character in value),
-                  )
-              )
-              return entropy_bits >= 40 and (classes >= 2 or len(raw) >= 16)
-
-          def value_alternative(value: str) -> bytes:
-              variants = sorted(encoded_variants(value), key=len, reverse=True)
-              return b"(?:" + b"|".join(re.escape(item) for item in variants) + b")"
-
-          structured_patterns: list[re.Pattern[bytes]] = []
-
-          def add_labeled_patterns(labels: tuple[str, ...], value: str) -> None:
-              if not value:
-                  return
-              label = b"(?:" + b"|".join(
-                  re.escape(item.encode("ascii")) for item in labels
-              ) + b")"
-              target = value_alternative(value)
-              boundary = rb"(?![A-Za-z0-9._~%+-])"
-              structured_patterns.extend(
-                  (
-                      re.compile(
-                          rb'(?i:"' + label + rb'")[ \t\r\n]{0,16}:'
-                          rb'[ \t\r\n]{0,16}["\']?' + target + boundary
-                      ),
-                      re.compile(
-                          rb"(?<![A-Za-z0-9_])(?i:" + label + rb")"
-                          rb"(?![A-Za-z0-9_])[ \t]{0,8}[=:][ \t]{0,8}[\"']?"
-                          + target
-                          + boundary
-                      ),
-                      re.compile(
-                          rb"(?i:<[ \t]*" + label
-                          + rb"(?:[ \t][^>]{0,64})?>)[ \t\r\n]{0,16}"
-                          + target
-                          + boundary
-                      ),
-                  )
-              )
-
-          raw_tokens: set[bytes] = set()
-          casefold_tokens: set[bytes] = set()
-          google_values = [raw_account]
-          gemini_key = os.environ.get("GEMINI_API_KEY", "")
-          if gemini_key:
-              raw_tokens.update(encoded_variants(gemini_key))
-          for field in ("client_email", "private_key", "private_key_id"):
-              value = account.get(field)
-              if isinstance(value, str) and value:
-                  google_values.append(value)
-          for value in google_values:
-              raw_tokens.update(encoded_variants(value))
-
-          # Include external metadata API secrets in the public-file gate.
-          for name in ("TMDB_READ_ACCESS_TOKEN", "TMDB_API_KEY"):
-              value = os.environ.get(name, "").strip()
-              if value:
-                  raw_tokens.update(encoded_variants(value))
-
-          maximum_structured_value = 0
-          for number in (1, 2, 3):
-              base_url = os.environ.get(f"SERVER_{number}_BASE_URL", "").strip()
-              username = os.environ.get(f"SERVER_{number}_USERNAME", "").strip()
-              password = os.environ.get(f"SERVER_{number}_PASSWORD", "")
-              parsed_base = urlsplit(base_url)
-              if parsed_base.hostname:
-                  casefold_tokens.add(
-                      parsed_base.hostname.casefold().encode("utf-8")
-                  )
-              for base_variant in {
-                  base_url,
-                  base_url.rstrip("/"),
-                  parsed_base.netloc,
-                  parsed_base.hostname or "",
-              } - {""}:
-                  raw_tokens.update(encoded_variants(base_variant))
-              username_variants = encoded_variants(username) if username else set()
-              password_variants = encoded_variants(password) if password else set()
-              maximum_structured_value = max(
-                  maximum_structured_value,
-                  max(
-                      (
-                          len(item)
-                          for item in username_variants | password_variants
-                      ),
-                      default=0,
-                  ),
-              )
-              if distinctive_provider_value(username):
-                  raw_tokens.update(username_variants)
-              # Every password is intentionally global. The inventory command
-              # requires at least four characters so unsafe passwords can be
-              # rotated instead of weakening this check.
-              raw_tokens.update(password_variants)
-              add_labeled_patterns(("username", "user", "login", "user_name"), username)
-              add_labeled_patterns(("password", "pass", "passwd", "pwd"), password)
-              if username and password:
-                  for user_variant in url_variants(username):
-                      for password_variant in url_variants(password):
-                          raw_tokens.update(
-                              {
-                                  b"://" + user_variant + b":" + password_variant + b"@",
-                                  b"/live/" + user_variant + b"/" + password_variant + b"/",
-                                  b"/" + user_variant + b"/" + password_variant + b"/",
-                              }
-                          )
-                  basic = base64.b64encode(
-                      f"{username}:{password}".encode("utf-8")
-                  )
-                  raw_tokens.update({b"Basic " + basic, b"basic " + basic})
-
-          tokens = tuple(sorted(raw_tokens, key=len, reverse=True))
-          active_roots = []
-          for root in roots:
-              if root.is_symlink():
-                  raise SystemExit(failure)
-              if root.is_dir():
-                  active_roots.append(root)
-          if not active_roots or not tokens or not structured_patterns:
-              raise SystemExit(failure)
-          overlap = max(
-              max(len(token) for token in tokens) - 1,
-              512 + (2 * maximum_structured_value),
-          )
-          raw_pattern = re.compile(
-              b"(?:" + b"|".join(re.escape(token) for token in tokens) + b")"
-          )
-          casefold_pattern = (
-              re.compile(
-                  b"(?:"
-                  + b"|".join(
-                      re.escape(token)
-                      for token in sorted(casefold_tokens, key=len, reverse=True)
-                  )
-                  + b")"
-              )
-              if casefold_tokens
-              else None
-          )
-          structured_pattern = re.compile(
-              b"(?:"
-              + b"|".join(pattern.pattern for pattern in structured_patterns)
-              + b")"
-          )
-          structured_labels = (
-              b"username", b"user_name", b"password", b"passwd",
-              b"login", b"user", b"pass", b"pwd",
-          )
-          structured_span = 512 + (2 * maximum_structured_value)
-
-          def has_structured_token(window: bytes, lowered: bytes) -> bool:
-              word_bytes = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
-              for label in structured_labels:
-                  offset = 0
-                  while True:
-                      position = lowered.find(label, offset)
-                      if position < 0:
-                          break
-                      after = position + len(label)
-                      quoted = (
-                          position > 0
-                          and after < len(lowered)
-                          and lowered[position - 1] == 34
-                          and lowered[after] == 34
-                      )
-                      before = position - 1
-                      while before >= 0 and lowered[before] in b" \t":
-                          before -= 1
-                      element = before >= 0 and lowered[before] == 60
-                      left_boundary = (
-                          position == 0 or lowered[position - 1] not in word_bytes
-                      )
-                      right_boundary = (
-                          after == len(lowered) or lowered[after] not in word_bytes
-                      )
-                      separator = after
-                      while (
-                          separator < len(lowered)
-                          and separator - after <= 8
-                          and lowered[separator] in b" \t"
-                      ):
-                          separator += 1
-                      assignment = (
-                          left_boundary
-                          and right_boundary
-                          and separator - after <= 8
-                          and separator < len(lowered)
-                          and lowered[separator] in b"=:"
-                      )
-                      if quoted or element or assignment:
-                          start = max(0, position - 2)
-                          stop = min(len(window), position + structured_span)
-                          if structured_pattern.search(window[start:stop]):
-                              return True
-                      offset = position + 1
-              return False
-
-          def contains_token(path: Path) -> bool:
-              tail = b""
-              opener = gzip.open if path.suffix.casefold() == ".gz" else open
-              with opener(path, "rb") as handle:
-                  while True:
-                      chunk = handle.read(1024 * 1024)
-                      if not chunk:
-                          return False
-                      window = tail + chunk
-                      lowered = window.lower()
-                      if (
-                          raw_pattern.search(window)
-                          or (
-                              casefold_pattern is not None
-                              and casefold_pattern.search(lowered)
-                          )
-                          or has_structured_token(window, lowered)
-                      ):
-                          return True
-                      tail = window[-overlap:] if overlap else b""
-
-          def annotation_path(path: Path) -> str:
-              return (
-                  str(path)
-                  .replace("%", "%25")
-                  .replace("\r", "%0D")
-                  .replace("\n", "%0A")
-                  .replace(":", "%3A")
-                  .replace(",", "%2C")
-              )
-
-          try:
-              files = sorted(
-                  path for root in active_roots for path in root.rglob("*")
-              )
-              for path in files:
-                  if path.is_symlink():
-                      raise OSError
-                  mode = path.lstat().st_mode
-                  if stat.S_ISDIR(mode):
-                      continue
-                  if not stat.S_ISREG(mode):
-                      raise OSError
-                  if contains_token(path):
-                      print(
-                          f"::error file={annotation_path(path)}::{failure}",
-                          flush=True,
-                      )
-                      raise SystemExit(1)
-          except (OSError, EOFError, gzip.BadGzipFile, zlib.error):
-              raise SystemExit(failure) from None
-
-          print("Public-file safety scan passed.")
-          PY
-
-      - name: Apply final Pages safety checks
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -s public/health.json
-          test -s public/epg/index.json
-          test -s public/EPG/index.json
-          test -s public/EPG/taxonomy.json
-          test -s public/VOD/index.json
-          test -s public/skytvplayer/index.json
-
-          for server in server_1 server_2 server_3; do
-            test -s "public/epg/${server}_tivimate.xml.gz"
-            test -s "public/EPG/${server}_epg.json.gz"
-            test -s "public/EPG/${server}_epg_v2.json.gz"
-            test -s "public/EPG/${server}_metadata.json.gz"
-            test -s "public/EPG/${server}_epg_manifest.json"
-            test -s "public/EPG/${server}_epg_v2_manifest.json"
-            test -s "public/EPG/${server}_metadata_manifest.json"
-          done
-
-          while IFS= read -r -d '' file; do
-            gzip -t "$file"
-          done < <(find public -type f -name "*.gz" -print0)
-
-          # Validate compressed app payloads with jq's streaming parser. This
-          # checks complete JSON syntax without loading a potentially large
-          # programme guide into memory.
-          for server in server_1 server_2 server_3; do
-            for kind in epg epg_v2 metadata; do
-              gzip -cd -- "public/EPG/${server}_${kind}.json.gz" \
-                | jq --stream empty
-            done
-          done
-
-          python scripts/build_vod_catalogs.py \
-            --validate-only \
-            --expected-server server_1 \
-            --expected-server server_2 \
-            --expected-server server_3 \
-            --output-dir public/VOD
-
-          python scripts/build_skytvplayer_catalog.py \
-            --validate-only \
-            --output-dir public/skytvplayer \
-            --epg-dir public/EPG
-
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          paths = [
-              Path("public/health.json"),
-              Path("public/epg/index.json"),
-              Path("public/EPG/index.json"),
-              Path("public/EPG/taxonomy.json"),
-              Path("public/VOD/index.json"),
-              Path("public/skytvplayer/index.json"),
-          ]
-          for server in ("server_1", "server_2", "server_3"):
-              paths.extend(
-                  (
-                      Path(f"public/EPG/{server}_epg_manifest.json"),
-                      Path(f"public/EPG/{server}_epg_v2_manifest.json"),
-                      Path(f"public/EPG/{server}_metadata_manifest.json"),
-                      Path(
-                          f"public/reports/{server}/"
-                          f"{server}_tivimate_manifest.json"
-                      ),
-                      Path(
-                          f"public/reports/{server}/"
-                          f"{server}_validation.json"
-                      ),
-                  )
-              )
-
-          for path in paths:
-              with path.open("r", encoding="utf-8") as handle:
-                  payload = json.load(handle)
-              if not isinstance(payload, dict):
-                  raise SystemExit(f"{path} is not a JSON object")
-          PY
-
-          if find public -type l -print -quit | grep -q .; then
-            echo "::error::Pages output contains a symbolic link."
-            exit 1
-          fi
-
-          if find public -type f -links +1 -print -quit | grep -q .; then
-            echo "::error::Pages output contains a hard-linked file."
-            exit 1
-          fi
-
-          # GitHub Pages currently limits the published site to 1 GB. Keep a
-          # 900 MiB ceiling so metadata and packaging overhead cannot cross it.
-          public_kib="$(du -sk public | awk '{ print $1 }')"
-          maximum_kib=$((900 * 1024))
-          if (( public_kib > maximum_kib )); then
-            echo "::error::Pages payload exceeds the 900 MiB safety ceiling."
-            exit 1
-          fi
+      - name: Validate independent live component
+        run: bash scripts/check_publication.sh live
 
       - name: Save public channel enrichment cache
         continue-on-error: true
@@ -1474,13 +937,6 @@ jobs:
             .build/channel-registry
             .build/logo-cache
           key: live-enrichment-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Save incremental SKYTVPlayer metadata cache
-        continue-on-error: true
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: .build/vod-cache
-          key: skytvplayer-vod-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Add successful-build summary
         shell: bash
@@ -1505,37 +961,48 @@ jobs:
             public/health.json
             public/epg/index.json
             public/EPG/index.json
-            public/VOD/index.json
-            public/skytvplayer/index.json
             public/reports/
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
           compression-level: 6
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Encrypt private matching hints
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python scripts/private_matcher_cache.py seal
 
-      - name: Upload validated GitHub Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      - name: Save encrypted incremental channel matching cache
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
-          path: public
+          path: .build/matcher-cache.enc
+          key: private-matching-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-  deploy:
-    name: Deploy validated EPG to GitHub Pages
+      - name: Seal validated live component
+        run: python scripts/publication_snapshots.py package --component live --source-dir public --output-dir .build/live-snapshot
+
+      - name: Retain validated live component
+        id: component_snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/live-snapshot/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish live with the last valid counterpart
     needs: build
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
     permissions:
       contents: read
+      actions: read
       pages: write
       id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-      - name: Deploy GitHub Pages artifact
-        id: deployment
-        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+    uses: ./.github/workflows/publish-component.yml
+    with:
+      component: live
+      artifact-id: ${{ needs.build.outputs.artifact_id }}
+    secrets: inherit
