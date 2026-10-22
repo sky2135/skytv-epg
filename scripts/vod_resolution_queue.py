@@ -21,17 +21,18 @@ from typing import Any, Collection, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from build_vod_catalogs import _secret_variants
-from vod_tmdb import _enrichment_identity
+from vod_tmdb import _enrichment_identity, unmatched_passthrough_fingerprint
 
 SCHEMA_VERSION = 1
 MAX_ENTRIES = 10_000
 MAX_CACHE_BYTES = 32 * 1024 * 1024
 MAX_CANDIDATES = 100
 DAY = 86_400
+IGNORED_NO_ARTWORK = "ignored_no_artwork"
 MATCHED = {"matched_id", "matched_search", "matched_alias", "matched_poster"}
 STABLE = {"ambiguous_title_year", "no_search_results", "title_mismatch", "year_mismatch",
           "incomplete_search", "alias_candidate_limit"}
-REASONS = MATCHED | STABLE | {"pending", "unavailable", "missing_identity"}
+REASONS = MATCHED | STABLE | {"pending", "unavailable", "missing_identity", IGNORED_NO_ARTWORK}
 ENTRY_KEYS = {"contentId", "serverId", "kind", "providerId", "title", "queryTitle", "queryYear",
               "sourceFingerprint", "attempts", "failureStreak", "reason", "candidateIds",
               "firstSeenAt", "lastSeenAt", "lastAttemptAt", "nextAttemptAt", "selectionOrder"}
@@ -152,6 +153,11 @@ class ResolutionQueue:
         source = {"displayTitle": title, "matcherIdentity": matcher_key,
                   "languages": item.get("languages"), "releaseDate": item.get("releaseDate"),
                   "providerEvidenceHash": hashlib.sha256(encoded_evidence.encode()).hexdigest()}
+        passthrough = unmatched_passthrough_fingerprint(prepared, kind)
+        if passthrough is not None:
+            # Bind the scheduling hint to the same source/method identity as
+            # the core cache, without retaining artwork or provider fields.
+            source["unmatchedPassthroughFingerprint"] = passthrough
         encoded = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
         row = dict(contentId=content_id, serverId=server_id, kind=kind, providerId=provider_id,
@@ -167,6 +173,7 @@ class ResolutionQueue:
             return False
         if (not isinstance(row.get("serverId"), str) or not re.fullmatch(r"server_[1-9][0-9]?", row["serverId"])
                 or row.get("kind") not in {"movie", "series"} or not isinstance(row.get("providerId"), str)
+                or (row["reason"] == IGNORED_NO_ARTWORK and row["kind"] != "movie")
                 or not re.fullmatch(r"[0-9]{1,10}", row["providerId"])
                 or row.get("contentId") != f"{row['serverId']}:{row['kind']}:{row['providerId']}"
                 or not isinstance(row.get("title"), str) or self._text(row["title"]) != row["title"]
@@ -245,7 +252,9 @@ class ResolutionQueue:
                 self.stats["invalidInputs"] += 1
                 continue
             current[key] = (server_id, kind, item)
-        due = [key for key in current if key in self.entries and self.entries[key]["nextAttemptAt"] <= self.now]
+        due = [key for key in current if key in self.entries
+               and self.entries[key]["reason"] != IGNORED_NO_ARTWORK
+               and self.entries[key]["nextAttemptAt"] <= self.now]
         input_order = {key: index for index, key in enumerate(current)}
         # A reserved batch can outlive the runtime budget. Prioritize entries
         # that received no request, then the least recently attempted, before
@@ -279,12 +288,46 @@ class ResolutionQueue:
             del self.entries[key]
         return len(removed)
 
+    def _current_entry(self, server_id: str, kind: str, item: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Read an exact current-source row without registering or updating it."""
+        if not isinstance(item, Mapping):
+            return None
+        content_id = item.get("contentId")
+        if content_id is None:
+            content_id = f"{server_id}:{kind}:{item.get('id') or ''}"
+        if not isinstance(content_id, str) or content_id not in self._by_content:
+            return None
+        try:
+            key, _prepared = self._identity(server_id, kind, item)
+        except (ValueError, TypeError, KeyError, OverflowError):
+            return None
+        return self.entries.get(key)
+
+    def is_ignored(self, server_id: str, kind: str, item: Mapping[str, Any]) -> bool:
+        """Read an exact movie ignore hint; the core cache proof remains required."""
+        row = self._current_entry(server_id, kind, item)
+        return bool(kind == "movie" and row and row["reason"] == IGNORED_NO_ARTWORK)
+
+    def reopen_ignored(self, server_id: str, kind: str, item: Mapping[str, Any]) -> bool:
+        """Reopen an exact ignored hint when its authoritative cache proof is lost.
+
+        The caller validates core cache proof before calling. Missing, changed,
+        or already reopened identities are left untouched, without registration.
+        """
+        row = self._current_entry(server_id, kind, item)
+        if kind != "movie" or row is None or row["reason"] != IGNORED_NO_ARTWORK:
+            return False
+        row["reason"] = "pending"
+        row["nextAttemptAt"] = self.now
+        row["lastSeenAt"] = self.now
+        return True
+
     def defer_cached_miss(self, server_id: str, kind: str, item: Mapping[str, Any]) -> bool:
-        """Whether an unchanged unresolved identity is still inside its backoff.
+        """Whether an unchanged unresolved identity should defer matching.
 
         This is a read-only scheduling hint. The caller must separately validate
-        that a negative matcher cache exists; absent caches and positive results
-        must continue through the normal matcher.
+        the negative matcher cache and any durable no-artwork proof; absent
+        caches and positive results must continue through the normal matcher.
         """
         if not isinstance(item, Mapping):
             return False
@@ -298,6 +341,8 @@ class ResolutionQueue:
         except (ValueError, TypeError, KeyError, OverflowError):
             return False
         row = self.entries.get(key)
+        if row and row["reason"] == IGNORED_NO_ARTWORK:
+            return unmatched_passthrough_fingerprint(dict(item, contentId=content_id), kind) is not None
         return bool(row and row["reason"] in STABLE | {"missing_identity", "unavailable"}
                     and row["nextAttemptAt"] > self.now)
 
@@ -306,6 +351,14 @@ class ResolutionQueue:
         _key, row = self._register(server_id, kind, item)
         diagnostic = diagnostic if isinstance(diagnostic, Mapping) else {}
         reason = diagnostic.get("reason")
+        if (diagnostic.get("ignoredWithoutArtwork") is True and kind == "movie"
+                and metadata.get("matchStatus") == "no_match"
+                and unmatched_passthrough_fingerprint(dict(item, contentId=row["contentId"]), kind) is not None):
+            reason = IGNORED_NO_ARTWORK
+        elif reason == IGNORED_NO_ARTWORK:
+            # A reason string alone cannot turn a transient or resolved result
+            # into an indefinitely deferred movie.
+            reason = None
         if not isinstance(reason, str) or reason not in REASONS or reason == "pending":
             status = metadata.get("matchStatus")
             reason = status if status in MATCHED else "unavailable" if status == "unavailable" else "missing_identity"
@@ -366,7 +419,8 @@ class ResolutionQueue:
             rows.append({key: row[key] for key in
                          ("contentId", "serverId", "kind", "providerId", "title", "queryTitle", "queryYear",
                           "attempts", "reason", "candidateIds")} |
-                        {"lastAttemptAt": _iso(row["lastAttemptAt"]), "nextAttemptAt": _iso(row["nextAttemptAt"]),
+                        {"lastAttemptAt": _iso(row["lastAttemptAt"]),
+                         "nextAttemptAt": None if row["reason"] == IGNORED_NO_ARTWORK else _iso(row["nextAttemptAt"]),
                          "sourceURLs": [f"https://www.themoviedb.org/{'movie' if row['kind'] == 'movie' else 'tv'}/{value}" for value in row["candidateIds"]]})
         report = {"schemaVersion": SCHEMA_VERSION, "policyVersion": self.policy_version, "generatedAt": _iso(self.now),
                   "recordCount": len(rows), "reasonCounts": dict(Counter(row["reason"] for row in rows)),

@@ -123,6 +123,15 @@ artwork, and TV status and episode summary fields. Title searches require
 conservative title and year agreement. Unmatched or ambiguous records remain
 provider records rather than taking the closest search result.
 
+When a movie has neither provider poster nor backdrop and matching reaches a
+definite `no_match`, further attempts stop for that unchanged provider record.
+The movie remains in the app catalog with its sanitized provider title, facts
+and playback ID. This private retry decision does not add guessed artwork or
+mark the movie as verified. New source identity, artwork, evidence, reviewed
+corrections or matching-policy versions reopen matching. Request failures,
+incomplete searches and exhausted budgets remain retryable. Series and movies
+with any provider artwork keep the existing refresh policy.
+
 Series details are fetched incrementally and keep sanitized episode IDs,
 season numbers, episode numbers, and container extensions. `episodesStatus`
 distinguishes `available`, `stale`, `pending`, and `unavailable`. An empty

@@ -50,6 +50,16 @@ provider facts or strategy resets scheduling. The normal app publisher also
 honors the same backoff when a validated negative cache exists. It never blocks
 an uncached item or suppresses a verified positive result.
 
+Movies with neither provider poster nor backdrop stop retrying after a definite
+unmatched result. Their private, source-bound cache decision is reused by both
+the daily publisher and release-date prewarm; these entries consume no further
+TMDB requests, provider-detail probes or due-selection slots. Queue reports call
+them `ignored_no_artwork` and show no next attempt. The app still receives the
+sanitized provider record with `metadataMatch: no_match`. New artwork, source
+identity, validated evidence, reviewed correction or matching-policy version
+reopens the record. Temporary failures and incomplete searches do not stop
+retries, and verified metadata always takes precedence.
+
 Sanitized CSV/JSON reports are uploaded as `vod-resolution-RUN-ATTEMPT` artifacts
 with seven-day retention. They identify the title, reason, candidate TMDB IDs
 and next attempt. Candidate links are references, not accepted identities.

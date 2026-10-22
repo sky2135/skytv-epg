@@ -18,6 +18,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import vod_resolution_queue as resolution  # noqa: E402
+import vod_tmdb as tmdb  # noqa: E402
 
 
 NOW = "2026-10-21T12:00:00Z"
@@ -224,6 +225,163 @@ class ResolutionQueueTests(unittest.TestCase):
         self.record(queue, "unavailable", item=new_item, attempted=False)
         self.assertEqual(0, self.row(queue, 2)["attempts"])
         self.assertEqual(queue.now, self.row(queue, 2)["nextAttemptAt"])
+
+    def test_ignored_no_artwork_survives_reload_without_using_a_due_slot(self):
+        item = movie(artwork={"posterUrl": None, "backdropUrl": None})
+        queue = self.queue()
+        self.assertTrue(queue.record_result("server_1", "movie", item, {"matchStatus": "no_match"},
+            {"reason": "no_search_results", "ignoredWithoutArtwork": True}))
+        original = copy.deepcopy(self.row(queue))
+        self.assertEqual(resolution.IGNORED_NO_ARTWORK, original["reason"])
+        self.assertTrue(queue.save())
+        queue = self.queue(now=EPOCH + 180 * resolution.DAY)
+        self.assertTrue(queue.defer_cached_miss("server_1", "movie", item))
+        selected = queue.select_due([("server_1", "movie", item), ("server_1", "movie", movie(2))], limit=1)
+        self.assertEqual(["2"], [entry[2]["id"] for entry in selected])
+        self.assertFalse(queue.record_result("server_1", "movie", item, {"matchStatus": "no_match"},
+            {"reason": "no_search_results", "ignoredWithoutArtwork": True}, attempted=False))
+        current = self.row(queue)
+        for field in ("attempts", "failureStreak", "lastAttemptAt", "nextAttemptAt", "selectionOrder", "firstSeenAt"):
+            self.assertEqual(original[field], current[field], field)
+        self.assertTrue(queue.save())
+        self.assertEqual(resolution.IGNORED_NO_ARTWORK, self.row(self.queue(now=queue.now))["reason"])
+
+    def test_ignored_no_artwork_requires_movie_no_match_and_a_boolean_proof_hint(self):
+        cases = [
+            ("movie", {"matchStatus": "unavailable"}, {"ignoredWithoutArtwork": True}, movie()),
+            ("movie", {"matchStatus": "matched_search"}, {"ignoredWithoutArtwork": True}, movie()),
+            ("movie", {"matchStatus": "no_match"}, {"ignoredWithoutArtwork": 1}, movie()),
+            ("movie", {"matchStatus": "no_match"}, {}, movie()),
+            ("series", {"matchStatus": "no_match"}, {"ignoredWithoutArtwork": True}, movie()),
+            ("movie", {"matchStatus": "no_match"}, {"ignoredWithoutArtwork": True},
+             movie(artwork={"posterUrl": "https://images.example/poster.jpg", "backdropUrl": None})),
+            ("movie", {"matchStatus": "no_match"}, {"ignoredWithoutArtwork": True},
+             movie(artwork={"posterUrl": None, "backdropUrl": "https://images.example/backdrop.jpg"})),
+        ]
+        for kind, metadata, diagnostic, item in cases:
+            with self.subTest(kind=kind, metadata=metadata, diagnostic=diagnostic, artwork=item.get("artwork")):
+                queue = self.queue()
+                queue.record_result("server_1", kind, item, metadata,
+                    {"reason": resolution.IGNORED_NO_ARTWORK, **diagnostic}, attempted=False)
+                self.assertNotEqual(resolution.IGNORED_NO_ARTWORK, self.row(queue, kind=kind)["reason"])
+                queue.now += 31 * resolution.DAY
+                self.assertEqual(1, len(queue.select_due([("server_1", kind, item)])))
+
+    def test_changed_artwork_or_provider_source_reenables_an_ignored_movie(self):
+        item = movie(artwork={"posterUrl": None, "backdropUrl": None}, providerLastModified=None)
+        queue = self.queue()
+        queue.record_result("server_1", "movie", item, {"matchStatus": "no_match"},
+            {"reason": "title_mismatch", "ignoredWithoutArtwork": True})
+        self.assertTrue(queue.save())
+        variants = [
+            {"title": "Corrected Film (2026)"},
+            {"tmdbId": "123"},
+            {"providerLastModified": "2026-10-22T12:00:00Z"},
+            {"providerEvidenceFingerprint": "changed-provider-facts"},
+            {"artwork": {"posterUrl": "https://images.example/poster.jpg", "backdropUrl": None}},
+            {"artwork": {"posterUrl": None, "backdropUrl": "https://images.example/backdrop.jpg"}},
+            {"artwork": {"posterUrl": "https://image.tmdb.org/t/p/w500/example.jpg", "backdropUrl": None}},
+        ]
+        for changes in variants:
+            with self.subTest(changes=changes):
+                restored = self.queue()
+                changed = {**item, **changes}
+                before = copy.deepcopy((restored.entries, restored.stats))
+                self.assertFalse(restored.defer_cached_miss("server_1", "movie", changed))
+                self.assertEqual(before, (restored.entries, restored.stats))
+                self.assertEqual(1, len(restored.select_due([("server_1", "movie", changed)])))
+                self.assertEqual("pending", self.row(restored)["reason"])
+                self.assertEqual(0, self.row(restored)["attempts"])
+                self.assertEqual(1, restored.stats["fingerprintResets"])
+
+    def test_method_change_reenables_ignored_movie_without_a_queue_policy_bump(self):
+        item = movie()
+        queue = self.queue()
+        queue.record_result("server_1", "movie", item, {"matchStatus": "no_match"},
+            {"reason": "no_search_results", "ignoredWithoutArtwork": True})
+        self.assertTrue(queue.save())
+        for constant in ("UNMATCHED_PASSTHROUGH_POLICY", "MATCH_STRATEGY"):
+            with self.subTest(constant=constant), mock.patch.object(tmdb, constant, getattr(tmdb, constant) + 1):
+                restored = self.queue()
+                self.assertFalse(restored.defer_cached_miss("server_1", "movie", item))
+                self.assertEqual(1, len(restored.select_due([("server_1", "movie", item)])))
+                self.assertEqual("pending", self.row(restored)["reason"])
+                self.assertEqual(1, restored.stats["fingerprintResets"])
+
+    def test_ignored_hint_lookup_is_read_only_and_requires_exact_current_movie_source(self):
+        item = movie(providerLastModified=None)
+        queue = self.queue()
+        queue.record_result("server_1", "movie", item, {"matchStatus": "no_match"},
+            {"reason": "no_search_results", "ignoredWithoutArtwork": True})
+        self.assertTrue(queue.save())
+        before = copy.deepcopy((queue.entries, queue._by_content, queue._selection_counter, queue.stats, item))
+        saved = self.cache.read_bytes()
+        self.assertTrue(queue.is_ignored("server_1", "movie", item))
+        cases = [("server_1", "movie", movie(2)), ("server_2", "movie", item),
+                 ("server_1", "series", item), ("server_1", "movie", None),
+                 ("server_1", "movie", {**item, "providerLastModified": "2026-10-22T12:00:00Z"}),
+                 ("server_1", "movie", {**item, "title": "Corrected Film (2026)"}),
+                 ("server_1", "movie", {**item, "artwork": {"posterUrl": "https://images.example/new.jpg"}})]
+        for server, kind, changed in cases:
+            with self.subTest(server=server, kind=kind, changed=changed):
+                self.assertFalse(queue.is_ignored(server, kind, changed))
+                self.assertFalse(queue.reopen_ignored(server, kind, changed))
+        with mock.patch.object(tmdb, "UNMATCHED_PASSTHROUGH_POLICY", tmdb.UNMATCHED_PASSTHROUGH_POLICY + 1):
+            self.assertFalse(queue.is_ignored("server_1", "movie", item))
+            self.assertFalse(queue.reopen_ignored("server_1", "movie", item))
+        self.assertEqual(before, (queue.entries, queue._by_content, queue._selection_counter, queue.stats, item))
+        self.assertEqual(saved, self.cache.read_bytes())
+
+    def test_lost_core_proof_can_reopen_exact_ignored_hint_without_rewriting_attempt_history(self):
+        item = movie()
+        queue = self.queue()
+        queue.record_result("server_1", "movie", item, {"matchStatus": "no_match"},
+            {"reason": "no_search_results", "ignoredWithoutArtwork": True})
+        self.assertTrue(queue.save())
+        queue = self.queue(now=EPOCH + 180 * resolution.DAY)
+        original = copy.deepcopy(self.row(queue))
+        self.assertTrue(queue.is_ignored("server_1", "movie", item))
+        self.assertTrue(queue.reopen_ignored("server_1", "movie", item))
+        expected = {**original, "reason": "pending", "nextAttemptAt": queue.now, "lastSeenAt": queue.now}
+        self.assertEqual(expected, self.row(queue))
+        self.assertFalse(queue.is_ignored("server_1", "movie", item))
+        self.assertFalse(queue.reopen_ignored("server_1", "movie", item))
+        self.assertEqual(expected, self.row(queue))
+        self.assertFalse(queue.defer_cached_miss("server_1", "movie", item))
+        self.assertTrue(queue.save())
+        restored = self.queue(now=queue.now)
+        self.assertEqual(1, len(restored.select_due([("server_1", "movie", item)], limit=1)))
+        self.assertEqual("pending", self.row(restored)["reason"])
+        for field in ("attempts", "lastAttemptAt", "failureStreak", "firstSeenAt"):
+            self.assertEqual(original[field], self.row(restored)[field], field)
+
+    def test_ignored_reports_have_no_retry_date_but_private_timestamps_stay_finite(self):
+        queue = self.queue()
+        queue.record_result("server_1", "movie", movie(), {"matchStatus": "no_match"},
+            {"reason": "missing_identity", "ignoredWithoutArtwork": True}, attempted=False)
+        self.assertEqual(0, self.row(queue)["attempts"])
+        self.assertIsNone(self.row(queue)["lastAttemptAt"])
+        self.assertIsInstance(self.row(queue)["nextAttemptAt"], int)
+        self.assertTrue(queue.save())
+        summary = queue.write_reports(self.base / "reports")
+        self.assertEqual({resolution.IGNORED_NO_ARTWORK: 1}, summary["reasonCounts"])
+        report = json.loads((self.base / "reports/resolution_queue.json").read_text(encoding="utf-8"))
+        self.assertIsNone(report["records"][0]["nextAttemptAt"])
+        with (self.base / "reports/resolution_queue.csv").open(encoding="utf-8", newline="") as handle:
+            self.assertEqual("", next(csv.DictReader(handle))["nextAttemptAt"])
+
+    def test_restored_series_cannot_claim_ignored_movie_reason(self):
+        queue = self.queue()
+        item = movie()
+        queue.record_result("server_1", "series", item, {"matchStatus": "no_match"},
+            {"reason": "no_search_results"})
+        self.assertTrue(queue.save())
+        document = json.loads(self.cache.read_text(encoding="utf-8"))
+        next(iter(document["entries"].values()))["reason"] = resolution.IGNORED_NO_ARTWORK
+        self.cache.write_text(json.dumps(document), encoding="utf-8")
+        restored = self.queue()
+        self.assertEqual({}, restored.entries)
+        self.assertEqual(1, restored.stats["discardedEntries"])
 
     def test_defer_cached_miss_only_withholds_future_unresolved_exact_identities(self):
         for reason in resolution.STABLE | {"missing_identity", "unavailable"}:
