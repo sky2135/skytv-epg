@@ -36,7 +36,8 @@ IMAGE_PATH = re.compile(r"/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)\Z", re.I)
 YOUTUBE_KEY = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 STATUSES = {"matched_id", "matched_search", "matched_poster", "no_match", "unavailable"}
 IDENTITY_POLICY = 2
-MATCH_STRATEGY = 3
+MATCH_STRATEGY = 4
+UNDATED_POSTER_POLICY = 1
 UNMATCHED_PASSTHROUGH_POLICY = 1
 PASSTHROUGH_REASONS = frozenset({"missing_identity", "no_search_results", "title_mismatch",
                                  "year_mismatch", "ambiguous_title_year", "alias_candidate_limit"})
@@ -51,9 +52,15 @@ DIAGNOSTIC_REASONS = frozenset({
 # remain identity-bearing ("Doctor" must never become "Doctor Strange").
 # Locale labels are recognized only in the observed spaced-dash/pipe format.
 # An acronym followed by a colon can be part of the film's actual title.
-PROVIDER_LOCALES = "AR|BN|CS|DA|DE|EL|EN|ES|FA|FI|FR|GU|HE|HI|HU|ID|IT|JA|KM|KN|KO|LO|ML|MR|MS|NE|NL|NO|PA|PL|PT|RO|RU|SI|SK|SO|SV|SW|TA|TE|TH|TL|TR|UK|UR|VI|ZH"
+PROVIDER_LOCALES = "AR|BN|CS|DA|DE|EL|EN|ENG|ES|FA|FI|FR|GU|HE|HI|HU|ID|IN|IT|JA|KM|KN|KO|LO|ML|MR|MS|NE|NL|NO|PA|PB|PL|PT|RO|RU|SI|SK|SO|SV|SW|TA|TE|TH|TL|TR|UK|UR|VI|ZH"
 PROVIDER_PREFIX = re.compile(rf"^(?:(?:{PROVIDER_LOCALES})\s+[-|]\s+|(?:4K|FHD|UHD|HD|SD)\s*[-|:]\s+)")
-PROVIDER_SUFFIX = re.compile(r"\s*(?:\[(?:4K|FHD|UHD|HD|SD)\]|\((?:4K|FHD|UHD|HD|SD|HINDI|MARATHI|TAMIL|TELUGU|ENGLISH|PUNJABI|DUBBED)\))\s*$", re.I)
+PROVIDER_QUALITY = r"4K|FHD|UHD|HD|SD|CAM|HDCAM|HDTS|HDTC|TS|TC"
+PROVIDER_LANGUAGE = r"HINDI|MARATHI|TAMIL|TELUGU|ENGLISH|PUNJABI"
+PROVIDER_DECORATOR = rf"(?:{PROVIDER_QUALITY}|(?:{PROVIDER_LANGUAGE})(?:\s+DUBBED)?|DUBBED)"
+PROVIDER_SUFFIX = re.compile(rf"\s*(?:\[{PROVIDER_DECORATOR}\]|\({PROVIDER_DECORATOR}\))\s*$", re.I)
+PROVIDER_YEAR_SUFFIX = re.compile(r"(?:\s*\(((?:19|20)\d{2})\)|\s*\[((?:19|20)\d{2})\]|\s+-\s+((?:19|20)\d{2}))\s*$")
+PROVIDER_BARE_YEAR = re.compile(r"\s+((?:19|20)\d{2})\s*$")
+PROVIDER_BARE_LANGUAGE = re.compile(rf"\s+(?:{PROVIDER_LANGUAGE})(?:\s+DUBBED)?\s*$", re.I)
 
 
 def _text(value: object, limit: int = 300) -> str | None:
@@ -102,20 +109,49 @@ def _normalized_title(value: object) -> str:
 def _title_and_year(item: Mapping[str, Any]) -> tuple[str, str | None]:
     title = _text(item.get("title") or item.get("name")) or ""
     title = PROVIDER_PREFIX.sub("", title)
-    for _ in range(3):
-        title = PROVIDER_SUFFIX.sub("", title).strip()
-    trailing_year = re.search(r"(?:\s*[\[(]((?:19|20)\d{2})[\])]|\s+-\s+((?:19|20)\d{2}))\s*$", title)
     year = None
     for value in (item.get("year"), item.get("releaseDate"), item.get("release_date"), item.get("first_air_date")):
         match = re.match(r"^((?:19|20)\d{2})(?:$|-\d{2})", str(value or ""))
         if match:
             year = match.group(1)
             break
-    if trailing_year:
-        # The independently displayed year wins over possibly polluted detail
-        # metadata supplied alongside an incorrect TMDB identifier.
-        year = trailing_year.group(1) or trailing_year.group(2)
-        title = title[:trailing_year.start()].strip()
+    displayed_year = False
+    # Each iteration removes a complete known terminal segment. A hard bound
+    # keeps malformed/repeated provider decoration from becoming a parser loop.
+    for _ in range(12):
+        cleaned = PROVIDER_SUFFIX.sub("", title).strip()
+        if cleaned and cleaned != title:
+            title = cleaned
+            continue
+        if displayed_year:
+            break
+        trailing_year = PROVIDER_YEAR_SUFFIX.search(title)
+        if trailing_year and title[:trailing_year.start()].strip():
+            # Explicitly wrapped display years retain their existing priority
+            # over possibly polluted provider detail metadata.
+            year = next(value for value in trailing_year.groups() if value)
+            title = title[:trailing_year.start()].strip()
+            displayed_year = True
+            continue
+        # The observed unwrapped language form is accepted only immediately
+        # after a year, never from ordinary title words such as English Vinglish.
+        language = PROVIDER_BARE_LANGUAGE.search(title)
+        without_language = title[:language.start()].strip() if language else title
+        bare_year = PROVIDER_BARE_YEAR.search(without_language)
+        if bare_year:
+            candidate_year = bare_year.group(1)
+            candidate_title = without_language[:bare_year.start()].strip()
+            # Bare numbers are weaker evidence than wrapped provider years.
+            # Preserve standalone/numeric titles, obvious title-year phrases,
+            # distant-future identity numbers and contradictory source dates.
+            if (any(character.isalpha() for character in candidate_title)
+                    and not re.search(r"\b(?:of|in|year|since|until|before|after|from|to)\s*$", candidate_title, re.I)
+                    and int(candidate_year) <= date.today().year + 1
+                    and (year is None or year == candidate_year)):
+                title, year = candidate_title, candidate_year
+                displayed_year = True
+                continue
+        break
     return title, year
 
 
@@ -302,6 +338,23 @@ def _identity_matches(proof: Mapping[str, Any], title: str, year: str | None) ->
         return False
     return bool(_normalized_title(title) and _normalized_title(title) in names
                 and (year is None or proof.get("year") == year))
+
+
+def _undated_poster_identity_matches(proof, item, kind, title, year):
+    """A missing TMDB year needs a separately verified title/poster identity."""
+    poster = poster_identity(item)
+    return bool(kind == "movie" and isinstance(proof, Mapping)
+                and isinstance(year, str) and re.fullmatch(r"(?:19|20)[0-9]{2}", year)
+                and type(proof.get("undatedPosterPolicy")) is int
+                and proof["undatedPosterPolicy"] == UNDATED_POSTER_POLICY
+                and proof.get("sourceYear") == year and proof.get("year") is None
+                and proof.get("mediaKind") == "movie"
+                and proof.get("posterPolicy") == POSTER_POLICY
+                and poster and proof.get("posterPath") == poster
+                and isinstance(proof.get("posterPaths"), list)
+                and len(proof["posterPaths"]) <= MAX_IMAGES + 1
+                and all(isinstance(path, str) and POSTER_PATH.fullmatch(path) for path in proof["posterPaths"])
+                and poster in proof["posterPaths"] and _identity_matches(proof, title, None))
 
 
 def _strings(values: object, limit: int = 40) -> list[str]:
@@ -667,7 +720,12 @@ class TmdbClient:
                     if poster:
                         self._poster_cache_state[key] = (False, fresh, _identifier(attempted))
                     return metadata, fresh, metadata["rejectedIdentity"]
-                if isinstance(proof, dict) and _identity_matches(proof, title, year) and (
+                identity_agrees = isinstance(proof, dict) and _identity_matches(proof, title, year)
+                if isinstance(proof, dict) and "undatedPosterPolicy" in proof:
+                    identity_agrees = (value["metadata"].get("releaseDate") is None
+                        and metadata["matchStatus"] == "matched_poster"
+                        and _undated_poster_identity_matches(proof, item, kind, title, year))
+                if identity_agrees and (
                     proof.get("tmdbId") == metadata["tmdbId"]
                     and (identifier is None or metadata["tmdbId"] == identifier)
                     and proof.get("originalTitle") == _normalized_title(metadata["originalTitle"])
@@ -816,6 +874,66 @@ class TmdbClient:
             return 3
         return 1 if cached["matchStatus"].startswith("matched_") else 2
 
+    def _undated_poster_candidate(self, item, title, year, rejected_ids, evidence):
+        """Discover one undated movie without relaxing ordinary year matching."""
+        state, search = self._request("/search/movie", {"query": title, "page": 1, "include_adult": "true"})
+        self.last_match_diagnostic["searchPages"] += 1
+        if state != "ok" or not isinstance(search, dict):
+            return "unavailable", None, "incomplete_search"
+        rows = search.get("results")
+        pages = _integer(search.get("total_pages"), 0, 100_000)
+        total = _integer(search.get("total_results"), 0, 10_000_000)
+        if (not isinstance(rows, list) or len(rows) > 100 or pages is None or total is None
+                or _integer(search.get("page"), 1, 100_000) != 1
+                or pages > 1 or total != len(rows) or (pages == 0 and rows)):
+            return "unavailable", None, "incomplete_search"
+        self.last_match_diagnostic.update(searchComplete=True, candidateCount=len(rows))
+        if len(rows) != 1:
+            return "no_match", None, "ambiguous_title_year" if rows else "no_search_results"
+        candidate = rows[0]
+        identifier = _identifier(candidate.get("id")) if isinstance(candidate, dict) else None
+        if not identifier:
+            return "unavailable", None, "incomplete_search"
+        self.last_match_diagnostic["candidateIds"] = [identifier]
+        supplied = _enrichment_identity(item, "movie")[1]
+        if identifier in rejected_ids or (supplied and supplied != identifier):
+            return "no_match", None, "title_mismatch"
+        names = {_normalized_title(candidate.get(field)) for field in ("title", "original_title")}
+        if _normalized_title(title) not in names:
+            return "no_match", None, "title_mismatch"
+        if candidate.get("release_date") not in (None, ""):
+            return "no_match", None, "year_mismatch"
+        append = "credits,videos,alternative_titles,images,release_dates"
+        if evidence and evidence["imdbId"]:
+            append += ",external_ids"
+        state, details = self._request(f"/movie/{identifier}", {"append_to_response": append})
+        if state != "ok" or not isinstance(details, dict) or _identifier(details.get("id")) != identifier:
+            return "unavailable", None, "incomplete_search"
+        if details.get("release_date") not in (None, ""):
+            return "no_match", None, "year_mismatch"
+        proof = _detail_identity(details, "movie")
+        if not _identity_matches(proof, title, None) or evidence and not _evidence_matches(details, evidence):
+            return "no_match", None, "title_mismatch"
+        releases = details.get("release_dates")
+        countries = releases.get("results") if isinstance(releases, dict) else None
+        if not isinstance(countries, list) or len(countries) > 250:
+            return "unavailable", None, "incomplete_search"
+        for country in countries:
+            dates = country.get("release_dates") if isinstance(country, dict) else None
+            if not isinstance(dates, list):
+                return "unavailable", None, "incomplete_search"
+            if dates:
+                # Existing regional dates need the normal date rules; this
+                # exception is only for a genuinely undated TMDB record.
+                return "no_match", None, "year_mismatch"
+        poster = poster_identity(item)
+        paths, complete = official_paths(details)
+        if not complete:
+            return "unavailable", None, "incomplete_search"
+        if not poster or poster not in paths or self.poster_index.collided(poster):
+            return "no_match", None, "title_mismatch"
+        return "ok", details, "matched_poster"
+
     def enrich(self, item: Mapping[str, Any], kind: str) -> dict[str, Any]:
         api_kind = self._kind(kind)
         self.last_match_diagnostic = _match_diagnostic()
@@ -894,6 +1012,7 @@ class TmdbClient:
         poster = poster_identity(item)
         poster_available = bool(poster and not self.poster_index.collided(poster))
         poster_assisted = False
+        undated_poster = False
         if evidence and evidence["imdbId"]:
             # Bound external identity avoids choosing among same-name works or
             # an incomplete title search. It does not relax display title/year
@@ -1004,9 +1123,22 @@ class TmdbClient:
             else:
                 return unavailable("incomplete_search")
 
-            if not candidates:
+            if (kind == "movie" and poster_available and not matches
+                    and (not candidates or any(signature[1] is None for signature in candidates.values()))):
+                state, undated_details, reason = self._undated_poster_candidate(item, title, year, rejected_ids, evidence)
+                if state == "unavailable":
+                    return unavailable(reason)
+                if state == "ok":
+                    details = undated_details
+                    identifier = _identifier(details["id"])
+                    poster_assisted = undated_poster = True
+                else:
+                    return no_match(reason)
+            if undated_poster:
+                pass
+            elif not candidates:
                 return no_match("no_search_results")
-            if len(matches) == 1 and not evidence:
+            elif len(matches) == 1 and not evidence:
                 identifier = next(iter(matches))
             else:
                 # Search may find an official alternate title, while exposing
@@ -1064,7 +1196,13 @@ class TmdbClient:
                     self.stats["errors"] += 1
                 return unavailable()
         proof = _detail_identity(details, kind)
-        if not _identity_matches(proof, title, year):
+        if undated_poster:
+            paths, _complete = official_paths(details)
+            proof.update(undatedPosterPolicy=UNDATED_POSTER_POLICY, sourceYear=year,
+                         mediaKind=kind, posterPath=poster, posterPolicy=POSTER_POLICY,
+                         posterPaths=sorted(paths))
+        if not (_identity_matches(proof, title, year)
+                or _undated_poster_identity_matches(proof, item, kind, title, year)):
             rejected = True
             return no_match("year_mismatch" if proof.get("year") != year else "title_mismatch")
         if evidence:

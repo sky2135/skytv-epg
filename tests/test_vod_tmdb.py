@@ -732,7 +732,7 @@ class TmdbEnrichmentTests(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         document = json.loads(text)
         rules = reviewed._validate_document(document)
-        self.assertEqual(len(rules), 52)
+        self.assertEqual(len(rules), 59)
         self.assertEqual(sum(row["rejectIdentity"] for row in rules.values()), 7)
         for marker in ("password", "api_key", "direct_source", "rawSource", ".invalid", "playbackUrl"):
             self.assertNotIn(marker, text)

@@ -146,7 +146,7 @@ class PosterIdentityTests(unittest.TestCase):
         self.assertEqual(client.enrich(item(), "movie")["matchStatus"], "matched_poster")
 
     def test_new_index_candidate_can_retry_fresh_miss_once_and_preserve_backoff(self):
-        client = self.client(FakeSession(search()))
+        client = self.client(FakeSession(search(), search()))
         self.assertEqual(client.enrich(item(), "movie")["matchStatus"], "no_match")
         self.seed(client)
         self.assertEqual(client.poster_retry_candidate(item(), "movie"), "101")
@@ -208,7 +208,9 @@ class PosterIdentityTests(unittest.TestCase):
 
     def test_punjabi_marker_is_decoration_without_country_to_language_inference(self):
         self.assertEqual(tmdb._title_and_year({"title": "Example Film (2025) (Punjabi)"}), ("Example Film", "2025"))
-        self.assertEqual(tmdb._title_and_year({"title": "IN - Dangal (2016)"}), ("IN - Dangal", "2016"))
+        target = {"title": "IN - Dangal (2016)", "languages": ["und"]}
+        self.assertEqual(tmdb._title_and_year(target), ("Dangal", "2016"))
+        self.assertEqual(target["languages"], ["und"])
 
     def test_shared_worker_index_is_thread_safe_and_keeps_collision_evidence_bounded(self):
         clients = [self.client() for _ in range(3)]

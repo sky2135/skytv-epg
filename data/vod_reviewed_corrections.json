@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "reviewedAt": "2026-10-21",
+  "reviewedAt": "2026-10-22",
   "scope": "Exact published records and source-backed fields only. Original language never determines provider audio. Unknown TMDB IDs and artwork are not invented.",
   "corrections": [
     {
@@ -1107,6 +1107,111 @@
       "rejectedTmdbIds": [
         "236522"
       ]
+    },
+    {
+      "serverId": "server_2",
+      "kind": "movie",
+      "recordId": "2464200",
+      "displayNames": [
+        "Solvan Saal 1958 Punjabi"
+      ],
+      "rejectIdentity": false,
+      "metadata": {},
+      "evidenceURLs": [
+        "https://www.themoviedb.org/movie/275784"
+      ],
+      "year": "1958",
+      "searchTitle": "Solva Saal"
+    },
+    {
+      "serverId": "server_1",
+      "kind": "movie",
+      "recordId": "826646",
+      "displayNames": [
+        "The Bloodline of Bathory (2026) (English)"
+      ],
+      "rejectIdentity": false,
+      "metadata": {},
+      "evidenceURLs": [
+        "https://www.themoviedb.org/movie/1756427"
+      ],
+      "year": "2026",
+      "searchTitle": "The Bloodline of Bathory"
+    },
+    {
+      "serverId": "server_1",
+      "kind": "movie",
+      "recordId": "825453",
+      "displayNames": [
+        "Street Fighter (2026) (Hindi) (CAM)"
+      ],
+      "rejectIdentity": false,
+      "metadata": {},
+      "evidenceURLs": [
+        "https://www.themoviedb.org/movie/1153576"
+      ],
+      "year": "2026",
+      "searchTitle": "Street Fighter"
+    },
+    {
+      "serverId": "server_1",
+      "kind": "movie",
+      "recordId": "824536",
+      "displayNames": [
+        "Thaapi (2026) (Punjabi) (CAM)"
+      ],
+      "rejectIdentity": false,
+      "metadata": {},
+      "evidenceURLs": [
+        "https://www.themoviedb.org/movie/1784165"
+      ],
+      "year": "2026",
+      "searchTitle": "Thaapi"
+    },
+    {
+      "serverId": "server_3",
+      "kind": "movie",
+      "recordId": "780271",
+      "displayNames": [
+        "ENG - Eat Pray Love 2010"
+      ],
+      "rejectIdentity": false,
+      "metadata": {},
+      "evidenceURLs": [
+        "https://www.themoviedb.org/movie/38167"
+      ],
+      "year": "2010",
+      "searchTitle": "Eat Pray Love"
+    },
+    {
+      "serverId": "server_3",
+      "kind": "movie",
+      "recordId": "611067",
+      "displayNames": [
+        "PB - Thana Sadar 2021"
+      ],
+      "rejectIdentity": false,
+      "metadata": {},
+      "evidenceURLs": [
+        "https://www.themoviedb.org/movie/898000"
+      ],
+      "year": "2021",
+      "searchTitle": "Thana Sadar"
+    },
+    {
+      "serverId": "server_3",
+      "kind": "movie",
+      "recordId": "744220",
+      "displayNames": [
+        "IN - Dangal (2016)"
+      ],
+      "rejectIdentity": false,
+      "metadata": {},
+      "evidenceURLs": [
+        "https://www.themoviedb.org/movie/360814"
+      ],
+      "year": "2016",
+      "searchTitle": "Dangal"
     }
   ]
 }
