@@ -258,10 +258,11 @@ class ExternalIdentityTests(unittest.TestCase):
         original = item()
         writer = self.client(FakeResponse(found()), FakeResponse({"results": [], "total_pages": 0}))
         self.assertEqual(writer.enrich(original, "movie")["matchStatus"], "no_match")
-        path = next(self.cache.rglob("*.json"))
-        entry = json.loads(path.read_text())
-        entry["data"]["matchStrategy"] = 2
-        path.write_text(json.dumps(entry), encoding="utf-8")
+        path = writer._cache_path(tmdb._enrichment_identity(original, "movie")[0])
+        for cache_path in self.cache.rglob("*.json"):
+            entry = json.loads(cache_path.read_text())
+            entry["data"]["matchStrategy"] = 2
+            cache_path.write_text(json.dumps(entry), encoding="utf-8")
         retry = self.client(FakeResponse(found(101)), FakeResponse(details()))
         self.assertEqual(retry.enrichment_priority(original, "movie"), 0)
         expected = retry.enrich(original, "movie")

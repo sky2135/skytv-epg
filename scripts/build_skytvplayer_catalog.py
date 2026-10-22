@@ -21,7 +21,8 @@ from urllib.parse import urlsplit
 import requests
 
 import build_vod_catalogs as vod
-from vod_tmdb import TmdbClient, _date as tmdb_date, _enrichment_identity, poster_identity
+from vod_tmdb import (TmdbClient, _date as tmdb_date, _enrichment_identity, poster_identity,
+                      unmatched_passthrough_fingerprint)
 from vod_series import enrich_series
 from vod_reviewed_corrections import apply_reviewed_correction, correction_for
 from vod_resolution_queue import ResolutionQueue
@@ -129,6 +130,14 @@ def _matching_item(item, row, kind, evidence):
 
 
 def _resolve_metadata(client, server_id, kind, match_item, resolution_queue):
+    ignored = getattr(client, "ignored_without_artwork", None)
+    if callable(ignored) and ignored(match_item, kind):
+        return client.enrich(match_item, kind)
+    queued_ignore = getattr(resolution_queue, "is_ignored", None)
+    if callable(queued_ignore) and queued_ignore(server_id, kind, match_item):
+        # A queue hint cannot replace missing or invalidated matcher proof.
+        # Leave scheduling untouched while parallel result keys are in use.
+        return client.enrich(match_item, kind)
     poster_lookup = getattr(client, "poster_retry_candidate", None)
     if not callable(poster_lookup):
         poster_lookup = getattr(client, "poster_candidate", None)
@@ -155,6 +164,9 @@ def _metadata_result_key(item, kind, resolution_queue):
                    "poster": poster_identity(item),
                    "queueDeferred": bool(resolution_queue and
                        resolution_queue.defer_cached_miss(server_id, kind, item))}
+    passthrough = unmatched_passthrough_fingerprint(item, kind)
+    if passthrough:
+        constraints["unmatchedSource"] = passthrough
     return physical_key, hashlib.sha256(json_bytes(constraints)).hexdigest()
 
 
@@ -511,6 +523,14 @@ def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
                 cached, fresh, _rejected = cache_reader(key, item, "movie", identifier, title, identity_year)
                 known_before = bool(cached and str(cached.get("matchStatus", "")).startswith("matched_")
                                     and tmdb_date(cached.get("releaseDate")))
+                ignored = getattr(client, "ignored_without_artwork", None)
+                if (cached and cached.get("matchStatus") == "no_match"
+                        and callable(ignored) and ignored(item, "movie")):
+                    summary["ignoredNoArtwork"] = summary.get("ignoredNoArtwork", 0) + 1
+                    if queue is not None:
+                        queue.record_result(server_id, "movie", item, cached,
+                            diagnostic={"ignoredWithoutArtwork": True}, attempted=False)
+                    continue
                 # The normal publisher consumes this fresh proof directly.
                 # Do not put thousands of already-resolved titles in the queue.
                 if queue is not None and known_before and fresh:
@@ -529,6 +549,9 @@ def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
                             diagnostic={"reason": cached["matchStatus"], "candidateIds": [cached["tmdbId"]]},
                             attempted=False)
                     continue
+            reopen = getattr(queue, "reopen_ignored", None)
+            if callable(reopen):
+                reopen(server_id, "movie", item)
             provider_sources = vod._nested_sources(raw_rows.get(item["id"], {}), details.get(item["id"], {}))
             added = timestamp(vod._first_value(provider_sources, ("added", "added_at", "created_at")))
             added_epoch = datetime.fromisoformat(added.replace("Z", "+00:00")).timestamp() if added else 0
@@ -560,13 +583,32 @@ def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
         metadata = client.enrich(item, "movie")
         diagnostic = dict(getattr(client, "last_match_diagnostic", {}))
         if (evidence is not None and not str(metadata.get("matchStatus", "")).startswith("matched_")
+                and not (diagnostic.get("ignoredWithoutArtwork") and diagnostic.get("cacheHit"))
                 and diagnostic.get("reason") in {"ambiguous_title_year", "title_mismatch", "year_mismatch", "no_search_results"}
                 and time.monotonic() - started < seconds and client.stats.get("requests", 0) < client.max_requests):
+            evidence_failures = {field: evidence.stats.get(field, 0) for field in ("errors", "budgetDeferred")}
             facts = evidence.collect(summary["serverId"], item)
             if facts and facts != item.get("_identityEvidence"):
                 item = dict(item, _identityEvidence=facts)
                 metadata = client.enrich(item, "movie")
                 diagnostic = dict(getattr(client, "last_match_diagnostic", {}))
+            if (diagnostic.get("ignoredWithoutArtwork") is True
+                    and not str(metadata.get("matchStatus", "")).startswith("matched_")
+                    and any(evidence.stats.get(field, 0) > count for field, count in evidence_failures.items())):
+                reopen = getattr(client, "reopen_unmatched_without_artwork", None)
+                if callable(reopen):
+                    reopen(item, "movie")
+                diagnostic.update(reason="unavailable", ignoredWithoutArtwork=False)
+        elif (evidence is not None and diagnostic.get("ignoredWithoutArtwork")
+                and not diagnostic.get("cacheHit")
+                and diagnostic.get("reason") in {"ambiguous_title_year", "title_mismatch", "year_mismatch", "no_search_results"}
+                and (not hasattr(evidence, "configs") or summary["serverId"] in evidence.configs)):
+            # A first optional probe deferred by this phase's budget has not
+            # exhausted the available evidence methods.
+            reopen = getattr(client, "reopen_unmatched_without_artwork", None)
+            if callable(reopen):
+                reopen(item, "movie")
+            diagnostic.update(reason="unavailable", ignoredWithoutArtwork=False)
         if queue is not None:
             queue.record_result(summary["serverId"], "movie", item, metadata,
                 diagnostic=diagnostic, attempted=(client.stats.get("requests", 0) > before
@@ -581,7 +623,7 @@ def backfill_release_dates(sources: Sequence[tuple[str, Mapping[str, Any]]],
         summary["unavailable"] += status == "unavailable"
     fields = ("candidateCount", "processedCount", "knownCachedDatesBefore", "matchedDates", "newlyMatchedDates")
     stats_fields = ("requests", "cacheHits", "cacheMisses", "staleFallbacks", "matches", "noMatches", "errors",
-                    "budgetExhausted", "elapsedBudgetExhausted", "retries", "cacheWriteErrors")
+                    "budgetExhausted", "elapsedBudgetExhausted", "retries", "cacheWriteErrors", "ignoredWithoutArtwork")
     extra = {}
     if queue is not None:
         queue.save()

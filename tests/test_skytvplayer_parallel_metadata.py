@@ -139,6 +139,8 @@ class ParallelMetadataTests(unittest.TestCase):
 
     def test_shared_identity_has_one_deterministic_owner_and_one_request(self):
         groups = self.groups(3, duplicate=True)
+        for group in groups:
+            group["prepared"]["normalized"][0]["artwork"]["posterUrl"] = "https://image.tmdb.org/t/p/w500/shared.jpg"
         client, sessions = self.client(), Sessions()
         results = app._prefetch_metadata(groups, client, 3, None, None,
                                         session_factory=sessions.factory)

@@ -197,9 +197,10 @@ class ReleaseDateBackfillTests(unittest.TestCase):
         self.backfill(source(movie(1, "A Different Film (2026)", tmdb_id=101)), client)
         self.assertEqual(len(session.calls), 1)
         cached = [json.loads(path.read_text()) for path in self.root.rglob("*.json")]
-        self.assertEqual(len(cached), 1)
-        self.assertEqual(cached[0]["data"]["metadata"]["matchStatus"], "no_match")
-        self.assertIsNone(cached[0]["data"]["metadata"]["releaseDate"])
+        self.assertTrue(cached)
+        for entry in cached:
+            self.assertEqual(entry["data"]["metadata"]["matchStatus"], "no_match")
+            self.assertIsNone(entry["data"]["metadata"]["releaseDate"])
 
     def test_verified_backfill_cache_is_reused_by_the_normal_publisher_without_a_token(self):
         session = FakeSession(FakeResponse({**movie_details(), "release_date": "2026-10-10"}))

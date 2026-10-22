@@ -37,6 +37,9 @@ YOUTUBE_KEY = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 STATUSES = {"matched_id", "matched_search", "matched_poster", "no_match", "unavailable"}
 IDENTITY_POLICY = 2
 MATCH_STRATEGY = 3
+UNMATCHED_PASSTHROUGH_POLICY = 1
+PASSTHROUGH_REASONS = frozenset({"missing_identity", "no_search_results", "title_mismatch",
+                                 "year_mismatch", "ambiguous_title_year", "alias_candidate_limit"})
 MAX_SEARCH_PAGES = 8
 MAX_ALIAS_CANDIDATES = 3
 DIAGNOSTIC_REASONS = frozenset({
@@ -204,6 +207,7 @@ def _match_diagnostic(value: object = None, *, cache_hit: bool = False) -> dict[
     raw = value if isinstance(value, Mapping) else {}
     reason = raw.get("reason")
     result = {"reason": reason if isinstance(reason, str) and reason in DIAGNOSTIC_REASONS else "unavailable", "cacheHit": cache_hit,
+              "ignoredWithoutArtwork": raw.get("ignoredWithoutArtwork") is True,
               "candidateIds": []}
     identifiers = raw.get("candidateIds")
     if isinstance(identifiers, list):
@@ -222,6 +226,60 @@ def _reviewed(item: Mapping[str, Any], kind: str) -> dict[str, Any] | None:
     content_id = str(item.get("contentId") or "")
     server_id = str(item.get("_serverId") or (content_id.split(":", 1)[0] if ":" in content_id else ""))
     return correction_for(server_id, kind, item) if server_id else None
+
+
+def unmatched_passthrough_fingerprint(item: Mapping[str, Any], kind: str) -> str | None:
+    """Bind an image-less movie retry decision to its complete current source.
+
+    This is not an identity match. Only its digest is retained in private cache
+    proof; source artwork URLs and provider metadata never enter that proof.
+    """
+    if kind != "movie" or not isinstance(item, Mapping):
+        return None
+    content_id = item.get("contentId")
+    match = re.fullmatch(r"(server_[1-9][0-9]?):movie:([0-9]{1,10})", content_id) if isinstance(content_id, str) else None
+    if (match is None or str(item.get("id")) != match[2]
+            or item.get("_serverId", match[1]) != match[1]
+            or str(item.get("providerStreamId", match[2])) != match[2]):
+        return None
+    artwork = item.get("artwork")
+    if artwork is None:
+        artwork = {}
+    if (not isinstance(artwork, Mapping)
+            or any(artwork.get(field) not in (None, "") for field in ("posterUrl", "backdropUrl"))):
+        return None
+    try:
+        key, identifier, title, year = _enrichment_identity(item, kind)
+        source = {"policy": UNMATCHED_PASSTHROUGH_POLICY, "strategy": MATCH_STRATEGY,
+                  "contentId": content_id, "serverId": match[1], "id": match[2],
+                  "sourceTitle": item.get("title") or item.get("name"),
+                  "queryTitle": title, "queryYear": year, "tmdbId": identifier,
+                  "matcherIdentity": key, "artwork": dict(artwork),
+                  "languages": item.get("languages"), "releaseDate": item.get("releaseDate"),
+                  "providerLastModified": item.get("providerLastModified"),
+                  "evidence": _identity_evidence(item, kind), "correction": _reviewed(item, kind)}
+        encoded = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        return hashlib.sha256(encoded).hexdigest() if len(encoded) <= 64 * 1024 else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _ignored_without_artwork(value: Any, item: Mapping[str, Any], kind: str) -> bool:
+    if (not isinstance(value, Mapping) or value.get("identityPolicy") != IDENTITY_POLICY
+            or value.get("matchStrategy") != MATCH_STRATEGY):
+        return False
+    metadata, proof, diagnostic = value.get("metadata"), value.get("identity"), value.get("matchDiagnostic")
+    if (not isinstance(metadata, Mapping) or metadata.get("matchStatus") != "no_match"
+            or not isinstance(proof, Mapping) or not isinstance(diagnostic, Mapping)
+            or diagnostic.get("reason") not in PASSTHROUGH_REASONS):
+        return False
+    ignored = proof.get("ignoredWithoutArtwork")
+    fingerprint = unmatched_passthrough_fingerprint(item, kind)
+    return bool(fingerprint and isinstance(ignored, Mapping)
+                and set(ignored) == {"policyVersion", "fingerprint"}
+                and type(ignored.get("policyVersion")) is int
+                and ignored["policyVersion"] == UNMATCHED_PASSTHROUGH_POLICY
+                and ignored.get("fingerprint") == fingerprint)
 
 
 def _detail_identity(details: Mapping[str, Any], kind: str) -> dict[str, Any]:
@@ -391,7 +449,7 @@ class TmdbClient:
         self.session = session if session is not None else requests.Session()
         self._owns_session = session is None
         self._now = now
-        self.stats = {key: 0 for key in ("requests", "cacheHits", "cacheMisses", "staleFallbacks", "matches", "noMatches", "errors", "budgetExhausted", "elapsedBudgetExhausted", "retries", "cacheWriteErrors")}
+        self.stats = {key: 0 for key in ("requests", "cacheHits", "cacheMisses", "staleFallbacks", "matches", "noMatches", "errors", "budgetExhausted", "elapsedBudgetExhausted", "retries", "cacheWriteErrors", "ignoredWithoutArtwork")}
         self.last_match_diagnostic = _match_diagnostic()
         self.poster_index = shared_index(self.cache_dir)
         self._poster_cache_state = {}
@@ -542,6 +600,35 @@ class TmdbClient:
 
     def _identity_cache(self, key: str, item: Mapping[str, Any], kind: str,
                         identifier: str | None, title: str, year: str | None) -> tuple[dict[str, Any] | None, bool, bool]:
+        metadata, fresh, rejected = self._main_identity_cache(key, item, kind, identifier, title, year)
+        if metadata is not None and metadata["matchStatus"].startswith("matched_"):
+            return metadata, fresh, rejected
+        stopped = self._passthrough_cache(key, item, kind)
+        if stopped is not None:
+            metadata = _cached_metadata(stopped["metadata"])
+            return metadata, True, metadata["rejectedIdentity"]
+        return metadata, fresh, rejected
+
+    def _passthrough_cache(self, key, item, kind):
+        fingerprint = unmatched_passthrough_fingerprint(item, kind)
+        if fingerprint is None:
+            return None
+        # Main identity keys are shared across providers. Keep a separate
+        # record-bound envelope so another source's miss cannot erase a stop.
+        for cache_key in (self._passthrough_key(key, fingerprint), key):
+            value, _fresh = self._read_cache(cache_key)
+            if (_ignored_without_artwork(value, item, kind)
+                    and _cached_metadata(value.get("metadata")) is not None):
+                return value
+        return None
+
+    @staticmethod
+    def _passthrough_key(key, fingerprint):
+        return f"{key}:unmatched-passthrough-v{UNMATCHED_PASSTHROUGH_POLICY}:{fingerprint}"
+
+    def _main_identity_cache(self, key: str, item: Mapping[str, Any], kind: str,
+                             identifier: str | None, title: str, year: str | None,
+                             *, remember: bool = True) -> tuple[dict[str, Any] | None, bool, bool]:
         """Read only caches corroborated against the current display identity.
 
         Legacy positive entries can be reused without requests when their own
@@ -572,6 +659,10 @@ class TmdbClient:
                 if not metadata["matchStatus"].startswith("matched_"):
                     if value.get("matchStrategy") != MATCH_STRATEGY:
                         return None, False, False
+                    if isinstance(proof, Mapping) and "ignoredWithoutArtwork" in proof:
+                        # Ordinary miss freshness cannot transfer a stopped
+                        # record's decision to another or changed source.
+                        fresh = _ignored_without_artwork(value, item, kind)
                     attempted = proof.get("posterCandidate") if isinstance(proof, dict) else None
                     if poster:
                         self._poster_cache_state[key] = (False, fresh, _identifier(attempted))
@@ -588,7 +679,8 @@ class TmdbClient:
                                           and proof.get("evidenceFingerprint") == evidence["fingerprint"]
                                           and proof.get("contentId") == evidence["contentId"]))
                 ):
-                    self._remember_poster(kind, metadata, proof)
+                    if remember:
+                        self._remember_poster(kind, metadata, proof)
                     if metadata["matchStatus"] == "matched_poster" and self.poster_index.collided(poster):
                         return None, False, True
                     if poster:
@@ -612,7 +704,8 @@ class TmdbClient:
                      and (metadata["releaseDate"] or "")[:4] == year
                      and (identifier is None or metadata["tmdbId"] == identifier))
         if valid and metadata["matchStatus"] != "matched_poster":
-            self._remember_poster(kind, metadata, {"names": [_normalized_title(title)], "year": year})
+            if remember:
+                self._remember_poster(kind, metadata, {"names": [_normalized_title(title)], "year": year})
             if poster:
                 self._poster_cache_state[key] = (True, legacy_fresh, None)
             return metadata, legacy_fresh, False
@@ -665,6 +758,47 @@ class TmdbClient:
                                 "matchDiagnostic": _match_diagnostic(self.last_match_diagnostic),
                                 "identity": dict(proof or {}), "metadata": metadata}, ttl)
 
+    def ignored_without_artwork(self, item: Mapping[str, Any], kind: str) -> bool:
+        """Inspect a validated durable miss without writes, HTTP or statistics."""
+        if unmatched_passthrough_fingerprint(item, kind) is None:
+            return False
+        key, identifier, title, year = _enrichment_identity(item, kind)
+        metadata, _fresh, _rejected = self._main_identity_cache(key, item, kind, identifier, title, year, remember=False)
+        if metadata is not None and metadata["matchStatus"].startswith("matched_"):
+            return False
+        return self._passthrough_cache(key, item, kind) is not None
+
+    def reopen_unmatched_without_artwork(self, item: Mapping[str, Any], kind: str) -> bool:
+        """Remove only this source's stop proof after an optional temporary failure.
+
+        Keep its ordinary miss, reason and rejection state for the normal TTL.
+        Other sources and current verified positives are never rewritten.
+        """
+        fingerprint = unmatched_passthrough_fingerprint(item, kind)
+        if fingerprint is None:
+            return False
+        key = _enrichment_identity(item, kind)[0]
+        changed = False
+        errors_before = self.stats["cacheWriteErrors"]
+        for cache_key in (key, self._passthrough_key(key, fingerprint)):
+            value, _fresh = self._read_cache(cache_key)
+            if not _ignored_without_artwork(value, item, kind):
+                continue
+            metadata = _cached_metadata(value.get("metadata"))
+            if metadata is None:
+                continue
+            proof = dict(value["identity"])
+            proof.pop("ignoredWithoutArtwork", None)
+            diagnostic = _match_diagnostic(value.get("matchDiagnostic"))
+            diagnostic["ignoredWithoutArtwork"] = False
+            self._write_cache(cache_key, {"identityPolicy": IDENTITY_POLICY,
+                "matchStrategy": MATCH_STRATEGY, "matchDiagnostic": diagnostic,
+                "identity": proof, "metadata": metadata}, MISS_TTL)
+            changed = True
+        if changed:
+            self.last_match_diagnostic["ignoredWithoutArtwork"] = False
+        return changed and self.stats["cacheWriteErrors"] == errors_before
+
     def enrichment_priority(self, item: Mapping[str, Any], kind: str) -> int:
         """Prioritize missing titles, then stale matches/misses, then fresh cache.
 
@@ -700,8 +834,13 @@ class TmdbClient:
         if fresh:
             self.stats["cacheHits"] += 1
             stored, _fresh = self._read_cache(key)
+            if not cached["matchStatus"].startswith("matched_"):
+                stored = self._passthrough_cache(key, item, kind) or stored
             diagnostic = stored.get("matchDiagnostic") if isinstance(stored, Mapping) else None
             self.last_match_diagnostic = _match_diagnostic(diagnostic, cache_hit=True)
+            if _ignored_without_artwork(stored, item, kind):
+                self.last_match_diagnostic["ignoredWithoutArtwork"] = True
+                self.stats["ignoredWithoutArtwork"] += 1
             if not diagnostic:
                 self.last_match_diagnostic["reason"] = cached["matchStatus"] if cached["matchStatus"].startswith("matched_") else "unavailable"
             return cached
@@ -731,8 +870,15 @@ class TmdbClient:
             result = _empty(None, "no_match")
             result["rejectedIdentity"] = rejected
             self.stats["noMatches"] += 1
-            proof = {"posterCandidate": poster_attempt} if poster_attempt else None
+            proof = {"posterCandidate": poster_attempt} if poster_attempt else {}
+            fingerprint = unmatched_passthrough_fingerprint(item, kind) if reason in PASSTHROUGH_REASONS else None
+            if fingerprint:
+                proof["ignoredWithoutArtwork"] = {"policyVersion": UNMATCHED_PASSTHROUGH_POLICY,
+                                                   "fingerprint": fingerprint}
+                self.last_match_diagnostic["ignoredWithoutArtwork"] = True
             self._write_identity_cache(key, result, MISS_TTL, proof)
+            if fingerprint:
+                self._write_identity_cache(self._passthrough_key(key, fingerprint), result, MISS_TTL, proof)
             return result
 
         if not (self.token or self.api_key):
