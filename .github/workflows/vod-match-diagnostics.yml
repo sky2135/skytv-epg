@@ -1,17 +1,18 @@
-name: Inspect sanitized Server 3 movie source provenance
+name: Smoke test two movie identities and resumable VOD batches
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: ${{ github.repository }}-vod-source-provenance-20261024
   cancel-in-progress: false
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
-      - name: Check out diagnostic revision
+      - name: Check out isolated smoke revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
@@ -22,26 +23,22 @@ jobs:
       - name: Install pinned client dependency
         run: |
           python -m pip install --only-binary=:all: requests==2.32.5
-      - name: Trace three movie source records without publishing
+      - name: Verify two real movies and resume two tiny private batches
         env:
-          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
-          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
-          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
-          ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP }}
+          GH_TOKEN: ${{ github.token }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           PYTHONIOENCODING: utf-8
+          PYTHONUNBUFFERED: '1'
         shell: bash
         run: |
           set -euo pipefail
-          command=(python -u scripts/trace_vod_source_provenance.py --live --load-server-config --server server_3 --output .build/vod-provenance/report.json)
-          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
-            command+=(--allow-insecure-http)
-          fi
-          timeout --signal=TERM --kill-after=30s 6m "${command[@]}"
-      - name: Retain only sanitized provenance
+          timeout --signal=TERM --kill-after=30s 24m python -u scripts/smoke_vod_enrichment.py
+      - name: Retain only whitelisted smoke reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: vod-source-provenance-${{ github.run_id }}
-          path: .build/vod-provenance/report.json
+          name: vod-enrichment-smoke-${{ github.run_id }}
+          path: .build/vod-smoke/results/*.json
           if-no-files-found: error
           retention-days: 7
