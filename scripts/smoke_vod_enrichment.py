@@ -17,6 +17,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import component_artifacts as artifacts
+import build_vod_catalogs as vod
 import enrich_vod_catalog as worker
 import vod_tmdb as tmdb
 from vod_verification_input import load_component_input
@@ -131,12 +132,15 @@ def main():
                         and not result.get('rejectedIdentity'), 'Movie identity verification')
                 require(tmdb._date(result.get('releaseDate')) is not None, 'Movie exact release date')
                 genres = result.get('genres')
-                require(isinstance(genres, list) and 0 < len(genres) <= 30
-                        and all(isinstance(value, str) and re.fullmatch(r'[a-z_]{1,40}', value) for value in genres), 'Movie genre metadata')
+                require(isinstance(genres, list) and 0 < len(genres) <= 40
+                        and all(isinstance(value, str) and 0 < len(value) <= 100
+                                and all(ord(character) >= 32 for character in value) for value in genres), 'Movie genre metadata')
+                _genre, normalized_genres = vod.normalize_genres([{'genres': genres}], '')
+                require(bool(normalized_genres) and normalized_genres != ['unknown'], 'Movie normalized genre metadata')
                 probe_results.append({'contentId': row['contentId'], 'providerId': identifier,
                     'sourceItemSha256': hashlib.sha256(canonical(item)).hexdigest(),
                     'tmdbId': result['tmdbId'], 'matchStatus': result['matchStatus'],
-                    'releaseDate': result['releaseDate'], 'genres': genres,
+                    'releaseDate': result['releaseDate'], 'genres': normalized_genres,
                     'originalLanguage': result.get('originalLanguage'), 'rejectedIdentity': False})
             probe_stats = dict(movie_client.stats)
     require(len(list((seed / 'tmdb/tmdb-v1').glob('*.json'))) == 2, 'Only two new positive seed envelopes')
