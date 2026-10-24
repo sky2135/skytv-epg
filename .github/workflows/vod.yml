@@ -13,6 +13,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -104,41 +105,10 @@ jobs:
           restore-keys: |
             skytvplayer-vod-v1-${{ runner.os }}-
 
-      - name: Resolve due Server 1 movie metadata and release dates
-        shell: bash
+      - name: Import verified metadata from independent enrichment
         env:
-          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
-          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
-          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
-          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
-        run: |
-          set -euo pipefail
-          resolve_command=(
-            python -u scripts/build_skytvplayer_catalog.py
-              --input-dir .build/vod-inputs
-              --cache-dir .build/vod-cache
-              --backfill-release-dates server_1
-              --max-tmdb-requests 3000
-              --backfill-max-seconds 600
-              --resolution-limit 300
-              --resolution-report-dir .build/vod-resolution
-              --resolve-provider-details
-              --max-provider-detail-requests 40
-          )
-          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
-            resolve_command+=(--allow-insecure-http)
-          fi
-          timeout --signal=TERM --kill-after=30s 12m "${resolve_command[@]}"
-
-      - name: Retain sanitized movie resolution reports
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: vod-resolution-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .build/vod-resolution/resolution_queue.*
-          if-no-files-found: ignore
-          retention-days: 7
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/vod_enrichment_artifacts.py import-cache --destination .build/vod-cache --optional
 
       - name: Build SKYTVPlayer movie and TV home database
         id: skytvplayer_catalog
@@ -153,8 +123,6 @@ jobs:
           SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
           SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
           SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
-          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
-          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: |
           set -euo pipefail
           app_command=(
@@ -164,6 +132,7 @@ jobs:
               --cache-dir .build/vod-cache
               --fetch-series-details
               --tmdb-workers 3
+              --max-tmdb-requests 0
           )
           if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
             app_command+=(--allow-insecure-http)
@@ -172,6 +141,29 @@ jobs:
             app_command=(/usr/bin/time -f "SkyTVPlayer peak RSS KiB: %M" "${app_command[@]}")
           fi
           timeout --signal=TERM --kill-after=30s 15m "${app_command[@]}"
+
+      - name: Trace selected Server 3 source fields without retaining raw data
+        env:
+          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          command=(python scripts/trace_vod_source_provenance.py
+            --input-dir .build/vod-inputs --server server_3 --load-server-config
+            --app-catalog-dir public/skytvplayer
+            --output .build/vod-provenance/server_3.json)
+          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == true ]]; then command+=(--allow-insecure-http); fi
+          "${command[@]}"
+
+      - name: Retain sanitized source-field provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-source-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/vod-provenance/server_3.json
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Audit verified identities by server and language
         run: python scripts/audit_vod_identity_coverage.py --catalog-dir public/skytvplayer --output public/skytvplayer/identity_coverage.json --github-summary

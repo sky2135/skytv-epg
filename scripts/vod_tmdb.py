@@ -21,7 +21,7 @@ from typing import Any, Mapping
 import requests
 
 from vod_reviewed_corrections import correction_for
-from vod_poster_index import POSTER_POLICY, MAX_IMAGES, IMAGE_PATH as POSTER_PATH, official_paths, poster_identity, shared_index
+from vod_poster_index import POSTER_POLICY, MAX_IMAGES, IMAGE_PATH as POSTER_PATH, official_paths, poster_identity, shared_index, seed_collision_file
 
 
 API_ROOT = "https://api.themoviedb.org/3"
@@ -36,7 +36,7 @@ IMAGE_PATH = re.compile(r"/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)\Z", re.I)
 YOUTUBE_KEY = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 STATUSES = {"matched_id", "matched_search", "matched_poster", "no_match", "unavailable"}
 IDENTITY_POLICY = 2
-MATCH_STRATEGY = 4
+MATCH_STRATEGY = 5
 UNDATED_POSTER_POLICY = 1
 UNMATCHED_PASSTHROUGH_POLICY = 1
 PASSTHROUGH_REASONS = frozenset({"missing_identity", "no_search_results", "title_mismatch",
@@ -59,6 +59,7 @@ PROVIDER_LANGUAGE = r"HINDI|MARATHI|TAMIL|TELUGU|ENGLISH|PUNJABI"
 PROVIDER_DECORATOR = rf"(?:{PROVIDER_QUALITY}|(?:{PROVIDER_LANGUAGE})(?:\s+DUBBED)?|DUBBED)"
 PROVIDER_SUFFIX = re.compile(rf"\s*(?:\[{PROVIDER_DECORATOR}\]|\({PROVIDER_DECORATOR}\))\s*$", re.I)
 PROVIDER_YEAR_SUFFIX = re.compile(r"(?:\s*\(((?:19|20)\d{2})\)|\s*\[((?:19|20)\d{2})\]|\s+-\s+((?:19|20)\d{2}))\s*$")
+PROVIDER_BARE_4K_SUFFIX = re.compile(r"\s+4K\s*$", re.I)
 PROVIDER_BARE_YEAR = re.compile(r"\s+((?:19|20)\d{2})\s*$")
 PROVIDER_BARE_LANGUAGE = re.compile(rf"\s+(?:{PROVIDER_LANGUAGE})(?:\s+DUBBED)?\s*$", re.I)
 
@@ -125,12 +126,24 @@ def _title_and_year(item: Mapping[str, Any]) -> tuple[str, str | None]:
             continue
         if displayed_year:
             break
+        # Bare 4K is observed immediately beside an explicit display year.
+        # Require that year before treating an unwrapped title word as quality.
+        quality = PROVIDER_BARE_4K_SUFFIX.search(title)
+        if quality:
+            without_quality = title[:quality.start()].strip()
+            explicit_year = PROVIDER_YEAR_SUFFIX.search(without_quality)
+            if explicit_year and without_quality[:explicit_year.start()].strip():
+                title = without_quality
+                continue
         trailing_year = PROVIDER_YEAR_SUFFIX.search(title)
         if trailing_year and title[:trailing_year.start()].strip():
             # Explicitly wrapped display years retain their existing priority
             # over possibly polluted provider detail metadata.
             year = next(value for value in trailing_year.groups() if value)
             title = title[:trailing_year.start()].strip()
+            quality = PROVIDER_BARE_4K_SUFFIX.search(title)
+            if quality and title[:quality.start()].strip():
+                title = title[:quality.start()].strip()
             displayed_year = True
             continue
         # The observed unwrapped language form is accepted only immediately
@@ -508,6 +521,7 @@ class TmdbClient:
         self.stats = {key: 0 for key in ("requests", "cacheHits", "cacheMisses", "staleFallbacks", "matches", "noMatches", "errors", "budgetExhausted", "elapsedBudgetExhausted", "retries", "cacheWriteErrors", "ignoredWithoutArtwork")}
         self.last_match_diagnostic = _match_diagnostic()
         self.poster_index = shared_index(self.cache_dir)
+        seed_collision_file(self.poster_index, self.cache_dir.parent.parent / "enrichment-collisions.json")
         self._poster_cache_state = {}
 
     def __enter__(self) -> "TmdbClient":
