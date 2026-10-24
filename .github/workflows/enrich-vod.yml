@@ -1,0 +1,163 @@
+name: Enrich VOD metadata in resumable batches
+run-name: "VOD metadata batch (${{ github.event_name }} #${{ github.run_number }})"
+
+on:
+  workflow_run:
+    workflows: [Refresh VOD catalogs]
+    types: [completed]
+    branches: [main]
+  schedule:
+    # Also resume persisted service cooldowns or a missed continuation.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      isolated:
+        description: Test with separate checkpoints and caches; never feed production
+        type: boolean
+        default: false
+      source-artifact-id:
+        description: Optional validated VOD source artifact for an isolated test
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ${{ github.repository }}-vod-enrichment-${{ github.ref_name }}-${{ inputs.isolated && 'isolated' || 'production' }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: '1'
+  PYTHONIOENCODING: utf-8
+  PYTHONHASHSEED: '0'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  PIP_NO_INPUT: '1'
+  ISOLATED: ${{ inputs.isolated && 'true' || 'false' }}
+  SOURCE_ARTIFACT_ID: ${{ inputs.source-artifact-id }}
+  ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
+
+jobs:
+  enrich:
+    name: Resolve pending movies and series with durable progress
+    if: >-
+      (github.ref == 'refs/heads/main' || inputs.isolated == true) &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out enrichment revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-sync.txt
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --only-binary=:all: -r requirements.txt -r requirements-sync.txt
+      - name: Restore durable progress and current validated source
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          command=(python scripts/vod_enrichment_artifacts.py prepare
+            --state-dir .build/enrichment-state --component-dir .build/enrichment-component)
+          if [[ "$ISOLATED" == true ]]; then command+=(--isolated); fi
+          if [[ -n "$SOURCE_ARTIFACT_ID" ]]; then command+=(--source-artifact-id "$SOURCE_ARTIFACT_ID"); fi
+          "${command[@]}"
+      - name: Seed a new queue from the existing production cache
+        if: steps.prepare.outputs.should_run == 'true' && steps.prepare.outputs.seed_required == 'true'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .build/vod-cache
+          key: skytvplayer-vod-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            skytvplayer-vod-v1-${{ runner.os }}-
+      - name: Process the next rate-limited batch
+        id: batch
+        continue-on-error: true
+        if: steps.prepare.outputs.should_run == 'true'
+        env:
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          command=(python -u scripts/enrich_vod_catalog.py
+            --state-dir .build/enrichment-state --component-dir .build/enrichment-component
+            --rate 20 --workers 8 --batch-seconds 900 --batch-records 25000
+            --refresh-trending
+            --resolve-provider-details server_1 --max-provider-detail-requests 40)
+          if [[ -d .build/vod-cache ]]; then command+=(--seed-cache .build/vod-cache); fi
+          if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == true ]]; then command+=(--allow-insecure-http); fi
+          timeout --signal=TERM --kill-after=30s 30m "${command[@]}"
+      - name: Seal durable progress and export verified cache candidates
+        if: steps.prepare.outputs.should_run == 'true' && hashFiles('.build/enrichment-state/report.json') != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/vod_enrichment_artifacts.py seal --state-dir .build/enrichment-state
+          python scripts/vod_enrichment_artifacts.py export-cache \
+            --state-dir .build/enrichment-state --destination .build/enrichment-candidates
+          mkdir -p .build/enrichment-package .build/enrichment-cache-package
+          tar -C .build/enrichment-state -cf .build/enrichment-package/state.tar .
+          tar -C .build/enrichment-candidates -cf .build/enrichment-cache-package/cache.tar .
+      - name: Retain the sealed checkpoint before any continuation
+        id: checkpoint
+        if: steps.prepare.outputs.should_run == 'true' && hashFiles('.build/enrichment-package/state.tar') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-enrichment-${{ inputs.isolated && 'test-' || '' }}state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/enrichment-package/state.tar
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+      - name: Retain verified candidates for independent publication
+        if: steps.prepare.outputs.should_run == 'true' && hashFiles('.build/enrichment-cache-package/cache.tar') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-enrichment-${{ inputs.isolated && 'test-' || '' }}cache-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/enrichment-cache-package/cache.tar
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+      - name: Retain the aggregate progress report
+        if: steps.prepare.outputs.should_run == 'true' && hashFiles('.build/enrichment-state/report.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-enrichment-${{ inputs.isolated && 'test-' || '' }}report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/enrichment-state/report.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Continue due work after checkpoint upload
+        if: steps.prepare.outputs.should_run == 'true' && steps.batch.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKPOINT_ARTIFACT_ID: ${{ steps.checkpoint.outputs.artifact-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          command=(python scripts/vod_enrichment_artifacts.py continue
+            --state-dir .build/enrichment-state --artifact-id "$CHECKPOINT_ARTIFACT_ID")
+          if [[ "$ISOLATED" == true ]]; then command+=(--isolated); fi
+          "${command[@]}"
+      - name: Report a failed batch after retaining recoverable progress
+        if: steps.prepare.outputs.should_run == 'true' && steps.batch.outcome == 'failure'
+        run: |
+          echo '::error::VOD enrichment failed; any sealed checkpoint was retained. Publication runs independently.'
+          exit 1

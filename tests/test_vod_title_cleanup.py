@@ -41,6 +41,115 @@ class ProviderTitleCleanupTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertEqual(tmdb._title_and_year({"title": source}), ("Example Film", "2026"))
 
+    def test_bare_4k_is_quality_only_beside_an_explicit_display_year(self):
+        for source, expected in (
+            ("EN - Indiana Jones and the Dial of Destiny (2023) 4K",
+             ("Indiana Jones and the Dial of Destiny", "2023")),
+            ("EN - Barbie 4K (2023)", ("Barbie", "2023")),
+            ("Film 2 [2023] 4K", ("Film 2", "2023")),
+            ("Film 2 4k [2023]", ("Film 2", "2023")),
+            ("1917 - 2019 4K", ("1917", "2019")),
+            ("Blade Runner 2049 4K - 2017", ("Blade Runner 2049", "2017")),
+            ("Barbie 4K (2023) [HD]", ("Barbie", "2023")),
+            ("Barbie (2023) 4K (English)", ("Barbie", "2023")),
+        ):
+            with self.subTest(source=source):
+                item = {"title": source, "releaseDate": None}
+                original = copy.deepcopy(item)
+                self.assertEqual(tmdb._title_and_year(item), expected)
+                self.assertEqual(item, original)
+        for source, expected in (
+            ("4K", ("4K", None)),
+            ("A Story in 4K", ("A Story in 4K", None)),
+            ("4K Love (2023)", ("4K Love", "2023")),
+            ("4K (2023)", ("4K", "2023")),
+            ("Film 4K 2023", ("Film 4K", "2023")),
+            ("Film 4K 2 (2023)", ("Film 4K 2", "2023")),
+            ("Film (2023) 4K Edition", ("Film (2023) 4K Edition", None)),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(tmdb._title_and_year({"title": source}), expected)
+
+    def test_observed_4k_titles_match_supplied_ids_after_independent_checks(self):
+        for source, identifier, title, release in (
+            ("EN - Indiana Jones and the Dial of Destiny (2023) 4K", 335977,
+             "Indiana Jones and the Dial of Destiny", "2023-06-25"),
+            ("EN - Barbie 4K (2023)", 346698, "Barbie", "2023-07-19"),
+        ):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                details = {**movie_details(identifier), "title": title, "original_title": title,
+                           "release_date": release}
+                session = FakeSession(FakeResponse(details))
+                client = tmdb.TmdbClient(Path(directory), token="offline-test", session=session)
+                item = {"title": source, "tmdbId": str(identifier), "releaseDate": None}
+                result = client.enrich(item, "movie")
+                self.assertEqual(result["matchStatus"], "matched_id")
+                self.assertEqual(result["tmdbId"], str(identifier))
+                self.assertEqual(result["releaseDate"], release)
+                self.assertEqual(len(session.calls), 1)
+                self.assertTrue(session.calls[0][0].endswith(f"/movie/{identifier}"))
+                self.assertEqual(item, {"title": source, "tmdbId": str(identifier), "releaseDate": None})
+
+    def test_4k_cleanup_does_not_relax_supplied_id_or_display_year(self):
+        for item, details in (
+            ({"title": "EN - Barbie 4K (2023)", "tmdbId": "335977"},
+             {**movie_details(335977), "title": "Indiana Jones and the Dial of Destiny",
+              "original_title": "Indiana Jones and the Dial of Destiny", "release_date": "2023-06-25"}),
+            ({"title": "EN - Barbie (2024) 4K", "tmdbId": "346698"},
+             {**movie_details(346698), "title": "Barbie", "original_title": "Barbie",
+              "release_date": "2023-07-19"}),
+        ):
+            with self.subTest(item=item), tempfile.TemporaryDirectory() as directory:
+                client = tmdb.TmdbClient(Path(directory), token="offline-test",
+                                         session=FakeSession(FakeResponse(details)))
+                result = client.enrich(item, "movie")
+                self.assertEqual(result["matchStatus"], "no_match")
+                self.assertIsNone(result["tmdbId"])
+                self.assertIsNone(result["releaseDate"])
+                self.assertTrue(result["rejectedIdentity"])
+
+    def test_previous_strategy_miss_at_clean_identity_is_rechecked_inside_ttl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = {"title": "EN - Barbie 4K (2023)", "tmdbId": "346698"}
+            details = {**movie_details(346698), "title": "Barbie", "original_title": "Barbie",
+                       "release_date": "2023-07-19"}
+            session = FakeSession(FakeResponse(details))
+            client = tmdb.TmdbClient(Path(directory), token="offline-test", session=session,
+                                     now=1_800_000_000)
+            key = tmdb._enrichment_identity(source, "movie")[0]
+            client._write_cache(key, {"identityPolicy": tmdb.IDENTITY_POLICY, "matchStrategy": 4,
+                "metadata": tmdb._empty(None, "no_match"), "identity": {},
+                "matchDiagnostic": {"reason": "title_mismatch"}}, tmdb.MISS_TTL)
+            self.assertEqual(client.enrich(source, "movie")["matchStatus"], "matched_id")
+            self.assertEqual(len(session.calls), 1)
+            self.assertEqual(client.stats["cacheHits"], 0)
+
+    def test_previous_strategy_verified_positive_still_requires_valid_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = {"title": "EN - Barbie 4K (2023)", "tmdbId": "346698"}
+            details = {**movie_details(346698), "title": "Barbie", "original_title": "Barbie",
+                       "release_date": "2023-07-19"}
+            client = tmdb.TmdbClient(Path(directory), token="offline-test", session=FakeSession(),
+                                     now=1_800_000_000)
+            key = tmdb._enrichment_identity(source, "movie")[0]
+            client._write_cache(key, {"identityPolicy": tmdb.IDENTITY_POLICY, "matchStrategy": 4,
+                "metadata": tmdb._metadata(details, "movie", "matched_id"),
+                "identity": tmdb._detail_identity(details, "movie")}, tmdb.DETAIL_TTL)
+            self.assertEqual(client.enrich(source, "movie")["matchStatus"], "matched_id")
+            self.assertEqual(client.stats["cacheHits"], 1)
+            self.assertFalse(client.session.calls)
+            wrong_year = dict(source, title="EN - Barbie 4K (2024)")
+            wrong_key = tmdb._enrichment_identity(wrong_year, "movie")[0]
+            client._write_cache(wrong_key, {"identityPolicy": tmdb.IDENTITY_POLICY, "matchStrategy": 4,
+                "metadata": tmdb._metadata(details, "movie", "matched_id"),
+                "identity": tmdb._detail_identity(details, "movie")}, tmdb.DETAIL_TTL)
+            offline = tmdb.TmdbClient(Path(directory), session=FakeSession(), now=1_800_000_000)
+            invalid = offline.enrich(wrong_year, "movie")
+            self.assertEqual(invalid["matchStatus"], "unavailable")
+            self.assertIsNone(invalid["tmdbId"])
+            self.assertTrue(invalid["rejectedIdentity"])
+            self.assertFalse(offline.session.calls)
+
     def test_title_numbers_sequels_and_year_words_are_preserved(self):
         for source in ("1917", "1984", "2001", "2049", "2001: A Space Odyssey", "Blade Runner 2049",
                        "Class of 1984", "Summer of 1984", "In the Year 2000", "Film 2",
