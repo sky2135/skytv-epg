@@ -32,6 +32,16 @@ records move forward within their existing server/media group. The six-group
 rotation, verified-cache checks, retry times and shared rate limit remain in
 force. Completed records are not forced to repeat. Remove the temporary variable
 after the requested rollout audit; an empty array retains ordinary scheduling.
+`VOD_ENRICHMENT_BATCH_RECORDS` optionally supplies the existing worker batch-size
+control (default 25,000). A temporary 3,000-record window includes all 483 due
+cohort records under the six-group rotation while allowing a checkpoint as soon
+as that bounded window completes. The 15-minute deadline and request-rate limit
+still apply. Restore the ordinary default after the targeted rollout.
+
+Component snapshots and enrichment artifacts are ordered by validated GitHub
+upload timestamps. Artifact IDs are opaque and do not indicate recency. A
+publisher replaces its current snapshot only with a strictly later validated
+upload; an equal upload timestamp retains the current snapshot.
 
 Each batch uses eight workers and one shared 20-request/second limiter, without
 a total request quota. HTTP 429 pauses honor the complete `Retry-After` value,

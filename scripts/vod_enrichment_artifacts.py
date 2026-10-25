@@ -311,11 +311,13 @@ def _latest(github, kind, isolated):
         rows = github.get(f'/actions/artifacts?per_page=100&page={page}')['artifacts']
         if not isinstance(rows, list) or len(rows) > 100:
             raise ValueError('Invalid enrichment artifact page')
-        candidates.extend(row for row in rows if _artifact_identity(row, kind, isolated))
+        for row in rows:
+            if _artifact_identity(row, kind, isolated):
+                candidates.append((component_artifacts.artifact_created_at(row), row))
         if len(rows) < 100:
             break
         truncated = page == component_artifacts.MAX_ARTIFACT_PAGES
-    for artifact in sorted(candidates, key=lambda row: row['id'], reverse=True):
+    for _uploaded, artifact in sorted(candidates, key=lambda row: (row[0], row[1]['id']), reverse=True):
         if _trusted(github, artifact, kind, isolated):
             return artifact
     if truncated:

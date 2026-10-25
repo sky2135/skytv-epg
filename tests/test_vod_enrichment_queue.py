@@ -123,6 +123,19 @@ class RollingQueueTests(unittest.TestCase):
         self.assertEqual(self.queue.records(), before)
         self.assertEqual(self.queue.get_meta('rateLimiter'), {'cooldownUntil': 999})
 
+    def test_three_thousand_record_window_covers_cohort_with_six_large_due_groups(self):
+        rows = [record(server=f'server_{server}', kind=kind, identifier=str(number))
+                for server in (1, 2, 3) for kind in ('movie', 'series') for number in range(1, 1001)]
+        self.queue.reconcile(rows, 'policy', {}, now=10)
+        priorities = [f'server_3:movie:{number}' for number in range(518, 1001)]
+        selected = self.queue.pending(3000, now=10, priority_content_ids=priorities)
+        self.assertEqual(len(selected), 3000)
+        self.assertEqual(len({(row['serverId'], row['kind']) for row in selected[:6]}), 6)
+        self.assertTrue(set(priorities).issubset({row['contentId'] for row in selected}))
+        self.assertEqual({(server, kind): sum(row['serverId'] == server and row['kind'] == kind for row in selected)
+                          for server in ('server_1', 'server_2', 'server_3') for kind in ('movie', 'series')},
+                         {(server, kind): 500 for server in ('server_1', 'server_2', 'server_3') for kind in ('movie', 'series')})
+
     def test_priority_rejects_malformed_duplicate_and_oversized_hints(self):
         bad = [None, 'server_1:movie:1', {}, [1], ['not-an-id'],
                ['server_1:movie:1', 'server_1:movie:1'],
