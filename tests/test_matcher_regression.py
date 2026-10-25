@@ -301,6 +301,11 @@ class MatcherIntegrityTests(unittest.TestCase):
             ('publicSecretScannerSha256', 'scripts/scan_public_secrets.py'),
             ('publicationChecksSha256', 'scripts/check_publication.sh'),
             ('vodWorkflowSha256', '.github/workflows/vod.yml'),
+            ('vodEnrichmentWorkflowSha256', '.github/workflows/enrich-vod.yml'),
+            ('vodEnrichmentWorkerSha256', 'scripts/enrich_vod_catalog.py'),
+            ('vodEnrichmentQueueSha256', 'scripts/vod_enrichment_queue.py'),
+            ('vodEnrichmentArtifactsSha256', 'scripts/vod_enrichment_artifacts.py'),
+            ('vodSourceProvenanceSha256', 'scripts/trace_vod_source_provenance.py'),
             ('componentPublisherWorkflowSha256', '.github/workflows/publish-component.yml'),
         ):
             with self.subTest(protected_file=relative_path):

@@ -6,6 +6,8 @@ The verified detail caches persist the evidence; this module writes no files.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import re
 import threading
 import weakref
@@ -18,6 +20,30 @@ IMAGE_PATH = re.compile(r"/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)\Z", re.I)
 URL_PATH = re.compile(r"/t/p/(?:original|w[1-9][0-9]{0,3}(?:_and_h[1-9][0-9]{0,3})?(?:_bestv2|_face)?)(/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp))\Z", re.I)
 _instances = weakref.WeakValueDictionary()
 _instances_lock = threading.Lock()
+
+
+def seed_collision_file(index, path):
+    """Restore rejection-only collision evidence before reading imported proofs."""
+    path = Path(path)
+    if not path.exists() and not path.is_symlink():
+        return 0
+    if (path.is_symlink() or not path.is_file() or path.stat().st_size > 16 * 1024 * 1024
+            or any(parent.is_symlink() for parent in path.parents)):
+        raise ValueError("Invalid persisted poster collision evidence")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeError, OSError):
+        raise ValueError("Invalid persisted poster collision evidence") from None
+    paths = document.get("collidedPosterPaths") if isinstance(document, dict) else None
+    if (not isinstance(document, dict) or document.get("schemaVersion") != 1
+            or not isinstance(paths, list) or len(paths) > MAX_PATHS
+            or any(not isinstance(value, str) or not IMAGE_PATH.fullmatch(value) for value in paths)):
+        raise ValueError("Invalid persisted poster collision evidence")
+    proof = {"names": ["persisted poster collision"], "year": None}
+    for value in set(paths):
+        index.add("movie", None, [value], proof)
+        index.add("series", None, [value], proof)
+    return len(set(paths))
 
 
 def poster_identity(item):

@@ -66,7 +66,7 @@
   "liveEnrichmentAuditSha256": "57679d496c58470729d081b43ad77e8d66a2b8712212c839070ad1d347fae6fe",
   "vodCatalogBuilderSha256": "8f54201e5e99e6f22740a92db47d74169507c77c01879f11ed99dee25a1e01b0",
   "appCatalogBuilderSha256": "42b66a02c3d090534f483c5861568e8b4e3d1464d4f7fc1940cfbe3af364ff0f",
-  "vodTmdbSha256": "56746269e5f8e32ab814b7ecde7b5f3dd802df306894288d0b7d0942b32cb1a0",
+  "vodTmdbSha256": "5067b36a4f27be89bca6274aabf3fd0af70ef1a8cf2be583537685ce9a61e2af",
   "vodReviewedCorrectionsSha256": "ac77c54fff1893a35cc1744ff6b3f44bf6bb786d348f54cb488f707663f57234",
   "vodReviewedFactsSha256": "a7359507a5c0767997b5a00a3945bb3bf24e44d8524f7ddbb3b44f11d4f52def",
   "channelMetadataFactsSha256": "09762eb11b2973dd33c3d5367dbcf25a632b9f7c0e87ff664f108da3586b576e",
@@ -88,8 +88,13 @@
   "componentArtifactsSha256": "add5fc84717c32f4186d799a63a1dc3d84838e480b98801a74e51dd62db19ddd",
   "publicSecretScannerSha256": "1f7edf7aeca61475072f5e4860abf2d18f6f3d5be72b98cac852de42d317331d",
   "publicationChecksSha256": "bb054a238ac7d0d48f2d1d2cba1e3c3af2f3a76d2389aeff124f72b9c6366e83",
-  "vodWorkflowSha256": "386c0d037fc78511e6afdad3946013ab587858b33562b838a746e54ca063aa59",
+  "vodWorkflowSha256": "33294eceb63c2fa355cb281ac8b3fd5379e64377add59bde05af05d4f97dc5ea",
   "componentPublisherWorkflowSha256": "e040928d5fd5cb0c775c1ce637c0ac7083e4e4476fe4cfdb1862c6d3cd34bd2c",
-  "vodPosterIndexSha256": "5ec9d9cbea2dda5748b312cae51ccc0e231ee84b12d9b34240433e10fcced5a8",
-  "vodIdentityCoverageAuditSha256": "d858304d8d83256153abe49a3b9cbbb7708e3dffc1752c3c40e54e54a57ad825"
+  "vodPosterIndexSha256": "54108c766fef12f1ab8a3f903ccd2b9af84c5647c4a19503a4fee55f3ccc7dda",
+  "vodIdentityCoverageAuditSha256": "d858304d8d83256153abe49a3b9cbbb7708e3dffc1752c3c40e54e54a57ad825",
+  "vodEnrichmentWorkflowSha256": "9caf62f5dbab48fa7ce5c8f15605de85fe713f2fe4b8e9d5a04a74e13ca35d91",
+  "vodEnrichmentWorkerSha256": "fa482fb9a3280a5ec206f4d3cfd77f1eb850659f53a1083b06d6733c1c657a69",
+  "vodEnrichmentQueueSha256": "74e3f5f11f6fe98c8bfefbd9a24df9582d33d880ed1eb288531e0a1d8d5c325a",
+  "vodEnrichmentArtifactsSha256": "20d97c9c6d54abd92ba28324a0dec7346d8b86ca974daadd211c527843645d88",
+  "vodSourceProvenanceSha256": "913e08e32c8ce3f5a16e7ffd1cf54575be76e282a2d5dbc3eaa0b26cac1d658c"
 }
