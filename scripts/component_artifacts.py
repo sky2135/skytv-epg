@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import re
 import tarfile
 import tempfile
+import time
 import zipfile
 
 import requests
@@ -18,6 +20,21 @@ COMPONENT_BUILDS = {
     "live": ("main.yml", "Stream, validate, and package EPG outputs"),
     "vod": ("vod.yml", "Build movies, series, languages and release metadata"),
 }
+
+
+def artifact_created_at(artifact: dict, *, now=None) -> float:
+    """Validate GitHub's upload time; opaque artifact IDs do not order uploads."""
+    value = artifact.get('created_at')
+    if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z', value):
+        raise ValueError('Artifact upload timestamp is missing or invalid')
+    try:
+        parsed = datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise ValueError('Artifact upload timestamp is invalid') from None
+    timestamp = parsed.timestamp()
+    if timestamp < 0 or timestamp > (time.time() if now is None else now) + 300:
+        raise ValueError('Artifact upload timestamp is outside its valid range')
+    return timestamp
 
 
 def safe_member(name: str) -> Path:
@@ -167,20 +184,36 @@ class GitHubArtifacts:
         return any(job.get("name") == job_name and job.get("conclusion") == "success"
                    and job.get("run_attempt", attempt) == attempt for job in attempts[identity])
 
-    def _latest_validated(self, component: str, *, newer_than: int = 0, runs=None, attempts=None):
+    def _latest_validated(self, component: str, *, newer_than: int = 0, current_artifact=None, runs=None, attempts=None):
         runs, attempts = ({} if runs is None else runs), ({} if attempts is None else attempts)
+        anchor_time = None
+        if type(newer_than) is not int or newer_than < 0:
+            raise ValueError('Invalid current component artifact identity')
+        if newer_than:
+            anchor = current_artifact if current_artifact is not None else self.get(f'/actions/artifacts/{newer_than}')
+            if (not isinstance(anchor, dict) or anchor.get('id') != newer_than
+                    or not self._validated(component, anchor, runs, attempts)):
+                raise ValueError('Comparison anchor is not a validated component artifact')
+            anchor_time = artifact_created_at(anchor)
+        elif current_artifact is not None:
+            raise ValueError('Comparison artifact requires its explicit identity')
         candidates = []
         for page in range(1, MAX_ARTIFACT_PAGES + 1):
             artifacts = self.get(f"/actions/artifacts?per_page=100&page={page}")["artifacts"]
             if not isinstance(artifacts, list) or len(artifacts) > 100:
                 raise ValueError("Invalid repository artifact page")
-            candidates.extend(artifact for artifact in artifacts
-                if self._artifact_identity(component, artifact) is not None and artifact["id"] > newer_than)
+            for artifact in artifacts:
+                if self._artifact_identity(component, artifact) is None:
+                    continue
+                uploaded = artifact_created_at(artifact)
+                if artifact['id'] != newer_than and (anchor_time is None or uploaded > anchor_time):
+                    candidates.append((uploaded, artifact))
             if len(artifacts) < 100:
                 break
         # An older workflow rerun can upload the newest validated snapshot.
-        # Artifact IDs track uploads; workflow creation order cannot do so.
-        for artifact in sorted(candidates, key=lambda value: value["id"], reverse=True):
+        # Equal timestamps cannot prove that an upload supersedes the anchor.
+        # IDs only break ties when choosing among candidates without an anchor.
+        for _uploaded, artifact in sorted(candidates, key=lambda value: (value[0], value[1]['id']), reverse=True):
             if self._validated(component, artifact, runs, attempts):
                 return artifact
         return None
@@ -199,7 +232,8 @@ class GitHubArtifacts:
         if (artifact.get("id") != artifact_id or identity is None or identity[0] != run_id
                 or not self._validated(component, artifact, runs, attempts)):
             raise ValueError("Current component artifact is not a validated build")
-        latest = self._latest_validated(component, newer_than=artifact_id, runs=runs, attempts=attempts)
+        latest = self._latest_validated(component, newer_than=artifact_id, current_artifact=artifact,
+                                        runs=runs, attempts=attempts)
         # Retrying an old publisher must never restore its older component over
         # a newer validated build, even if the public CDN is still stale.
         self._restore_artifact(latest or artifact, destination)

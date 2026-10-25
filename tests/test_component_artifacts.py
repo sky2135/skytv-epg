@@ -1,4 +1,5 @@
 import io
+from datetime import datetime, timedelta
 import os
 from pathlib import Path
 import tarfile
@@ -48,7 +49,8 @@ class ArtifactExtractionTests(unittest.TestCase):
 
 def artifact(identifier, run_id, attempt=1, component="vod", **changes):
     result = {"id": identifier, "name": f"{component}-snapshot-{run_id}-{attempt}",
-              "expired": False, "size_in_bytes": 100, "workflow_run": {"id": run_id}}
+              "expired": False, "size_in_bytes": 100, "workflow_run": {"id": run_id},
+              "created_at": (datetime(2026, 1, 1) + timedelta(seconds=identifier)).strftime('%Y-%m-%dT%H:%M:%SZ')}
     result.update(changes)
     return result
 
@@ -94,10 +96,52 @@ class ArtifactSelectionTests(unittest.TestCase):
 
     def test_new_upload_from_older_run_is_newer_than_recent_run_creation(self):
         responses = {"/actions/artifacts?per_page=100&page=1": {"artifacts": [
-            artifact(80, 9), artifact(99, 2, 3)]}}
+            artifact(99, 9, created_at='2026-01-01T00:00:00Z'),
+            artifact(80, 2, 3, created_at='2026-01-01T00:01:00Z')]}}
         responses.update(build_responses(9))
         responses.update(build_responses(2, 3))
-        self.assertEqual(self.selected(responses)[1], [99])
+        self.assertEqual(self.selected(responses)[1], [80])
+
+    def test_current_newer_lower_id_is_not_replaced_by_older_higher_id(self):
+        current = artifact(10, 2, created_at='2026-01-01T00:10:00Z')
+        older = artifact(999, 3, created_at='2026-01-01T00:09:00Z')
+        responses = {'/actions/artifacts/10': current,
+                     '/actions/artifacts?per_page=100&page=1': {'artifacts': [older, current]}}
+        responses.update(build_responses(2))
+        self.assertEqual(self.selected(responses, current=10)[1], [10])
+
+    def test_current_is_replaced_only_by_strictly_newer_validated_upload_even_with_lower_id(self):
+        current = artifact(999, 2, created_at='2026-01-01T00:10:00Z')
+        newer = artifact(10, 3, created_at='2026-01-01T00:11:00Z')
+        responses = {'/actions/artifacts/999': current,
+                     '/actions/artifacts?per_page=100&page=1': {'artifacts': [current, newer]}}
+        responses.update(build_responses(2))
+        responses.update(build_responses(3))
+        self.assertEqual(self.selected(responses, current=999)[1], [10])
+        newer['created_at'] = current['created_at']
+        self.assertEqual(self.selected(responses, current=999)[1], [999])
+
+    def test_invalid_upload_time_stops_instead_of_choosing_an_older_snapshot(self):
+        for value in (None, '', '2026-02-30T00:00:00Z', '2026-01-01T00:00:00+00:00', '2999-01-01T00:00:00Z'):
+            with self.subTest(value=value):
+                bad = artifact(99, 3, created_at=value)
+                responses = {'/actions/artifacts?per_page=100&page=1': {'artifacts': [bad, artifact(10, 2)]}}
+                with self.assertRaises(ValueError):
+                    self.selected(responses)
+
+    def test_integer_newer_than_anchor_is_fetched_and_validated_before_comparison(self):
+        anchor = artifact(999, 2, created_at='2026-01-01T00:10:00Z')
+        newer = artifact(10, 3, created_at='2026-01-01T00:11:00Z')
+        responses = {'/actions/artifacts/999': anchor,
+                     '/actions/artifacts?per_page=100&page=1': {'artifacts': [anchor, newer]}}
+        responses.update(build_responses(2))
+        responses.update(build_responses(3))
+        client = object.__new__(GitHubArtifacts)
+        with patch.object(client, 'get', side_effect=responses.__getitem__):
+            self.assertEqual(client._latest_validated('vod', newer_than=999)['id'], 10)
+            responses['/actions/runs/2']['head_branch'] = 'feature'
+            with self.assertRaises(ValueError):
+                client._latest_validated('vod', newer_than=999)
 
     def test_old_publisher_retry_uses_newer_validated_same_component(self):
         old, new = artifact(10, 2, component="live"), artifact(20, 3, component="live")

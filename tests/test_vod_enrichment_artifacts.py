@@ -88,7 +88,8 @@ class EnrichmentArtifactTests(unittest.TestCase):
     def github(self, archive=None, *, kind='state', isolated=False, run_changes=None, rows=None):
         name = artifacts._prefix(kind, isolated) + '123-1'
         artifact = {'id': 456, 'name': name, 'expired': False, 'size_in_bytes': len(archive or b'zip'),
-                    'digest': 'sha256:' + hashlib.sha256(archive or b'zip').hexdigest(), 'workflow_run': {'id': 123}}
+                    'digest': 'sha256:' + hashlib.sha256(archive or b'zip').hexdigest(), 'workflow_run': {'id': 123},
+                    'created_at': '2026-01-01T00:00:00Z'}
         run = {'id': 123, 'path': artifacts.WORKFLOW, 'head_branch': 'main',
                'head_sha': 'e' * 40, 'conclusion': 'success', 'run_attempt': 1, **(run_changes or {})}
         github = mock.Mock()
@@ -382,6 +383,33 @@ class EnrichmentArtifactTests(unittest.TestCase):
         github, _artifact = self.github(rows=[{'id': number} for number in range(100)])
         with mock.patch.object(artifacts.component_artifacts, 'MAX_ARTIFACT_PAGES', 1), self.assertRaises(ValueError):
             artifacts._latest(github, 'state', False)
+
+    def test_latest_state_and_cache_use_upload_time_when_ids_are_not_monotonic(self):
+        for kind in ('state', 'cache', 'report'):
+            with self.subTest(kind=kind):
+                _github, sample = self.github(kind=kind)
+                old = {**sample, 'id': 999, 'name': artifacts._prefix(kind, False) + '999-1',
+                       'workflow_run': {'id': 999}, 'created_at': '2026-01-01T00:09:00Z'}
+                new = {**sample, 'id': 10, 'name': artifacts._prefix(kind, False) + '10-2',
+                       'workflow_run': {'id': 10}, 'created_at': '2026-01-01T00:10:00Z'}
+                github = mock.Mock()
+                def get(route):
+                    if route.startswith('/actions/artifacts?'):
+                        return {'artifacts': [old, new]}
+                    if route == '/actions/runs/10':
+                        return {'id': 10, 'run_attempt': 2, 'head_branch': 'main', 'path': artifacts.WORKFLOW, 'conclusion': 'success'}
+                    raise AssertionError(route)
+                github.get.side_effect = get
+                self.assertEqual(artifacts._latest(github, kind, False)['id'], 10)
+
+    def test_invalid_upload_timestamp_never_silently_resumes_older_state(self):
+        for value in (None, '', '2026-02-30T00:00:00Z', '2026-01-01T00:00:00+00:00', '2999-01-01T00:00:00Z'):
+            with self.subTest(value=value):
+                _github, sample = self.github()
+                bad = {**sample, 'id': 999, 'created_at': value}
+                github, _ = self.github(rows=[sample, bad])
+                with self.assertRaises(ValueError):
+                    artifacts._latest(github, 'state', False)
 
     def test_evidence_rejects_raw_urls_wrong_fingerprint_and_wrong_file_identity(self):
         name, evidence = self.evidence()
