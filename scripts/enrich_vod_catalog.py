@@ -18,7 +18,7 @@ import vod_tmdb as tmdb
 import build_vod_catalogs as vod
 from build_skytvplayer_catalog import _metadata_result_key
 from verify_vod_catalog import atomic_json, canonical, prepare_records, seed_collision_tombstones, small_metadata
-from vod_enrichment_queue import EnrichmentQueue
+from vod_enrichment_queue import EnrichmentQueue, validate_priority_content_ids
 from vod_verification_input import load_component_input
 from vod_verification_rate_limit import PacedSession, SharedRateLimiter, VerificationDeferred
 from vod_provider_evidence import MovieEvidenceCollector
@@ -169,7 +169,8 @@ def run_batch(*, state_dir, component_dir=None, seed_cache=None, rate=20, worker
               batch_seconds=900, batch_records=25000, token='', api_key='',
               client_factory=RollingClient, session_factory=PacedSession,
               resolve_provider_details=(), max_provider_detail_requests=40, allow_insecure_http=False,
-              refresh_trending=False):
+              refresh_trending=False, priority_content_ids=()):
+    priority_content_ids = validate_priority_content_ids(priority_content_ids)
     state_dir = Path(state_dir)
     public = Path(__file__).resolve().parents[1] / 'public'
     if state_dir.resolve() == public or public in state_dir.resolve().parents:
@@ -192,6 +193,7 @@ def run_batch(*, state_dir, component_dir=None, seed_cache=None, rate=20, worker
     state_dir.mkdir(parents=True, exist_ok=True)
     started, policy = time.monotonic(), policy_identity()
     queue = EnrichmentQueue(state_dir / 'queue.sqlite')
+    previous_policy = queue.get_meta('policyIdentity')
     cache_root = state_dir / 'cache'
     contexts, contexts_lock, local = [], threading.Lock(), threading.local()
     limiter, fatal, processed = None, None, 0
@@ -199,6 +201,7 @@ def run_batch(*, state_dir, component_dir=None, seed_cache=None, rate=20, worker
     provider_stats = {'requests': 0}
     fatal_frames = []
     trending = {'byKind': {}, 'nextAttemptAt': None, 'hasUnfinished': False, 'due': 0}
+    priority_report = {'requested': len(priority_content_ids), 'active': 0, 'missing': len(priority_content_ids), 'selected': 0}
     try:
         if seed_cache is not None:
             if source_identity is not None:
@@ -241,6 +244,8 @@ def run_batch(*, state_dir, component_dir=None, seed_cache=None, rate=20, worker
             # Reconciliation also runs on continuation, retaining identical rows.
             reconciliation = queue.reconcile(records, policy, source_identity)
             physical_by_id = {record['contentId']: record['physicalKey'] for record in records}
+            active_priorities = set(priority_content_ids).intersection(physical_by_id)
+            priority_report.update(active=len(active_priorities), missing=len(priority_content_ids) - len(active_priorities))
 
             def expiry(cid):
                 path = cache_root / 'tmdb/tmdb-v1' / (physical_by_id[cid] + '.json')
@@ -287,7 +292,9 @@ def run_batch(*, state_dir, component_dir=None, seed_cache=None, rate=20, worker
                 return group, small_metadata(metadata), dict(client.last_match_diagnostic), getattr(client.session, 'last_deferred', None)
 
         groups = {}
-        for row in queue.pending(batch_records):
+        selected = queue.pending(batch_records, priority_content_ids=priority_content_ids)
+        priority_report['selected'] = sum(row['contentId'] in active_priorities for row in selected)
+        for row in selected:
             groups.setdefault(row['identityKey'], None)
         work = iter(queue.pending_group(key) for key in groups)
         exhausted = False
@@ -354,6 +361,7 @@ def run_batch(*, state_dir, component_dir=None, seed_cache=None, rate=20, worker
         control = json.loads(control_path.read_text(encoding='utf-8')) if control_path.is_file() else {}
         report.update(schemaVersion=1, mode='rolling_vod_enrichment', sourceIdentity=source_identity,
             codeIdentity=code_identity(), policyIdentity=policy, reconciliation=reconciliation,
+            policyChanged=previous_policy is not None and previous_policy != policy, priority=priority_report,
             batchNumber=batch_number, sourceArtifactId=control.get('sourceArtifactId'), providerEvidence=provider_stats,
             trending=trending,
             processedThisBatch=processed, api=limiter.snapshot() if limiter else queue.get_meta('rateLimiter'),
@@ -370,6 +378,15 @@ def run_batch(*, state_dir, component_dir=None, seed_cache=None, rate=20, worker
         queue.close()
 
 
+def _priority_json(value):
+    try:
+        if len(value) > 32768:
+            raise ValueError
+        return validate_priority_content_ids(json.loads(value))
+    except (ValueError, TypeError):
+        raise argparse.ArgumentTypeError('Priority JSON must contain at most 500 unique valid contentIds') from None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--state-dir', type=Path, required=True)
@@ -383,6 +400,8 @@ def main(argv=None):
     parser.add_argument('--max-provider-detail-requests', type=int, default=40)
     parser.add_argument('--allow-insecure-http', action='store_true')
     parser.add_argument('--refresh-trending', action='store_true')
+    parser.add_argument('--priority-content-ids-json', dest='priority_content_ids', type=_priority_json, default=(),
+                        help='Up to 500 unique contentIds prioritized only within their existing due server/type groups.')
     args = parser.parse_args(argv)
     report = run_batch(**vars(args), token=os.environ.get('TMDB_READ_ACCESS_TOKEN', ''), api_key=os.environ.get('TMDB_API_KEY', ''))
     print(json.dumps(report, sort_keys=True))

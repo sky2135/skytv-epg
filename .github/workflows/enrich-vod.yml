@@ -90,6 +90,7 @@ jobs:
         continue-on-error: true
         if: steps.prepare.outputs.should_run == 'true'
         env:
+          VOD_ENRICHMENT_PRIORITY_IDS_JSON: ${{ vars.VOD_ENRICHMENT_PRIORITY_IDS_JSON || '[]' }}
           TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
@@ -101,6 +102,7 @@ jobs:
           command=(python -u scripts/enrich_vod_catalog.py
             --state-dir .build/enrichment-state --component-dir .build/enrichment-component
             --rate 20 --workers 8 --batch-seconds 900 --batch-records 25000
+            --priority-content-ids-json "$VOD_ENRICHMENT_PRIORITY_IDS_JSON"
             --refresh-trending
             --resolve-provider-details server_1 --max-provider-detail-requests 40)
           if [[ -d .build/vod-cache ]]; then command+=(--seed-cache .build/vod-cache); fi

@@ -17,6 +17,15 @@ def encoded(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
 
 
+def validate_priority_content_ids(value):
+    """A bounded scheduling hint; never a source, identity or retry override."""
+    if (not isinstance(value, (list, tuple)) or len(value) > 500
+            or any(not isinstance(cid, str) or not CONTENT_ID.fullmatch(cid) for cid in value)
+            or len(value) != len(set(value))):
+        raise ValueError('Priority content IDs must be at most 500 unique valid contentIds')
+    return tuple(value)
+
+
 class EnrichmentQueue:
     def __init__(self, path):
         self.path = Path(path)
@@ -129,16 +138,21 @@ class EnrichmentQueue:
         with self.lock:
             return [self._entry(row) for row in self.connection.execute('SELECT * FROM items WHERE active=1 ORDER BY content_id')]
 
-    def pending(self, limit=25000, *, now=None):
+    def pending(self, limit=25000, *, now=None, priority_content_ids=()):
         if type(limit) is not int or not 1 <= limit <= 1000000:
             raise ValueError('Invalid rolling batch size')
+        priority = validate_priority_content_ids(priority_content_ids)
+        # Only placeholder count is interpolated. Values remain bound, and the
+        # existing outer group rotation still grants every server/type a turn.
+        first = ('CASE WHEN content_id IN (' + ','.join('?' for _ in priority)
+                 + ') THEN 0 ELSE 1 END,') if priority else ''
         now = time.time() if now is None else now
         with self.lock:
-            rows = self.connection.execute('''SELECT * FROM (
+            rows = self.connection.execute(f'''SELECT * FROM (
                 SELECT *,ROW_NUMBER() OVER(PARTITION BY server_id,kind
-                    ORDER BY COALESCE(last_attempt,0),pending_since,content_id) AS group_row
+                    ORDER BY {first} COALESCE(last_attempt,0),pending_since,content_id) AS group_row
                 FROM items WHERE active=1 AND (state='pending' OR next_attempt<=?))
-                ORDER BY group_row,server_id,kind LIMIT ?''', (now, limit))
+                ORDER BY group_row,server_id,kind LIMIT ?''', (*priority, now, limit))
             return [self._entry(row) for row in rows]
 
     def pending_group(self, identity_key, *, now=None):
