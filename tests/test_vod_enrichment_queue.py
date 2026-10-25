@@ -98,6 +98,40 @@ class RollingQueueTests(unittest.TestCase):
         self.queue.cache_validated(warmed, now=30, expiry_lookup=lambda _cid: 700)
         self.assertEqual(self.queue.records()[0]['queue']['nextAttemptAt'], 500)
 
+    def test_priority_cohort_fits_window_while_all_six_groups_keep_their_turn(self):
+        rows = [record(server='server_3', identifier=str(number)) for number in range(1, 1001)]
+        rows += [record(server=f'server_{server}', kind=kind)
+                 for server in (1, 2, 3) for kind in ('movie', 'series')
+                 if (server, kind) != (3, 'movie')]
+        self.queue.reconcile(rows, 'policy', {}, now=10)
+        priorities = [f'server_3:movie:{number}' for number in range(518, 1001)]
+        selected = self.queue.pending(488, now=10, priority_content_ids=priorities)
+        self.assertEqual(len({(row['serverId'], row['kind']) for row in selected[:6]}), 6)
+        self.assertTrue(set(priorities).issubset({row['contentId'] for row in selected}))
+        self.assertEqual(self.queue.pending(100, now=10), self.queue.pending(100, now=10, priority_content_ids=[]))
+
+    def test_priority_cannot_force_done_future_retry_or_removed_rows(self):
+        done, retry, ordinary, removed = [record(identifier=str(number)) for number in range(1, 5)]
+        self.queue.reconcile([done, retry, ordinary, removed], 'policy', {}, now=10)
+        self.queue.cache_validated([(done['contentId'], {'matchStatus': 'matched_id', 'tmdbId': '7'})], now=20)
+        self.queue.record_result([retry['contentId']], {'matchStatus': 'unavailable'}, {'reason': 'unavailable'}, now=20, defer_until=500)
+        self.queue.reconcile([done, retry, ordinary], 'policy', {}, now=25)
+        self.queue.set_meta('rateLimiter', {'cooldownUntil': 999})
+        before = self.queue.records()
+        selected = self.queue.pending(10, now=30, priority_content_ids=[row['contentId'] for row in (done, retry, removed)])
+        self.assertEqual([row['contentId'] for row in selected], [ordinary['contentId']])
+        self.assertEqual(self.queue.records(), before)
+        self.assertEqual(self.queue.get_meta('rateLimiter'), {'cooldownUntil': 999})
+
+    def test_priority_rejects_malformed_duplicate_and_oversized_hints(self):
+        bad = [None, 'server_1:movie:1', {}, [1], ['not-an-id'],
+               ['server_1:movie:1', 'server_1:movie:1'],
+               [f'server_1:movie:{number}' for number in range(501)]]
+        for value in bad:
+            with self.subTest(value_type=type(value).__name__, length=len(value) if hasattr(value, '__len__') else None):
+                with self.assertRaises(ValueError):
+                    self.queue.pending(priority_content_ids=value)
+
 
 if __name__ == '__main__':
     unittest.main()

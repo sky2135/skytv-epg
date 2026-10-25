@@ -26,6 +26,13 @@ only the affected work; removed records cease to be active. Due work is shared
 fairly across all six server/media groups. Transient failures remain retryable;
 they never become permanent misses merely because an attempt count was reached.
 
+An operator can temporarily set `VOD_ENRICHMENT_PRIORITY_IDS_JSON` to a JSON array
+of at most 500 unique `server_N:movie|series:providerID` values. Only already-due
+records move forward within their existing server/media group. The six-group
+rotation, verified-cache checks, retry times and shared rate limit remain in
+force. Completed records are not forced to repeat. Remove the temporary variable
+after the requested rollout audit; an empty array retains ordinary scheduling.
+
 Each batch uses eight workers and one shared 20-request/second limiter, without
 a total request quota. HTTP 429 pauses honor the complete `Retry-After` value,
 including across processes. Batches stop after 15 active minutes and seal their

@@ -92,9 +92,9 @@
   "componentPublisherWorkflowSha256": "e040928d5fd5cb0c775c1ce637c0ac7083e4e4476fe4cfdb1862c6d3cd34bd2c",
   "vodPosterIndexSha256": "54108c766fef12f1ab8a3f903ccd2b9af84c5647c4a19503a4fee55f3ccc7dda",
   "vodIdentityCoverageAuditSha256": "d858304d8d83256153abe49a3b9cbbb7708e3dffc1752c3c40e54e54a57ad825",
-  "vodEnrichmentWorkflowSha256": "9caf62f5dbab48fa7ce5c8f15605de85fe713f2fe4b8e9d5a04a74e13ca35d91",
-  "vodEnrichmentWorkerSha256": "fa482fb9a3280a5ec206f4d3cfd77f1eb850659f53a1083b06d6733c1c657a69",
-  "vodEnrichmentQueueSha256": "74e3f5f11f6fe98c8bfefbd9a24df9582d33d880ed1eb288531e0a1d8d5c325a",
+  "vodEnrichmentWorkflowSha256": "e5a6bdc2862af3853ebaf43051ed8c331d53677654b47182f88a5461fd62862b",
+  "vodEnrichmentWorkerSha256": "35956b6dec9e4d718faa62e4dbe86b088d77dc9b986375c26e45666c84213b52",
+  "vodEnrichmentQueueSha256": "1d53475e9fb46f23659e0cf61463a84a6a151372fb705aafcb13aa42e67b825b",
   "vodEnrichmentArtifactsSha256": "20d97c9c6d54abd92ba28324a0dec7346d8b86ca974daadd211c527843645d88",
   "vodSourceProvenanceSha256": "913e08e32c8ce3f5a16e7ffd1cf54575be76e282a2d5dbc3eaa0b26cac1d658c"
 }

@@ -123,8 +123,9 @@ class RollingWorkerTests(unittest.TestCase):
         self.assertTrue(second['complete'])
         self.assertEqual(second['batchNumber'], 2)
         self.assertEqual(second['api']['wireAttempts'], 6)
-        third = self.run_batch(document(), batch_records=10)
+        third = self.run_batch(document(), batch_records=10, priority_content_ids=[row['contentId'] for row in document()['records']])
         self.assertEqual(third['api']['wireAttempts'], 6)
+        self.assertEqual(third['priority']['selected'], 0)
         self.assertFalse(third['productionCatalogWritten'])
         envelopes = list((self.state / 'cache/tmdb/tmdb-v1').glob('*.json'))
         self.assertEqual(len(envelopes), 6)
@@ -148,10 +149,46 @@ class RollingWorkerTests(unittest.TestCase):
         state['cooldownUntil'] = worker.time.time() + 3600
         queue.set_meta('rateLimiter', state)
         queue.close()
-        report = self.run_batch(document(2), batch_records=2)
+        report = self.run_batch(document(2), batch_records=2, priority_content_ids=[document(2)['records'][1]['contentId']])
         self.assertEqual(report['api']['wireAttempts'], 1)
         self.assertTrue(report['shouldContinue'])
         self.assertGreater(report['nextAttemptAt'], worker.time.time() + 3500)
+
+    def test_priority_changes_selection_not_identity_and_missing_ids_create_no_rows(self):
+        source = document()
+        target = dict(source['records'][2])
+        target['contentId'] = 'server_3:movie:9999'
+        target['item'] = dict(target['item'], contentId=target['contentId'], id='9999',
+                              title='Requested Work (2026)', tmdbId='9999')
+        source['records'].append(target)
+        report = self.run_batch(source, batch_records=6,
+            priority_content_ids=[target['contentId'], 'server_3:movie:99999999'])
+        self.assertEqual(report['priority'], {'requested': 2, 'active': 1, 'missing': 1, 'selected': 1})
+        self.assertEqual(report['totals']['total'], 7)
+        self.assertEqual(report['api']['wireAttempts'], 6)
+        queue = EnrichmentQueue(self.state / 'queue.sqlite')
+        try:
+            rows = {row['contentId']: row for row in queue.records()}
+            self.assertEqual(rows[target['contentId']]['queue']['state'], 'done')
+            self.assertEqual(rows[source['records'][2]['contentId']]['queue']['state'], 'pending')
+            self.assertEqual(len({(row['serverId'], row['kind']) for row in rows.values() if row['queue']['state'] == 'done'}), 6)
+        finally:
+            queue.close()
+
+    def test_priority_json_validation_precedes_state_or_network_work(self):
+        import argparse
+        for value in ('null', '{}', '"server_1:movie:1"', '["bad"]',
+                      '["server_1:movie:1","server_1:movie:1"]',
+                      json.dumps([f'server_1:movie:{number}' for number in range(501)])):
+            with self.subTest(value=value[:30]):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    worker._priority_json(value)
+        self.assertEqual(worker._priority_json('["server_3:movie:954024"]'), ('server_3:movie:954024',))
+        with patch.object(worker, 'load_component_input') as loader:
+            with self.assertRaises(ValueError):
+                self.run_batch(document(), priority_content_ids=['bad'])
+            loader.assert_not_called()
+        self.assertFalse(self.state.exists())
 
     def test_policy_change_requires_new_current_component_on_continuation(self):
         self.run_batch(document(1), batch_records=1)
