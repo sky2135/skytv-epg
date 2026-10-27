@@ -114,11 +114,11 @@ class FreshnessTests(unittest.TestCase):
                 builder.read_inventory_availability(path)
 
     def test_future_counts_separate_native_external_and_placeholders(self):
-        def row(stream, source, synthetic=False):
+        def row(stream, source, synthetic=False, canonical=None):
             return SimpleNamespace(runtime_eligible=True, uses_local_synthetic=synthetic,
                                    runtime_synthetic_reason="",
                                    effective_source=source, source_key=source,
-                                   epg_id=stream)
+                                   epg_id=stream, schedule_channel_key=canonical or stream)
         rows = [row("external", "epgshare01"), row("expired", "epgshare01"),
                 row("native", "panel"), row("placeholder", "synthetic", True)]
         stats = {
@@ -133,6 +133,11 @@ class FreshnessTests(unittest.TestCase):
         self.assertEqual(result["realLatestStop"], NOW + 12 * 3600)
         self.assertEqual(result["realFutureCoveragePercent"], 50)
         self.assertEqual(result["sources"]["localSynthetic"]["streamsWithFutureProgrammes"], 1)
+        alias_coverage = builder.build_future_programme_coverage(
+            [row("legacy spelling", "epgshare01", canonical="external")], stats, now_epoch=NOW,
+        )
+        self.assertEqual(alias_coverage["realStreamsWithFutureProgrammes"], 1)
+        self.assertEqual(alias_coverage["realStreamsReachingMinimumHorizon"], 1)
 
     def test_cli_allows_provider_degradation_but_never_staleness(self):
         health, index = publication()
