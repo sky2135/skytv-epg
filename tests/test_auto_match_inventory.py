@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from copy import deepcopy
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1091,6 +1092,31 @@ class AutoMatchInventoryTests(unittest.TestCase):
                 ).fetchall()
             connection.close()
             self.assertEqual(requests, [("Old.Channel.us2", "fixed", "Old.Channel.us2")])
+
+    def test_fixed_legacy_spelling_and_new_exact_proposal_seal_one_schedule(self) -> None:
+        existing = mapping_row(
+            server_id="server_1", stream_id="old-1", channel_name="US: Good Channel Legacy",
+            action="APPROVED", epg_id="good.channel.US2", enabled="TRUE",
+        )
+        before = deepcopy(existing)
+        with tempfile.TemporaryDirectory() as temporary:
+            outcome, _factory, spool, _original = self.run_fixture(
+                temporary, strong=True, old_rows=[existing],
+            )
+            self.assertEqual(existing, before)
+            self.assertEqual(outcome.approved_rows, 1)
+            self.assertEqual(outcome.rows[0]["epg_id"], "Good.Channel.us2")
+            self.assertEqual(outcome.canonicalized_requested_ids, 1)
+            self.assertEqual(outcome.ambiguous_requested_ids, 0)
+            with closing(sqlite3.connect(spool)) as connection:
+                self.assertEqual(connection.execute(
+                    "SELECT channel_key,source_channel_id FROM channels"
+                ).fetchall(), [("Good.Channel.us2", "Good.Channel.us2")])
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM programmes").fetchone()[0], 2)
+                requests = dict(connection.execute(
+                    "SELECT channel_key,source_channel_id FROM epg_spool_requests"
+                ))
+            self.assertEqual(requests, {"Good.Channel.us2":"Good.Channel.us2", "good.channel.US2":"Good.Channel.us2"})
 
     def test_malformed_source_removes_stale_spool(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

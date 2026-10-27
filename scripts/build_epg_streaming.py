@@ -326,6 +326,12 @@ class MappingRow:
     provider_name_aliases: tuple[str, ...] = ()
     provider_epg_id_aliases: tuple[str, ...] = ()
     metadata_evidence: dict[str, Any] = field(default_factory=dict)
+    runtime_epg_id: str = ""
+
+    @property
+    def schedule_channel_key(self) -> str:
+        """A source-bound runtime key; authoritative mapping spelling stays intact."""
+        return self.runtime_epg_id or self.epg_id
 
     @property
     def uses_local_synthetic(self) -> bool:
@@ -357,7 +363,7 @@ class MappingRow:
             prefix = "PANEL"
         else:
             prefix = self.epg_feed or "ALL_SOURCES1"
-        return f"{prefix}::{self.epg_id}"
+        return f"{prefix}::{self.schedule_channel_key}"
 
     @property
     def source_policy_blocked(self) -> bool:
@@ -1679,6 +1685,23 @@ def canonical_mapping_sha256(rows: Sequence[MappingRow]) -> str:
             }
         )
     return hashlib.sha256(json_compact(stable).encode("utf-8")).hexdigest()
+
+
+def apply_verified_epgshare_aliases(
+    rows: Sequence[MappingRow], aliases: Mapping[str, str]
+) -> list[MappingRow]:
+    """Bind legacy spellings to verified spool keys without changing mapping data."""
+    for alias, canonical in aliases.items():
+        if (not isinstance(alias, str) or not isinstance(canonical, str)
+                or not alias or not canonical or alias == canonical
+                or alias.casefold() != canonical.casefold()):
+            raise BuildError("The verified EPGShare alias map is invalid.")
+    return [
+        replace(row, runtime_epg_id=aliases[row.epg_id])
+        if row.runtime_eligible and row.source_key == "epgshare01" and row.epg_id in aliases
+        else row
+        for row in rows
+    ]
 
 
 def metadata_dict(metadata: ChannelMetadata) -> dict[str, Any]:
@@ -3879,7 +3902,7 @@ def build_xml_entries(
         channel_id = clean_identifier(channel_id, 300)
         if not channel_id:
             return
-        key = (row.source_key, row.epg_id)
+        key = (row.source_key, row.schedule_channel_key)
         quality = schedule_quality(schedule_stats.get(key), row.source_key)
         entry_priority = (
             -1 if entry_type in {"provider_name_alias", "provider_epg_id_alias"}
@@ -3896,7 +3919,7 @@ def build_xml_entries(
                 channel_id=channel_id,
                 display_names=candidate_names or {channel_id},
                 source_key=row.source_key,
-                channel_key=row.epg_id,
+                channel_key=row.schedule_channel_key,
                 icon_url=icon_url,
                 quality=quality,
                 entry_type=entry_type,
@@ -3925,7 +3948,7 @@ def build_xml_entries(
                 }
             )
             current.source_key = row.source_key
-            current.channel_key = row.epg_id
+            current.channel_key = row.schedule_channel_key
             current.display_names = candidate_names or {channel_id}
             current.quality = quality
             current.entry_type = entry_type
@@ -3965,13 +3988,13 @@ def build_xml_entries(
     ):
         if not row.runtime_eligible:
             continue
-        key = (row.source_key, row.epg_id)
+        key = (row.source_key, row.schedule_channel_key)
         stats = schedule_stats.get(key)
         if stats is None or stats.programme_rows == 0:
             continue
         streams_with_programmes.add(row.stream_id)
         source_name, source_icon = source_channel_info(
-            connection, row.source_key, row.epg_id
+            connection, row.source_key, row.schedule_channel_key
         )
         icon_url = resolve_row_icon(row, connection, icon_overrides)
         register(
@@ -4222,7 +4245,7 @@ def resolve_row_icon(
     overrides: IconOverrides,
 ) -> str:
     _source_name, source_icon = source_channel_info(
-        connection, row.source_key, row.epg_id
+        connection, row.source_key, row.schedule_channel_key
     )
     if row.metadata_evidence.get("identityReview"):
         # A valid image from a positively disputed guide identity is not
@@ -4260,7 +4283,7 @@ def write_app_epg(
     schedules: dict[str, tuple[str, str]] = {}
     schedule_names: dict[str, str] = {}
     for row in runtime_rows:
-        schedules.setdefault(row.schedule_key, (row.source_key, row.epg_id))
+        schedules.setdefault(row.schedule_key, (row.source_key, row.schedule_channel_key))
         schedule_names.setdefault(row.schedule_key, row.channel_name)
 
     temporary, raw, compressed, output = deterministic_gzip_text(destination)
@@ -4501,7 +4524,7 @@ def write_metadata_json(
                 payload["guideFallbackReason"] = row.runtime_synthetic_reason
             if row.metadata_evidence:
                 payload["metadataEvidence"] = row.metadata_evidence
-            _source_name, source_icon = source_channel_info(connection, row.source_key, row.epg_id)
+            _source_name, source_icon = source_channel_info(connection, row.source_key, row.schedule_channel_key)
             configured_url, configured_notes = configured_icon(icon_overrides, row, with_notes=True)
             payload["logoProvenance"] = logo_provenance(
                 payload["logoUrl"], mapping_url=row.logo_url,
@@ -4672,11 +4695,11 @@ def write_server_reports(
     for row in rows:
         if not row.runtime_eligible:
             continue
-        stats = schedule_stats.get((row.source_key, row.epg_id))
+        stats = schedule_stats.get((row.source_key, row.schedule_channel_key))
         if stats is None or stats.programme_rows == 0:
             channel_found = connection.execute(
                 "SELECT 1 FROM channels WHERE source_key = ? AND channel_key = ?",
-                (row.source_key, row.epg_id),
+                (row.source_key, row.schedule_channel_key),
             ).fetchone() is not None
             missing_rows.append(
                 [
@@ -5124,7 +5147,7 @@ def build_future_programme_coverage(
                   "nativePanel" if row.effective_source == "panel" else "epgshare")
         bucket = buckets[source]
         bucket["mappedStreams"] += 1
-        stats = schedule_stats.get((row.source_key, row.epg_id))
+        stats = schedule_stats.get((row.source_key, row.schedule_channel_key))
         if not stats or not stats.future_rows or stats.latest_future_stop <= now_epoch:
             continue
         bucket["streamsWithFutureProgrammes"] += 1
@@ -5291,18 +5314,18 @@ def build_server(
         if row.source_policy_blocked
     )
     conflicting_slots = sum(
-        schedule_stats.get((row.source_key, row.epg_id), ScheduleStats(0, 0, 0, 0, 0, 0)).conflicting_slots
+        schedule_stats.get((row.source_key, row.schedule_channel_key), ScheduleStats(0, 0, 0, 0, 0, 0)).conflicting_slots
         for row in {
-            (item.source_key, item.epg_id): item for item in mapped_rows
+            (item.source_key, item.schedule_channel_key): item for item in mapped_rows
         }.values()
     )
     overlapping_rows = sum(
         schedule_stats.get(
-            (row.source_key, row.epg_id),
+            (row.source_key, row.schedule_channel_key),
             ScheduleStats(0, 0, 0, 0, 0, 0),
         ).overlapping_rows
         for row in {
-            (item.source_key, item.epg_id): item for item in mapped_rows
+            (item.source_key, item.schedule_channel_key): item for item in mapped_rows
         }.values()
     )
     native_panel_used = any(
@@ -5360,7 +5383,7 @@ def build_server(
             source_provenance[unavailable_panel_key]
         )
     unique_schedule_keys = {
-        (row.source_key, row.epg_id) for row in mapped_rows
+        (row.source_key, row.schedule_channel_key) for row in mapped_rows
     }
     downloaded_schedule_keys = {
         key for key in unique_schedule_keys if not key[0].startswith("synthetic:")
@@ -6181,6 +6204,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             connection = verified_spool.connection
             spool_manifest = verified_spool.manifest
             spool_stats = verified_spool.stats
+            rows = apply_verified_epgshare_aliases(rows, verified_spool.requested_id_aliases)
+            source_details["selectionSpoolRequestedIdAliasCount"] = len(verified_spool.requested_id_aliases)
+            source_details["runtimeCanonicalizedMappingRows"] = sum(bool(row.runtime_epg_id) for row in rows)
             selected_programmes = int(spool_stats.get("selected_programmes", 0))
             stored_programmes = int(spool_stats.get("stored_programmes", 0))
             all_stats = SourceStats(
