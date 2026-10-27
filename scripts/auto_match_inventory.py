@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import math
 import os
 import re
@@ -464,6 +465,8 @@ class AutoMatchOutcome:
     matcher_cache_stats: Mapping[str, int] = field(default_factory=dict)
     matcher_phase_milliseconds: Mapping[str, int] = field(default_factory=dict)
     matcher_alias_index_stats: Mapping[str, int] = field(default_factory=dict)
+    canonicalized_requested_ids: int = 0
+    ambiguous_requested_ids: int = 0
 
     def summary_fields(self) -> dict[str, Any]:
         return {
@@ -562,6 +565,8 @@ class AutoMatchOutcome:
                 self.new_rejected_programme_gates
             ),
             "epgshare_spool_fixed_ids": self.fixed_requested_ids,
+            "epgshare_canonicalized_request_ids": self.canonicalized_requested_ids,
+            "epgshare_ambiguous_request_ids": self.ambiguous_requested_ids,
             "epgshare_catalog_channels": self.catalog_channels,
             "epgshare_text_catalog_channels": self.text_catalog_channels,
             "epgshare_corroborated_catalog_channels": (
@@ -3132,6 +3137,61 @@ def _current_unchanged_mapping_keys(
     return frozenset(result)
 
 
+def _request_resolution_diagnostics(
+    result: catalog_stream.OnePassCatalogResult,
+    mapping_rows: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], ...]:
+    """Bounded, useful channel context for resolved aliases and real ambiguity."""
+    aliases = dict(result.requested_id_aliases)
+    ambiguous = {
+        epg_id: result.catalog.casefold_variants(epg_id)
+        for epg_id in result.unresolved_requested_ids
+        if result.catalog.is_case_ambiguous(epg_id)
+    }
+    requested = set(aliases).union(ambiguous)
+    # Do not turn a large provider update into unbounded CI log output.
+    selected = sorted(requested, key=lambda item: (item.casefold(), item))[:64]
+    affected: dict[str, list[dict[str, str]]] = {item: [] for item in selected}
+    counts: dict[str, int] = {item: 0 for item in selected}
+
+    def label(value: object, maximum: int = 200) -> str:
+        value = streaming.clean_text(value, maximum)
+        return re.sub(r"https?://\S+", "[URL omitted]", value, flags=re.IGNORECASE)
+
+    for row in mapping_rows:
+        epg_id = streaming.clean_identifier(row.get("epg_id", ""), 300)
+        if epg_id not in affected or epg_id not in active_combined_source_ids([row]):
+            continue
+        counts[epg_id] += 1
+        if len(affected[epg_id]) < 5:
+            affected[epg_id].append({
+                "server_id": label(row.get("server_id", ""), 40),
+                "stream_id": label(row.get("stream_id", ""), 120),
+                "channel_name": label(row.get("channel_name", "")),
+            })
+    diagnostics = []
+    for requested_id in selected:
+        variants = ambiguous.get(requested_id, ())
+        diagnostics.append({
+            "requested_epg_id": label(requested_id, 300),
+            "status": "ambiguous_unresolved" if variants else "canonicalized_unique_case",
+            "canonical_epg_id": label(aliases.get(requested_id, ""), 300),
+            "source_variants": [label(item, 300) for item in variants[:10]],
+            "source_variant_count": len(variants),
+            "affected_channel_count": counts[requested_id],
+            "affected_channels": affected[requested_id],
+            "affected_channels_omitted": max(0, counts[requested_id] - len(affected[requested_id])),
+        })
+    if diagnostics:
+        print("EPG request resolution: " + json.dumps({
+            "canonicalized_request_ids": len(aliases),
+            "ambiguous_request_ids": len(ambiguous),
+            "diagnostic_ids_omitted": len(requested) - len(selected),
+            "requests": diagnostics,
+        }, ensure_ascii=True, sort_keys=True), flush=True)
+    return tuple(diagnostics)
+
+
 def auto_match_and_spool(
     *,
     mapping_rows: Sequence[Mapping[str, Any]],
@@ -3671,6 +3731,7 @@ def auto_match_and_spool(
                 minimum_unique_channels=int(minimum_unique_channels),
                 icon_catalog_path=icon_path,
             )
+            _request_resolution_diagnostics(result, mapping_rows)
             if (
                 len(runtime_box) != 1
                 or len(matcher_catalog_box) != 1
@@ -3977,6 +4038,7 @@ def auto_match_and_spool(
                 provisional_requested_ids=result.requested_provisional_ids,
                 resolved_source_ids=result.resolved_source_ids,
                 stats=result.stats,
+                requested_id_aliases=result.requested_id_aliases,
             )
     except AutoMatchError:
         spool_path.unlink(missing_ok=True)
@@ -4204,6 +4266,10 @@ def auto_match_and_spool(
         matcher_cache_stats=dict(match_cache.stats),
         matcher_phase_milliseconds=phase_milliseconds,
         matcher_alias_index_stats=(dict(alias_index_box[0].stats) if alias_index_box else {}),
+        canonicalized_requested_ids=len(result.requested_id_aliases),
+        ambiguous_requested_ids=sum(
+            result.catalog.is_case_ambiguous(item) for item in result.unresolved_requested_ids
+        ),
     )
 
 

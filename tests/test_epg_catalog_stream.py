@@ -283,10 +283,79 @@ class OnePassCatalogTests(unittest.TestCase):
             )
         self.assertEqual(
             dict(result.resolved_source_ids),
-            {"Exact.Case.uk": "exact.case.UK"},
+            {"Exact.Case.uk": "Exact.Case.uk"},
         )
+        self.assertEqual(dict(result.requested_id_aliases), {"exact.case.UK": "Exact.Case.uk"})
         self.assertFalse(result.unresolved_requested_ids)
-        self.assertTrue(result.programme_gates["exact.case.UK"].passed)
+        self.assertTrue(result.programme_gates["Exact.Case.uk"].passed)
+
+    def test_fixed_alias_and_exact_proposal_share_one_canonical_schedule(self) -> None:
+        channels = '<channel id="Alpha.HD.in"><display-name>Alpha</display-name></channel>'
+        programmes = "\n".join(
+            f'<programme channel="Alpha.HD.in" start="{stamp(start)}" stop="{stamp(stop)}"><title>{title}</title></programme>'
+            for start, stop, title in ((0, 14400, "Morning"), (14400, 28800, "Afternoon"))
+        )
+        for fixed, proposed in (
+            (("alpha.hd.IN",), ("Alpha.HD.in",)),
+            (("alpha.hd.IN", "ALPHA.HD.in"), ()),
+            (("Alpha.HD.in", "alpha.hd.IN", "Alpha.HD.in"), ("Alpha.HD.in",)),
+        ):
+            with self.subTest(fixed=fixed, proposed=proposed), tempfile.TemporaryDirectory() as temporary:
+                path = self.write_source(Path(temporary), xml_document(channels, programmes))
+                selected_channels, selected_programmes = [], []
+                result = stream_catalog_and_programmes_once(
+                    path=path, fixed_wanted_ids=fixed,
+                    select_provisional_ids=lambda _catalog: proposed,
+                    window_start=NOW, now_epoch=NOW,
+                    channel_sink=lambda key, channel: selected_channels.append((key, channel.epg_id)),
+                    programme_sink=selected_programmes.append,
+                )
+                self.assertEqual(selected_channels, [("Alpha.HD.in", "Alpha.HD.in")])
+                self.assertEqual(len(selected_programmes), 2)
+                self.assertEqual(result.stats.selected_programmes, 2)
+                self.assertEqual(dict(result.resolved_source_ids), {"Alpha.HD.in": "Alpha.HD.in"})
+                self.assertEqual(dict(result.requested_id_aliases), {
+                    key: "Alpha.HD.in" for key in fixed if key != "Alpha.HD.in"
+                })
+                self.assertEqual(set(result.requested_fixed_ids), set(fixed))
+                self.assertTrue(result.programme_gates["Alpha.HD.in"].passed)
+
+    def test_distinct_exact_case_ids_are_never_merged_or_used_for_ambiguous_alias(self) -> None:
+        channels = '<channel id="ABC.in"/><channel id="abc.in"/>'
+        programmes = "\n".join(
+            f'<programme channel="{epg_id}" start="{stamp(start)}" stop="{stamp(stop)}"><title>{epg_id} {title}</title></programme>'
+            for epg_id in ("ABC.in", "abc.in")
+            for start, stop, title in ((0, 14400, "Morning"), (14400, 28800, "Afternoon"))
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_source(Path(temporary), xml_document(channels, programmes))
+            selected = []
+            result = stream_catalog_and_programmes_once(
+                path=path, fixed_wanted_ids=("ABC.in", "abc.in", "AbC.in"),
+                select_provisional_ids=lambda _catalog: (),
+                window_start=NOW, now_epoch=NOW, programme_sink=selected.append,
+            )
+        self.assertEqual(dict(result.resolved_source_ids), {"ABC.in": "ABC.in", "abc.in": "abc.in"})
+        self.assertEqual(dict(result.requested_id_aliases), {})
+        self.assertEqual(result.unresolved_requested_ids, ("AbC.in",))
+        self.assertEqual(set(result.catalog.casefold_variants("AbC.in")), {"ABC.in", "abc.in"})
+        self.assertEqual(len(selected), 4)
+        self.assertTrue(all(gate.passed for gate in result.programme_gates.values()))
+        self.assertEqual(result.catalog.matcher_candidates(), [])
+
+    def test_canonical_alias_does_not_bypass_programme_or_identity_gates(self) -> None:
+        channels = '<channel id="Alpha.HD.in"/>'
+        programmes = f'<programme channel="Alpha.HD.in" start="{stamp(0)}" stop="{stamp(28800)}"><title>No information</title></programme>'
+        with tempfile.TemporaryDirectory() as temporary:
+            path = self.write_source(Path(temporary), xml_document(channels, programmes))
+            result = stream_catalog_and_programmes_once(
+                path=path, fixed_wanted_ids=("alpha.hd.IN", "Alpha-HD.in"),
+                select_provisional_ids=lambda _catalog: ("Alpha.HD.in",),
+                window_start=NOW, now_epoch=NOW,
+            )
+        self.assertEqual(dict(result.requested_id_aliases), {"alpha.hd.IN": "Alpha.HD.in"})
+        self.assertEqual(result.unresolved_requested_ids, ("Alpha-HD.in",))
+        self.assertFalse(result.programme_gates["Alpha.HD.in"].passed)
 
     def test_casefold_collision_is_excluded_from_matcher_candidates(self) -> None:
         channels = """

@@ -35,8 +35,8 @@ else:
     from epg_programme_details import parse_details_json
 
 
-SPOOL_SCHEMA_VERSION = "2"
-SPOOL_WRITER_VERSION = "2.0"
+SPOOL_SCHEMA_VERSION = "3"
+SPOOL_WRITER_VERSION = "3.0"
 SPOOL_SOURCE_KEY = "epgshare01"
 MAX_SPOOL_BYTES = 6 * 1024 * 1024 * 1024
 MINIMUM_FREE_BYTES_AFTER_COPY = 512 * 1024 * 1024
@@ -132,6 +132,7 @@ class VerifiedSpool:
     manifest: Mapping[str, str]
     stats: Mapping[str, int]
     requested_ids: frozenset[str]
+    requested_id_aliases: Mapping[str, str]
 
 
 def _schema_sql() -> str:
@@ -459,6 +460,7 @@ class EpgSelectionSpoolWriter:
         provisional_requested_ids: Iterable[object],
         resolved_source_ids: Mapping[object, object],
         stats: object,
+        requested_id_aliases: Mapping[object, object] | None = None,
     ) -> Path:
         if self._sealed:
             raise SpoolError("The selection spool is already sealed.")
@@ -481,20 +483,40 @@ class EpgSelectionSpoolWriter:
         )
         fixed_set = set(fixed)
         provisional = tuple(item for item in provisional if item not in fixed_set)
-        requested = fixed + provisional
-        requested_set = set(requested)
-        if len(requested) > MAX_REQUEST_ROWS:
-            raise SpoolError("The selection spool contains too many requests.")
-
+        requested_set = set(fixed + provisional)
         target_to_source: dict[str, str] = {}
         for raw_source, raw_target in resolved_source_ids.items():
             source_id = _clean_identifier(raw_source, label="resolved source IDs")
             target = _clean_identifier(raw_target, label="resolved source IDs")
-            if target not in requested_set:
-                raise SpoolError("A resolved source ID was not requested.")
-            if target in target_to_source and target_to_source[target] != source_id:
-                raise SpoolError("One request resolves to more than one source ID.")
+            if source_id != target or self._source_by_channel.get(target) != source_id:
+                raise SpoolError("Resolved spool channels must use exact canonical IDs.")
             target_to_source[target] = source_id
+        if requested_id_aliases is not None and not isinstance(requested_id_aliases, Mapping):
+            raise SpoolError("The selection spool requested ID aliases must be a mapping.")
+        aliases: dict[str, str] = {}
+        selected_by_fold: dict[str, set[str]] = {}
+        for source_id in self._source_by_channel.values():
+            selected_by_fold.setdefault(source_id.casefold(), set()).add(source_id)
+        for raw_alias, raw_target in (requested_id_aliases or {}).items():
+            alias = _clean_identifier(raw_alias, label="requested ID alias")
+            target = _clean_identifier(raw_target, label="requested ID alias")
+            if (alias == target or alias.casefold() != target.casefold()
+                    or alias not in requested_set or target_to_source.get(target) != target
+                    or alias in self._source_by_channel
+                    or len(selected_by_fold.get(target.casefold(), ())) != 1):
+                raise SpoolError("The selection spool contains an invalid requested ID alias.")
+            aliases[alias] = target
+            target_to_source[alias] = target
+        # Canonical channels are stored once. Original request spellings stay
+        # in history, with separately bound aliases for runtime schedule lookup.
+        canonical_additions = sorted(set(target_to_source.values()) - requested_set)
+        if any(target not in requested_set and target not in aliases.values()
+               for target in target_to_source.values()):
+            raise SpoolError("A resolved source ID was not requested.")
+        provisional += tuple(canonical_additions)
+        requested = fixed + provisional
+        if len(requested) > MAX_REQUEST_ROWS:
+            raise SpoolError("The selection spool contains too many requests.")
 
         for key in fixed:
             self._connection.execute(
@@ -525,7 +547,8 @@ class EpgSelectionSpoolWriter:
                 """
                 SELECT COUNT(*) FROM epg_spool_requests AS r
                 LEFT JOIN channels AS c
-                  ON c.source_key = ? AND c.channel_key = r.channel_key
+                  ON c.source_key = ? AND c.channel_key = r.source_channel_id
+                 AND c.source_channel_id = r.source_channel_id
                 WHERE r.source_channel_id != '' AND c.channel_key IS NULL
                 """,
                 (SPOOL_SOURCE_KEY,),
@@ -781,7 +804,7 @@ def _validate_database_content(
     maximum_expanded_bytes: int,
     consumer_epoch: int,
     maximum_spool_age_seconds: int,
-) -> tuple[dict[str, int], frozenset[str]]:
+) -> tuple[dict[str, int], frozenset[str], Mapping[str, str]]:
     if manifest["schema_version"] != SPOOL_SCHEMA_VERSION:
         raise SpoolError("The selection spool schema version is unsupported.")
     if (
@@ -835,6 +858,7 @@ def _validate_database_content(
     if len(request_rows) > MAX_REQUEST_ROWS:
         raise SpoolError("The selection spool contains too many requests.")
     requested: set[str] = set()
+    resolutions: dict[str, str] = {}
     for raw_key, kind, raw_source in request_rows:
         key = _clean_identifier(raw_key, label="spool requests")
         source_id = str(raw_source or "")
@@ -843,8 +867,26 @@ def _validate_database_content(
         if source_id:
             _clean_identifier(source_id, label="spool requests")
         requested.add(key)
+        resolutions[key] = source_id
     if not required_ids.issubset(requested):
         raise SpoolError("The selection spool does not cover every mapped EPGShare ID.")
+    aliases: dict[str, str] = {}
+    selected_by_fold: dict[str, set[str]] = {}
+    selected_keys: set[str] = set()
+    for key, source_id in connection.execute("SELECT channel_key, source_channel_id FROM channels"):
+        if key != source_id:
+            raise SpoolError("The selection spool channel is not canonical.")
+        selected_keys.add(key)
+        selected_by_fold.setdefault(source_id.casefold(), set()).add(source_id)
+    for key, source_id in resolutions.items():
+        if not source_id or key == source_id:
+            continue
+        if (key.casefold() != source_id.casefold() or key in selected_keys
+                or resolutions.get(source_id) != source_id
+                or source_id not in selected_keys
+                or len(selected_by_fold.get(source_id.casefold(), ())) != 1):
+            raise SpoolError("The selection spool contains an invalid requested ID alias.")
+        aliases[key] = source_id
     # A fixed legacy mapping can legitimately disappear from a newer source;
     # the direct XML parser historically retained that row and reported zero
     # schedule coverage.  Request-history membership proves the one-pass sync
@@ -887,8 +929,14 @@ def _validate_database_content(
                  ON c.source_key = p.source_key AND c.channel_key = p.channel_key
                WHERE p.source_key != ? OR c.channel_key IS NULL
                   OR p.stop_epoch <= p.start_epoch)
+              +
+              (SELECT COUNT(*) FROM epg_spool_requests AS r
+               LEFT JOIN channels AS c
+                 ON c.source_key = ? AND c.channel_key = r.source_channel_id
+                AND c.source_channel_id = r.source_channel_id
+               WHERE r.source_channel_id != '' AND c.channel_key IS NULL)
             """,
-            (SPOOL_SOURCE_KEY, SPOOL_SOURCE_KEY, SPOOL_SOURCE_KEY),
+            (SPOOL_SOURCE_KEY, SPOOL_SOURCE_KEY, SPOOL_SOURCE_KEY, SPOOL_SOURCE_KEY),
         ).fetchone()[0]
     )
     if invalid_relations:
@@ -1001,7 +1049,7 @@ def _validate_database_content(
         connection, seal_fields
     ) != manifest["logical_sha256"]:
         raise SpoolError("The selection spool logical-content seal is invalid.")
-    return stats, frozenset(requested)
+    return stats, frozenset(requested), MappingProxyType(aliases)
 
 
 def copy_and_open_verified_spool(
@@ -1056,7 +1104,7 @@ def copy_and_open_verified_spool(
 
         _reject_invalid_cell_shapes(connection)
         manifest = _load_manifest(connection)
-        stats, requested = _validate_database_content(
+        stats, requested, aliases = _validate_database_content(
             connection,
             manifest=manifest,
             expected_source_sha256=source_hash,
@@ -1077,6 +1125,7 @@ def copy_and_open_verified_spool(
             manifest=MappingProxyType(dict(manifest)),
             stats=MappingProxyType(dict(stats)),
             requested_ids=requested,
+            requested_id_aliases=aliases,
         )
     except (sqlite3.DatabaseError, OSError) as exc:
         if connection is not None:

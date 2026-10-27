@@ -603,6 +603,10 @@ class CatalogSnapshot:
     def is_case_ambiguous(self, epg_id: object) -> bool:
         return str(epg_id or "").casefold() in self.casefold_collision_keys
 
+    def casefold_variants(self, epg_id: object) -> tuple[str, ...]:
+        """Return exact source spellings for diagnostics, never a chosen match."""
+        return self._ids_by_fold.get(str(epg_id or "").casefold(), ())
+
     def matcher_candidates(
         self, *, explicit_dummy_ids: Iterable[str] = ()
     ) -> list[dict[str, str]]:
@@ -689,6 +693,7 @@ class OnePassCatalogResult:
     resolved_source_ids: Mapping[str, str]
     unresolved_requested_ids: tuple[str, ...]
     stats: CatalogStreamStats
+    requested_id_aliases: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1053,10 +1058,15 @@ def _resolve_requested_ids(
     catalog: CatalogSnapshot,
     fixed_ids: Sequence[str],
     provisional_ids: Sequence[str],
-) -> tuple[dict[str, str], tuple[str, ...]]:
-    """Map exact source IDs to requested builder keys using current safe rules."""
+) -> tuple[dict[str, str], tuple[str, ...], dict[str, str]]:
+    """Select each exact source once, retaining proven legacy spelling aliases.
+
+    Exact IDs are opaque: two exact case variants in the source remain distinct.
+    Only a non-exact request with one current source spelling may be an alias.
+    """
     actual_to_target: dict[str, str] = {}
     unresolved: list[str] = []
+    aliases: dict[str, str] = {}
     for requested in (*fixed_ids, *provisional_ids):
         exact = catalog.exact(requested)
         if exact is not None:
@@ -1067,15 +1077,10 @@ def _resolve_requested_ids(
                 unresolved.append(requested)
                 continue
             actual = unique.epg_id
-        previous = actual_to_target.get(actual)
-        if previous is not None and previous != requested:
-            # Two mapping rows must never silently claim the same source identity
-            # under differently-cased target IDs.
-            raise CatalogStreamError(
-                "More than one requested mapping targets the same XMLTV identity."
-            )
-        actual_to_target[actual] = requested
-    return actual_to_target, tuple(unresolved)
+        actual_to_target[actual] = actual
+        if actual != requested:
+            aliases[requested] = actual
+    return actual_to_target, tuple(unresolved), aliases
 
 
 def _gate_results(
@@ -1182,6 +1187,7 @@ def stream_catalog_and_programmes_once(
     catalog: CatalogSnapshot | None = None
     provisional_ids: tuple[str, ...] = ()
     actual_to_target: dict[str, str] = {}
+    requested_id_aliases: dict[str, str] = {}
     unresolved: tuple[str, ...] = ()
     gates: dict[str, _GateAccumulator] = {}
     selector_called = False
@@ -1192,7 +1198,7 @@ def stream_catalog_and_programmes_once(
     started = time.monotonic()
 
     def freeze_and_select() -> None:
-        nonlocal catalog, provisional_ids, actual_to_target, unresolved, selector_called
+        nonlocal catalog, provisional_ids, actual_to_target, unresolved, selector_called, requested_id_aliases
         if selector_called:
             return
         catalog = _freeze_catalog(
@@ -1220,7 +1226,7 @@ def stream_catalog_and_programmes_once(
             raise CatalogStreamError(
                 "The catalog selector returned an ID not present exactly in the catalog."
             )
-        actual_to_target, unresolved = _resolve_requested_ids(
+        actual_to_target, unresolved, requested_id_aliases = _resolve_requested_ids(
             catalog, fixed_ids, provisional_ids
         )
         selected_keys = set(actual_to_target.values())
@@ -1533,6 +1539,7 @@ def stream_catalog_and_programmes_once(
         resolved_source_ids=MappingProxyType(dict(actual_to_target)),
         unresolved_requested_ids=unresolved,
         stats=stats,
+        requested_id_aliases=MappingProxyType(dict(requested_id_aliases)),
     )
 
 
