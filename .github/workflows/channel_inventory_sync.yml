@@ -76,6 +76,7 @@ on:
 # append-only additions to the Sync Alerts tab in the configured private Sheet.
 concurrency:
   group: ${{ github.repository }}-skytv-epg-v1
+  queue: max
   cancel-in-progress: false
 
 permissions:

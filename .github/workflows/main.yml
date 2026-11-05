@@ -13,6 +13,7 @@ on:
 # Sheet appends. VOD builds have their own group; final publication is serialized.
 concurrency:
   group: ${{ github.repository }}-skytv-epg-v1
+  queue: max
   cancel-in-progress: false
 
 permissions:
@@ -232,9 +233,27 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: python scripts/private_matcher_cache.py restore
 
+      - name: Restore encrypted last working native guides
+        continue-on-error: true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .build/native-panel-cache.enc
+          key: private-native-guide-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            private-native-guide-v1-${{ runner.os }}-
+
+      - name: Open private native guides and provider cooldowns
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: >-
+          python scripts/private_panel_cache.py restore
+          --directory "${{ runner.temp }}/skytv-native-panel-cache"
+          --file .build/native-panel-cache.enc
+
       - name: Refresh the private Google Sheet and create this run's mapping snapshot
         shell: bash
         env:
+          SKYTV_PANEL_CACHE_DIR: ${{ runner.temp }}/skytv-native-panel-cache
           # These credentials exist only in this inventory step. Server 1's
           # credentials are never available to the EPG-building step below.
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
@@ -808,6 +827,7 @@ jobs:
       - name: Build XMLTV, app JSON, and personalization metadata
         shell: bash
         env:
+          SKYTV_PANEL_CACHE_DIR: ${{ runner.temp }}/skytv-native-panel-cache
           # Server 1 credentials are deliberately absent. Its native EPG is
           # forbidden. Servers 2 and 3 may use panel EPG only when their Sheet
           # rows explicitly request it.
@@ -928,6 +948,32 @@ jobs:
 
       - name: Validate independent live component
         run: bash scripts/check_publication.sh live
+
+      - name: Encrypt validated native guides and service cooldowns
+        id: native_cache_seal
+        if: always()
+        continue-on-error: true
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SKYTV_PANEL_CACHE_DIR: ${{ runner.temp }}/skytv-native-panel-cache
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from scripts.private_panel_cache import seal
+          ready = seal(Path(os.environ['SKYTV_PANEL_CACHE_DIR']), Path('.build/native-panel-cache.enc'))
+          with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as handle:
+              handle.write('ready=' + str(ready).lower() + '\n')
+          print('Private native guide cache sealed.' if ready else 'Private native guide cache unavailable; provider checks still apply.')
+          PY
+
+      - name: Save encrypted native guides and provider cooldowns
+        if: ${{ always() && steps.native_cache_seal.outputs.ready == 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .build/native-panel-cache.enc
+          key: private-native-guide-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save public channel enrichment cache
         continue-on-error: true

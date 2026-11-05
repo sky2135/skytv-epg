@@ -8,6 +8,7 @@ on:
         type: choice
         options:
           - live
+          - native_epg
           - vod_evidence
           - vod_identity_coverage
           - vod_recent_samples
@@ -60,10 +61,25 @@ jobs:
               --output .build/vod-recent-samples/report.json
           elif [[ "$DIAGNOSTIC_MODE" == "live" ]]; then
             python -u scripts/diagnose_provider_transport.py
+          elif [[ "$DIAGNOSTIC_MODE" == "native_epg" ]]; then
+            mkdir -p .build/native-epg-diagnostic
+            timeout --signal=TERM --kill-after=10s 8m python -u scripts/diagnose_provider_transport.py \
+              --mode native_epg --servers server_2 server_3 \
+              --output .build/native-epg-diagnostic/report.json
           else
             echo "Unsupported diagnostic mode." >&2
             exit 2
           fi
+
+      - name: Retain aggregate native guide diagnostic
+        if: ${{ success() && inputs.mode == 'native_epg' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-epg-diagnostic-${{ github.run_id }}
+          path: .build/native-epg-diagnostic/report.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
 
       - name: Retain aggregate VOD identity coverage
         if: ${{ success() && inputs.mode == 'vod_identity_coverage' }}

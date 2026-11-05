@@ -2,6 +2,8 @@
 """Bounded provider transport checks; never print bodies or credential URLs."""
 from __future__ import annotations
 
+import argparse
+import gzip
 import ipaddress
 import json
 import os
@@ -10,6 +12,9 @@ import socket
 import sys
 import time
 import zlib
+from contextlib import closing
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 
 import requests
@@ -23,6 +28,10 @@ import sync_channel_inventory as inventory
 MAX_JSON_BYTES = 48 * 1024 * 1024
 MAX_PUBLIC_COMPRESSED_BYTES = 8 * 1024 * 1024
 MAX_PUBLIC_EXPANDED_BYTES = 32 * 1024 * 1024
+MAX_NATIVE_EXPANDED_BYTES = 1024 * 1024 * 1024
+NATIVE_SERVERS = ("server_2", "server_3")
+ALL_SERVERS = ("server_1", *NATIVE_SERVERS)
+NEAR_FUTURE_HOURS = 48
 
 
 def inventory_error_code(error: Exception) -> str:
@@ -284,9 +293,186 @@ def redirect_probe(config, configs: list) -> dict:
     return result
 
 
-def main() -> int:
+def declared_native_channel_ids(path: Path, server_id: str) -> set[str]:
+    """Collect only declared identities using the production XML safety rules."""
+    source_key = "panel:" + server_id
+    epg.reject_unsafe_xml_prefix(
+        path, allow_inert_xmltv_doctype=True, source_label=source_key
+    )
+    channel_ids = set()
+    root = None
+    total = 0
+    active_top_level = None
+    child_elements = 0
+    with epg.open_limited_xml(path, MAX_NATIVE_EXPANDED_BYTES) as source:
+        context = etree.iterparse(
+            source, events=("start", "end"), recover=False, huge_tree=False,
+            load_dtd=False, no_network=True, resolve_entities=False,
+            remove_comments=True, remove_pis=True,
+        )
+        for event, element in context:
+            if event == "start":
+                if root is None:
+                    root = element
+                    epg.reject_parsed_doctype(
+                        root, allow_inert_xmltv_doctype=True, source_label=source_key
+                    )
+                    if epg.local_name(root.tag) != "tv":
+                        raise ValueError("Not an XMLTV guide")
+                elif element.getparent() is root:
+                    active_top_level = element
+                    child_elements = 0
+                elif active_top_level is not None:
+                    child_elements += 1
+                    if child_elements > epg.MAX_RECORD_CHILD_ELEMENTS:
+                        raise ValueError("Native guide record exceeds the child limit")
+                continue
+            if element.getparent() is not root:
+                continue
+            total += 1
+            if total > epg.MAX_SOURCE_ELEMENTS:
+                raise ValueError("Native guide exceeds the record limit")
+            name = epg.local_name(element.tag)
+            if name not in {"channel", "programme"}:
+                raise ValueError("Unsupported native guide record")
+            if name == "channel":
+                channel_id = epg.clean_identifier(element.get("id") or "", 300)
+                if channel_id:
+                    channel_ids.add(channel_id)
+            epg.release_top_level(element)
+            active_top_level = None
+            child_elements = 0
+    if root is None:
+        raise ValueError("Empty native guide")
+    return channel_ids
+
+
+def native_epg_probe(server_id: str, *, now: int | None = None) -> dict:
+    """Read and validate one native source; never return a title, ID or URL."""
+    if server_id not in NATIVE_SERVERS:
+        raise ValueError("Native guide diagnostics require Server 2 or Server 3")
+    result = {"serverId": server_id, "status": "unavailable", "usable": False}
+    started = time.monotonic()
+    try:
+        with TemporaryDirectory(prefix="skytv-native-probe-") as private:
+            private_root = Path(private)
+            source_path, details = epg.download_panel_xmltv(
+                server_id, private_root / "source.xmltv", maximum_attempts=1
+            )
+            checked_at = int(time.time()) if now is None else int(now)
+            channel_ids = declared_native_channel_ids(source_path, server_id)
+            with closing(epg.create_database(private_root / "selected.sqlite")) as connection:
+                epg.ingest_xmltv_source(
+                    connection=connection, path=source_path,
+                    source_key="panel:" + server_id, wanted_ids=channel_ids,
+                    window_start=checked_at - 86400, source_base_url="",
+                    allow_source_icons=False, allow_inert_xmltv_doctype=True,
+                    maximum_expanded_bytes=MAX_NATIVE_EXPANDED_BYTES,
+                )
+                # Inferred stops cannot prove that the provider has recovered.
+                # Far-future rows also cannot stand in for this day's schedules.
+                counts = connection.execute(
+                    """WITH coverage AS (
+                    SELECT p.channel_key, COUNT(*) AS programme_rows,
+                        MAX(CASE WHEN p.start_epoch <= ? AND p.stop_epoch > ?
+                            AND p.stop_epoch <= ? THEN 1 ELSE 0 END) AS has_current,
+                        MAX(CASE WHEN p.start_epoch > ? AND p.start_epoch <= ?
+                            AND p.stop_epoch <= ? THEN 1 ELSE 0 END) AS has_future
+                    FROM programmes p JOIN channels c
+                        ON p.source_key = c.source_key AND p.channel_key = c.channel_key
+                    WHERE p.source_key = ?
+                        AND coalesce(json_extract(p.details_json, '$.stopInferred'), 0) = 0
+                        AND p.stop_epoch > p.start_epoch
+                        AND p.stop_epoch - p.start_epoch <= 86400
+                    GROUP BY p.channel_key)
+                    SELECT coalesce(SUM(programme_rows), 0), coalesce(SUM(has_current), 0),
+                        coalesce(SUM(has_future), 0), coalesce(SUM(has_current * has_future), 0)
+                    FROM coverage""",
+                    (checked_at, checked_at, checked_at + 86400,
+                     checked_at, checked_at + NEAR_FUTURE_HOURS * 3600,
+                     checked_at + (NEAR_FUTURE_HOURS + 24) * 3600,
+                     "panel:" + server_id),
+                ).fetchone()
+            programme_rows, current_channels, future_channels, current_and_future = map(int, counts)
+            usable = bool(channel_ids and current_and_future)
+            result.update(
+                httpStatus=200, status="ok" if usable else "stale_or_empty",
+                usable=usable, channels=len(channel_ids), programmeRows=programme_rows,
+                currentChannels=current_channels, futureChannels=future_channels,
+                currentAndFutureChannels=current_and_future,
+                futureWindowHours=NEAR_FUTURE_HOURS, checkedAt=checked_at,
+                sha256=details["sha256"], bytes=details["bytes"],
+            )
+            cache_directory = os.environ.get("SKYTV_PANEL_CACHE_DIR", "").strip()
+            if usable and cache_directory:
+                # Cache plaintext stays in the runner's private directory; a
+                # separate workflow step seals it before durable storage.
+                try:
+                    import private_panel_cache
+                    result["cacheSaved"] = private_panel_cache.save_source(
+                        server_id, source_path, Path(cache_directory),
+                        credentials=epg.panel_credentials(server_id), captured_at=checked_at,
+                    )
+                except Exception:
+                    # Optional cache trouble must not relabel a valid source.
+                    result["cacheSaved"] = False
+    except epg.PanelSourceUnavailable as error:
+        result["issue"] = "source_unavailable"
+        status = re.fullmatch(r"HTTP ([1-5][0-9]{2})", error.last_result)
+        if status:
+            result["httpStatus"] = int(status.group(1))
+        next_attempt_at = getattr(error, "next_attempt_at", None)
+        if type(next_attempt_at) is int and 0 < next_attempt_at < 2**53:
+            result["nextAttemptAt"] = next_attempt_at
+    except epg.BuildError as error:
+        result.update(status="invalid_or_rejected", issue="validation_or_transport_rejected")
+        status = re.search(r"\bHTTP ([1-5][0-9]{2})\b", str(error))
+        if status:
+            result["httpStatus"] = int(status.group(1))
+    except (etree.XMLSyntaxError, gzip.BadGzipFile, EOFError,
+            OSError, ValueError, TypeError, KeyError):
+        # Third-party exception text may contain a credential-bearing URL or
+        # source text. Only this fixed diagnostic code is emitted.
+        result.update(status="invalid_or_rejected", issue="validation_or_transport_rejected")
+    result["elapsedSeconds"] = round(time.monotonic() - started, 3)
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("live", "native_epg"), default="live")
+    parser.add_argument("--servers", nargs="+", choices=ALL_SERVERS)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+    servers = tuple(dict.fromkeys(args.servers or (
+        NATIVE_SERVERS if args.mode == "native_epg" else ALL_SERVERS
+    )))
+    if args.mode == "native_epg" and any(server not in NATIVE_SERVERS for server in servers):
+        parser.error("Native guide diagnostics support only server_2 and server_3")
     allow_http = os.environ.get("ALLOW_INSECURE_PANEL_HTTP", "").casefold() == "true"
-    configs = [vod.load_server_config("server_"+str(number),allow_insecure_http=allow_http) for number in (1,2)]
+    if args.mode == "native_epg":
+        configs = []
+        native = []
+        for server in servers:
+            try:
+                config = vod.load_server_config(server, allow_insecure_http=allow_http)
+            except (vod.CatalogBuildError, ValueError):
+                native.append({"serverId": server, "status": "configuration_rejected",
+                               "usable": False, "issue": "invalid_configuration"})
+                continue
+            configs.append(config)
+            native.append(native_epg_probe(server))
+        report = {"schemaVersion": 1, "mode": "native_epg", "nativeEpg": native,
+                  "recovered": all(value["usable"] for value in native)}
+        for config in configs:
+            vod.ensure_no_secret_reflection(report, config)
+        rendered = json.dumps(report, sort_keys=True)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(rendered + "\n", encoding="utf-8")
+        print(rendered, flush=True)
+        return 0
+    configs = [vod.load_server_config(server, allow_insecure_http=allow_http) for server in servers]
     report = {"schemaVersion":1,"inventory":[],"redirect":{}}
     production_configs = inventory.load_server_configs([config.server_id for config in configs])
     report["productionSessionInventory"] = production_session_inventory_probe(production_configs, allow_http)
@@ -295,13 +481,26 @@ def main() -> int:
             report["inventory"].append(inventory_probe(config,identity))
     report["actualInventory"] = actual_inventory_probe(configs[0], allow_http)
     report["additionalInventory"] = [actual_inventory_probe(config, allow_http) for config in configs[1:]]
-    try:
-        report["redirect"] = redirect_probe(configs[1],configs)
-    except requests.RequestException:
-        report["redirect"] = {"serverId":configs[1].server_id,"issue":"request_failed"}
+    report["redirects"] = []
+    for config in configs:
+        if config.server_id not in NATIVE_SERVERS:
+            continue
+        try:
+            result = redirect_probe(config, configs)
+        except requests.RequestException:
+            result = {"serverId": config.server_id, "issue": "request_failed"}
+        report["redirects"].append(result)
+        if not report["redirect"]:
+            # Preserve the original first-native redirect summary for readers
+            # that predate the full per-server list.
+            report["redirect"] = result
     for config in configs:
         vod.ensure_no_secret_reflection(report,config)
-    print(json.dumps(report,sort_keys=True),flush=True)
+    rendered = json.dumps(report, sort_keys=True)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered, flush=True)
     return 0
 
 

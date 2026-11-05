@@ -1157,9 +1157,10 @@ class MappingContractTests(unittest.TestCase):
             )
             self.assertIn("last result: HTTP 401", str(caught.exception))
             self.assertFalse(destination.exists())
-        self.assertEqual(session.get.call_count, 3)
-        for response in responses:
-            response.close.assert_called_once()
+        self.assertEqual(session.get.call_count, 1)
+        responses[0].close.assert_called_once()
+        for response in responses[1:]:
+            response.close.assert_not_called()
         session.close.assert_called_once()
 
     def test_empty_panel_payload_cannot_enable_runtime_fallback(self) -> None:
@@ -1192,9 +1193,10 @@ class MappingContractTests(unittest.TestCase):
             )
             self.assertIn("last result: empty response", str(caught.exception))
             self.assertFalse(destination.exists())
-        self.assertEqual(session.get.call_count, 3)
-        for response in responses:
-            response.close.assert_called_once()
+        self.assertEqual(session.get.call_count, 1)
+        responses[0].close.assert_called_once()
+        for response in responses[1:]:
+            response.close.assert_not_called()
         session.close.assert_called_once()
 
     def test_panel_download_never_reports_credential_bearing_exception_text(self) -> None:
