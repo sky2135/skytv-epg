@@ -175,7 +175,8 @@ class VerificationRunnerTests(unittest.TestCase):
         current = record()["item"]
         client = verification.VerificationClient(self.seed / "tmdb", token="fixture", session=FakeSession(),
                                                  now=NOW + 1, max_requests=0)
-        key = tmdb._enrichment_identity(current, "movie")[0]
+        old_key, _identifier, title, year = tmdb._enrichment_identity(current, "movie")
+        key = tmdb._identity_cache_key(old_key, current, "movie", title, year)
         negative = tmdb._empty(None, "no_match")
         negative["rejectedIdentity"] = True
         client._write_identity_cache(key, negative, tmdb.MISS_TTL, {})

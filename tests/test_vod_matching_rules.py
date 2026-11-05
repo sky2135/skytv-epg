@@ -44,7 +44,8 @@ class SafeMatchingRuleTests(unittest.TestCase):
                                now=1_800_000_000)
 
     def proof(self, client, source, kind="movie"):
-        value, _ = client._read_cache(tmdb._enrichment_identity(source, kind)[0])
+        key, _identifier, title, year = tmdb._enrichment_identity(source, kind)
+        value, _ = client._read_identity_cache(key, source, kind, title, year)
         return value["identity"]
 
     def test_official_translation_is_cached_at_existing_key_and_bound_to_display(self):

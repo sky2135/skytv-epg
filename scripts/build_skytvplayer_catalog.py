@@ -21,7 +21,8 @@ from urllib.parse import urlsplit
 import requests
 
 import build_vod_catalogs as vod
-from vod_tmdb import (TmdbClient, _date as tmdb_date, _enrichment_identity, poster_identity,
+from vod_tmdb import (TmdbClient, _date as tmdb_date, _enrichment_identity, _provider_query_constraints,
+                      poster_identity,
                       unmatched_passthrough_fingerprint)
 from vod_series import enrich_series
 from vod_reviewed_corrections import apply_reviewed_correction, correction_for
@@ -156,10 +157,14 @@ def _resolve_metadata(client, server_id, kind, match_item, resolution_queue):
 
 
 def _metadata_result_key(item, kind, resolution_queue):
-    physical_key = _enrichment_identity(item, kind)[0]
+    physical_key, _identifier, source_title, source_year = _enrichment_identity(item, kind)
     server_id = item["contentId"].split(":", 1)[0]
     # A physical cache key does not encode all reviewed rejected-ID constraints.
     constraints = {"correction": correction_for(server_id, kind, item),
+                   # Persistent legacy cache names deliberately stay stable.
+                   # Shared results additionally require the same exact input
+                   # binding, discovery query and independent-evidence guards.
+                   "providerQuery": _provider_query_constraints(item, kind, source_title, source_year),
                    "evidence": item.get("_identityEvidence"),
                    "poster": poster_identity(item),
                    "queueDeferred": bool(resolution_queue and

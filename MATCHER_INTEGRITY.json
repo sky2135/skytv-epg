@@ -65,8 +65,8 @@
   "programmeDetailsSha256": "b815e7bfb69395b384f9726bc144814cea60b04a913f21f1b0d00200c13eab3b",
   "liveEnrichmentAuditSha256": "57679d496c58470729d081b43ad77e8d66a2b8712212c839070ad1d347fae6fe",
   "vodCatalogBuilderSha256": "8f54201e5e99e6f22740a92db47d74169507c77c01879f11ed99dee25a1e01b0",
-  "appCatalogBuilderSha256": "42b66a02c3d090534f483c5861568e8b4e3d1464d4f7fc1940cfbe3af364ff0f",
-  "vodTmdbSha256": "b461c9e22271611091a60d88285ef2613f9763bd96e20c5878149ca7aee0e1a1",
+  "appCatalogBuilderSha256": "2f9a8dbef48a63efaaead3a13bacafec01c5ca602ad0c527668634065ae31eca",
+  "vodTmdbSha256": "4fbc4f6f5bc613addd0720bb03b7c4905ab35fb7e34105ad3224c5d69d4fbea7",
   "vodReviewedCorrectionsSha256": "ac77c54fff1893a35cc1744ff6b3f44bf6bb786d348f54cb488f707663f57234",
   "vodReviewedFactsSha256": "a7359507a5c0767997b5a00a3945bb3bf24e44d8524f7ddbb3b44f11d4f52def",
   "channelMetadataFactsSha256": "09762eb11b2973dd33c3d5367dbcf25a632b9f7c0e87ff664f108da3586b576e",
@@ -93,7 +93,7 @@
   "vodPosterIndexSha256": "dce1e7bd7ff1602bc0fc2ba0160d46a3c881f599de1207504fae97f677372a72",
   "vodIdentityCoverageAuditSha256": "d858304d8d83256153abe49a3b9cbbb7708e3dffc1752c3c40e54e54a57ad825",
   "vodEnrichmentWorkflowSha256": "91e44970b366e2478491a248e67618404ef35ad426c36e8304d63ccfa3c963f6",
-  "vodEnrichmentWorkerSha256": "9f094fba6ada334bf01a99555bb9c888afdaf66aee7107d4fcf1ca8eb56c9ed5",
+  "vodEnrichmentWorkerSha256": "2511a3053fa2822e609a34f468afc7c788aa91607bd1c79f1a848d5420b2e89e",
   "vodEnrichmentQueueSha256": "1d53475e9fb46f23659e0cf61463a84a6a151372fb705aafcb13aa42e67b825b",
   "vodEnrichmentArtifactsSha256": "9da2e92c67c03f11052a87e39a8da30569d5ddd9a5888d2dec60e14b5e0d2e0b",
   "vodSourceProvenanceSha256": "913e08e32c8ce3f5a16e7ffd1cf54575be76e282a2d5dbc3eaa0b26cac1d658c",
@@ -105,6 +105,6 @@
   "vodOfficialAliasesSha256": "c3adbaed03c0ba08d14429a711cfdaf4a9abfc856406729aedf99edb8fe711a0",
   "vodRuleEvaluationSha256": "d000edd92cf0920a7f52ba10e1e1c112106177c8e1f348fac5e2c29fbb2bd2db",
   "vodRuleSamplingSha256": "23e965488d7cdb1aec447c9522a13bee886f89a07462e69f005e62de0ab05486",
-  "vodVerificationWorkerSha256": "87ea3df834383aa0a96fff5b53853947c3f82da930c4ddfbfbffea182b5124c7",
+  "vodVerificationWorkerSha256": "131a80caadcef59ea658b0095746e62d44acb5d25820cd691e9b95097545998c",
   "vodVerificationWorkflowSha256": "4d3d3a349a5c86e14978124b7632db474bdabd60342087965e4c9df5d8cce66c"
 }

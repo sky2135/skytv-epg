@@ -67,6 +67,7 @@ class VerificationClient(tmdb.TmdbClient):
                 value, valid_fresh, invalid = self._main_identity_cache(
                     candidate, item, kind, identifier, title, year)
                 if value and value['matchStatus'].startswith('matched_') and not invalid:
+                    self._adopt_identity_cache_path(key, candidate, item, kind, title, year)
                     self.stats['sourceCacheMigrations'] = self.stats.get('sourceCacheMigrations', 0) + 1
                     return value, valid_fresh, invalid
         # A full verification pass revisits negative outcomes. Transient cached

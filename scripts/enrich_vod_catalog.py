@@ -245,11 +245,15 @@ def run_batch(*, state_dir, component_dir=None, seed_cache=None, rate=20, worker
             # Reconciliation also runs on continuation, retaining identical rows.
             reconciliation = queue.reconcile(records, policy, source_identity)
             physical_by_id = {record['contentId']: record['physicalKey'] for record in records}
+            record_by_id = {record['contentId']: record for record in records}
             active_priorities = set(priority_content_ids).intersection(physical_by_id)
             priority_report.update(active=len(active_priorities), missing=len(priority_content_ids) - len(active_priorities))
 
             def expiry(cid):
-                path = cache_root / 'tmdb/tmdb-v1' / (physical_by_id[cid] + '.json')
+                record = record_by_id[cid]
+                resolver = getattr(warm, 'identity_cache_path', None)
+                path = (resolver(record['item'], record['kind']) if callable(resolver)
+                        else cache_root / 'tmdb/tmdb-v1' / (physical_by_id[cid] + '.json'))
                 try:
                     if not path.is_file() or path.stat().st_size > tmdb.MAX_CACHE_BYTES:
                         return None
@@ -259,7 +263,7 @@ def run_batch(*, state_dir, component_dir=None, seed_cache=None, rate=20, worker
 
             queue.cache_validated(warmed, expiry_lookup=expiry)
             queue.reopen_poster_collisions(warm)
-        del records, document
+        del records, document, record_by_id, expiry
         deadline = time.time() + batch_seconds
         limiter = SharedRateLimiter(rate=rate, deadline=deadline, resume_state=queue.get_meta('rateLimiter'),
                                    persist=lambda value: queue.set_meta('rateLimiter', value))

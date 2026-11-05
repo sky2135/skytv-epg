@@ -28,8 +28,7 @@ class MatchingRuleExportTests(unittest.TestCase):
                                session=FakeSession(*responses), now=1_800_000_000)
 
     def envelope(self, client, source):
-        key = tmdb._enrichment_identity(source, "movie")[0]
-        return artifacts.read_json(client._cache_path(key))
+        return artifacts.read_json(client.identity_cache_path(source, "movie"))
 
     def roundtrip(self, name="candidate"):
         candidate = self.root / name
@@ -61,6 +60,21 @@ class MatchingRuleExportTests(unittest.TestCase):
         self.assertTrue(artifacts._positive(self.envelope(client, source)))
         reader, _ = self.roundtrip()
         self.assertEqual(reader.enrich(source, "movie"), result)
+        self.assertEqual(reader.session.calls, [])
+
+    def test_two_verified_variants_coexist_and_replay_after_export_import(self):
+        first = provider_item("EX - काला (2025)")
+        second = provider_item("EX - काली (2025)")
+        details = translated_details(title="काला", translated="काली")
+        client = self.client(None, FakeResponse(details), FakeResponse(details))
+        self.assertEqual(tmdb._enrichment_identity(first, "movie")[0],
+                         tmdb._enrichment_identity(second, "movie")[0])
+        expected = [client.enrich(source, "movie") for source in (first, second)]
+        self.assertTrue(all(result["matchStatus"] == "matched_poster" for result in expected))
+        self.assertNotEqual(client.identity_cache_path(first, "movie"), client.identity_cache_path(second, "movie"))
+        reader, counts = self.roundtrip()
+        self.assertEqual(counts["positive"], 2)
+        self.assertEqual([reader.enrich(source, "movie") for source in (first, second)], expected)
         self.assertEqual(reader.session.calls, [])
 
     def test_export_rejects_malformed_typed_bindings_without_partial_copy(self):
@@ -110,6 +124,7 @@ class MatchingRuleExportTests(unittest.TestCase):
         envelope["data"]["matchStrategy"] = 5
         self.assertNotIn("providerTitle", envelope["data"]["identity"])
         self.assertNotIn("translationDisplayKey", envelope["data"]["identity"])
+        client.identity_cache_path(source, "movie").unlink()
         artifacts.atomic_json(client._cache_path(key), envelope)
         self.assertTrue(artifacts._positive(envelope))
         reader, _ = self.roundtrip()

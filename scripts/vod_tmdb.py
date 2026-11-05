@@ -419,6 +419,36 @@ def _provider_title_binding(source_title, source_year, title, year, *, force=Fal
     return None
 
 
+def _provider_query_context(item, kind, source_title, source_year):
+    """Return the exact discovery query and guards shared by all schedulers."""
+    title, year = _effective_title_and_year(item, kind, source_title, source_year)
+    binding = _provider_title_binding(source_title, source_year, title, year)
+    raw_display = _text(item.get("title") or item.get("name")) or ""
+    classifier_changed = kind == "series" and preprocess_provider_decorations(
+        raw_display, source_year=source_year, kind=kind
+    ) != preprocess_provider_decorations(raw_display, source_year=source_year)
+    requires_corroboration = bool(binding is not None and not _reviewed(item, kind) and (
+        provider_cleanup_requires_corroboration(source_title, source_year=source_year, kind=kind)
+        or classifier_changed
+    ))
+    return title, year, binding, requires_corroboration
+
+
+def _provider_query_constraints(item, kind, source_title, source_year):
+    title, year, binding, corroboration = _provider_query_context(item, kind, source_title, source_year)
+    return {"version": 1, "sourceTitleKey": exact_display_key(source_title), "sourceYear": source_year,
+            "matchTitleKey": exact_display_key(title), "matchYear": year,
+            "providerTitle": binding, "requiresCorroboration": corroboration,
+            "correction": _reviewed(item, kind)}
+
+
+def _identity_cache_key(key, item, kind, source_title, source_year):
+    """Isolate new outcomes while preserving old filenames for positive reads."""
+    constraints = _provider_query_constraints(item, kind, source_title, source_year)
+    encoded = json.dumps(constraints, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return key + ":query-v1:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _current_query_identity(proof, item, kind, source_title, source_year):
     if not _identity_binding_valid(proof):
         return None
@@ -626,6 +656,7 @@ class TmdbClient:
         self.poster_index = shared_index(self.cache_dir)
         seed_collision_file(self.poster_index, self.cache_dir.parent.parent / "enrichment-collisions.json")
         self._poster_cache_state = {}
+        self._identity_cache_files = {}
 
     def __enter__(self) -> "TmdbClient":
         return self
@@ -657,8 +688,10 @@ class TmdbClient:
         return self.cache_dir / (hashlib.sha256(key.encode("utf-8")).hexdigest() + ".json")
 
     def _read_cache(self, key: str, max_stale_seconds: int | None = None) -> tuple[Any, bool]:
+        return self._read_cache_file(self._cache_path(key), max_stale_seconds)
+
+    def _read_cache_file(self, path: Path, max_stale_seconds: int | None = None) -> tuple[Any, bool]:
         try:
-            path = self._cache_path(key)
             if path.stat().st_size > MAX_CACHE_BYTES:
                 return None, False
             entry = json.loads(path.read_text(encoding="utf-8"))
@@ -673,6 +706,21 @@ class TmdbClient:
             return entry["data"], expires > now
         except (OSError, ValueError, TypeError):
             return None, False
+
+    def identity_cache_path(self, item, kind, *, key=None, title=None, year=None):
+        """Return the actual last validated file, including a legacy fallback."""
+        if key is None:
+            key, _identifier, title, year = _enrichment_identity(item, kind)
+        variant = self._cache_path(_identity_cache_key(key, item, kind, title, year))
+        return self.cache_dir / self._identity_cache_files.get(variant.name, variant.name)
+
+    def _read_identity_cache(self, key, item, kind, title, year):
+        return self._read_cache_file(self.identity_cache_path(item, kind, key=key, title=title, year=year))
+
+    def _adopt_identity_cache_path(self, key, candidate_key, item, kind, title, year):
+        variant_name = self._cache_path(_identity_cache_key(key, item, kind, title, year)).name
+        self._identity_cache_files[variant_name] = self.identity_cache_path(
+            item, kind, key=candidate_key, title=title, year=year).name
 
     def _write_cache(self, key: str, data: dict[str, Any], ttl: int) -> None:
         temporary = None
@@ -788,7 +836,9 @@ class TmdbClient:
             return None
         # Main identity keys are shared across providers. Keep a separate
         # record-bound envelope so another source's miss cannot erase a stop.
-        for cache_key in (self._passthrough_key(key, fingerprint), key):
+        _old_key, _identifier, title, year = _enrichment_identity(item, kind)
+        variant = _identity_cache_key(key, item, kind, title, year)
+        for cache_key in (self._passthrough_key(variant, fingerprint), variant):
             value, _fresh = self._read_cache(cache_key)
             if (_ignored_without_artwork(value, item, kind)
                     and _cached_metadata(value.get("metadata")) is not None):
@@ -809,17 +859,71 @@ class TmdbClient:
         never become stale fallbacks. New entries retain bounded alias proof so
         translated original titles can be reused safely after an API check.
         """
-        value, fresh = self._read_cache(key)
+        variant = _identity_cache_key(key, item, kind, title, year)
+        variant_name = self._cache_path(variant).name
+        self._identity_cache_files.pop(variant_name, None)
         poster = poster_identity(item)
         if poster:
-            self._poster_cache_state[key] = (False, False, None)
-        if value is None and poster_identity(item):
-            # Adopt old verified positives without refreshing the whole library.
-            # Old misses lack this new evidence and must not mask the new rule.
-            previous, previous_fresh = self._read_cache(key.rsplit(f":poster-v{POSTER_POLICY}:", 1)[0])
-            metadata = _cached_metadata(previous.get("metadata")) if isinstance(previous, dict) else None
-            if metadata and metadata["matchStatus"].startswith("matched_") and metadata["matchStatus"] != "matched_poster":
-                value, fresh = previous, previous_fresh
+            self._poster_cache_state[variant] = (False, False, None)
+        candidates = [variant]
+        if poster:
+            posterless_key = key.rsplit(f":poster-v{POSTER_POLICY}:", 1)[0]
+            candidates.append(_identity_cache_key(posterless_key, item, kind, title, year))
+        candidates.append(key)
+        if poster:
+            candidates.append(posterless_key)
+        rejected = False
+        for candidate in dict.fromkeys(candidates):
+            value, fresh = self._read_cache(candidate)
+            if candidate != variant:
+                metadata = _cached_metadata(value.get("metadata")) if isinstance(value, dict) else None
+                # Old namespaces are positive-only candidates. Their misses do
+                # not encode current discovery constraints and cannot transfer.
+                if metadata is None or not metadata["matchStatus"].startswith("matched_"):
+                    continue
+                if candidate != key and metadata["matchStatus"] == "matched_poster":
+                    continue
+            metadata, accepted_fresh, invalid = self._validate_identity_cache(
+                value, fresh, variant, item, kind, identifier, title, year, remember=remember)
+            rejected = rejected or invalid
+            if metadata is not None:
+                self._identity_cache_files[variant_name] = self._cache_path(candidate).name
+                return metadata, accepted_fresh, invalid
+            if candidate == variant and invalid and isinstance(value, Mapping):
+                rejected_metadata = _cached_metadata(value.get("metadata"))
+                correction = _reviewed(item, kind)
+                rejected_ids = correction.get("rejectedTmdbIds", []) if correction else []
+                if rejected_metadata and (rejected_metadata["rejectedIdentity"]
+                                          or rejected_metadata["tmdbId"] in rejected_ids):
+                    return None, False, True
+        evidence = _identity_evidence(item, kind)
+        if evidence:
+            return None, False, rejected
+        correction = _reviewed(item, kind)
+        # Only pre-policy entries use these keys; these too are positive-only.
+        raw_identifier = _identifier(item.get("tmdbId") or item.get("tmdb_id") or item.get("tmdb"))
+        legacy_key = f"{kind}:id:{raw_identifier}" if raw_identifier else f"{kind}:title:{_normalized_title(title)}:year:{year or ''}"
+        legacy, legacy_fresh = self._read_cache(legacy_key)
+        metadata = _cached_metadata(legacy)
+        if metadata is None or not metadata["matchStatus"].startswith("matched_"):
+            return None, False, rejected
+        if correction and correction["rejectIdentity"]:
+            return None, False, True
+        valid = bool(year and _normalized_title(title)
+                     and _normalized_title(metadata["originalTitle"]) == _normalized_title(title)
+                     and (metadata["releaseDate"] or "")[:4] == year
+                     and (identifier is None or metadata["tmdbId"] == identifier))
+        if valid and metadata["matchStatus"] != "matched_poster":
+            if remember:
+                self._remember_poster(kind, metadata, {"names": [_normalized_title(title)], "year": year})
+            if poster:
+                self._poster_cache_state[variant] = (True, legacy_fresh, None)
+            self._identity_cache_files[variant_name] = self._cache_path(legacy_key).name
+            return metadata, legacy_fresh, False
+        return None, False, True
+
+    def _validate_identity_cache(self, value, fresh, memo_key, item, kind, identifier, title, year, *, remember):
+        poster = poster_identity(item)
         evidence = _identity_evidence(item, kind)
         correction = _reviewed(item, kind)
         rejected_ids = correction.get("rejectedTmdbIds", []) if correction else []
@@ -838,7 +942,7 @@ class TmdbClient:
                         fresh = _ignored_without_artwork(value, item, kind)
                     attempted = proof.get("posterCandidate") if isinstance(proof, dict) else None
                     if poster:
-                        self._poster_cache_state[key] = (False, fresh, _identifier(attempted))
+                        self._poster_cache_state[memo_key] = (False, fresh, _identifier(attempted))
                     return metadata, fresh, metadata["rejectedIdentity"]
                 query = _current_query_identity(proof, item, kind, title, year) if isinstance(proof, dict) else None
                 identity_agrees = query is not None and _identity_matches(proof, *query)
@@ -863,32 +967,10 @@ class TmdbClient:
                     if metadata["matchStatus"] == "matched_poster" and self.poster_index.collided(poster):
                         return None, False, True
                     if poster:
-                        self._poster_cache_state[key] = (True, fresh, None)
+                        self._poster_cache_state[memo_key] = (True, fresh, None)
                     return metadata, fresh, metadata["rejectedIdentity"]
             return None, False, True
-        if evidence:
-            return None, False, False
-        # Only pre-policy entries use these keys. Never read them as unbound
-        # payloads at the new key, and never migrate misses or unvalidated IDs.
-        raw_identifier = _identifier(item.get("tmdbId") or item.get("tmdb_id") or item.get("tmdb"))
-        legacy_key = f"{kind}:id:{raw_identifier}" if raw_identifier else f"{kind}:title:{_normalized_title(title)}:year:{year or ''}"
-        legacy, legacy_fresh = self._read_cache(legacy_key)
-        metadata = _cached_metadata(legacy)
-        if metadata is None or not metadata["matchStatus"].startswith("matched_"):
-            return None, False, False
-        if correction and correction["rejectIdentity"]:
-            return None, False, True
-        valid = bool(year and _normalized_title(title)
-                     and _normalized_title(metadata["originalTitle"]) == _normalized_title(title)
-                     and (metadata["releaseDate"] or "")[:4] == year
-                     and (identifier is None or metadata["tmdbId"] == identifier))
-        if valid and metadata["matchStatus"] != "matched_poster":
-            if remember:
-                self._remember_poster(kind, metadata, {"names": [_normalized_title(title)], "year": year})
-            if poster:
-                self._poster_cache_state[key] = (True, legacy_fresh, None)
-            return metadata, legacy_fresh, False
-        return None, False, True
+        return None, False, False
 
     def _remember_poster(self, kind, metadata, proof):
         path = poster_identity({"artwork": {"posterUrl": metadata.get("posterUrl")}})
@@ -925,7 +1007,8 @@ class TmdbClient:
         """Prioritize missing identities, using the existing priority-read memo."""
         candidate = self.poster_candidate(item, kind)
         if candidate:
-            key = _enrichment_identity(item, kind)[0]
+            old_key, _identifier, title, year = _enrichment_identity(item, kind)
+            key = _identity_cache_key(old_key, item, kind, title, year)
             matched, fresh, attempted = self._poster_cache_state.get(key, (False, False, None))
             if not matched and not (fresh and attempted == candidate):
                 return candidate
@@ -933,10 +1016,13 @@ class TmdbClient:
 
     def _write_identity_cache(self, key: str, metadata: dict[str, Any], ttl: int,
                               proof: Mapping[str, Any] | None = None) -> None:
+        errors_before = self.stats["cacheWriteErrors"]
         self._write_cache(key, {"identityPolicy": IDENTITY_POLICY,
                                 "matchStrategy": MATCH_STRATEGY,
                                 "matchDiagnostic": _match_diagnostic(self.last_match_diagnostic),
                                 "identity": dict(proof or {}), "metadata": metadata}, ttl)
+        if ":query-v1:" in key and self.stats["cacheWriteErrors"] == errors_before:
+            self._identity_cache_files.pop(self._cache_path(key).name, None)
 
     def ignored_without_artwork(self, item: Mapping[str, Any], kind: str) -> bool:
         """Inspect a validated durable miss without writes, HTTP or statistics."""
@@ -957,7 +1043,8 @@ class TmdbClient:
         fingerprint = unmatched_passthrough_fingerprint(item, kind)
         if fingerprint is None:
             return False
-        key = _enrichment_identity(item, kind)[0]
+        old_key, _identifier, title, year = _enrichment_identity(item, kind)
+        key = _identity_cache_key(old_key, item, kind, title, year)
         changed = False
         errors_before = self.stats["cacheWriteErrors"]
         for cache_key in (key, self._passthrough_key(key, fingerprint)):
@@ -1061,6 +1148,7 @@ class TmdbClient:
         self.last_match_diagnostic = _match_diagnostic()
         key, identifier, title, year = _enrichment_identity(item, kind)
         source_title, source_year = title, year
+        cache_key = _identity_cache_key(key, item, kind, title, year)
         evidence = _identity_evidence(item, kind)
         correction = _reviewed(item, kind)
         rejected_ids = correction.get("rejectedTmdbIds", []) if correction else []
@@ -1074,7 +1162,7 @@ class TmdbClient:
             fresh = False
         if fresh:
             self.stats["cacheHits"] += 1
-            stored, _fresh = self._read_cache(key)
+            stored, _fresh = self._read_identity_cache(key, item, kind, source_title, source_year)
             if not cached["matchStatus"].startswith("matched_"):
                 stored = self._passthrough_cache(key, item, kind) or stored
             diagnostic = stored.get("matchDiagnostic") if isinstance(stored, Mapping) else None
@@ -1086,16 +1174,8 @@ class TmdbClient:
                 self.last_match_diagnostic["reason"] = cached["matchStatus"] if cached["matchStatus"].startswith("matched_") else "unavailable"
             return cached
         self.stats["cacheMisses"] += 1
-        title, year = _effective_title_and_year(item, kind, source_title, source_year)
-        provider_binding = _provider_title_binding(source_title, source_year, title, year)
-        raw_display = _text(item.get("title") or item.get("name")) or ""
-        classifier_changed = kind == "series" and preprocess_provider_decorations(
-            raw_display, source_year=source_year, kind=kind
-        ) != preprocess_provider_decorations(raw_display, source_year=source_year)
-        requires_corroboration = bool(provider_binding is not None and not correction and (
-            provider_cleanup_requires_corroboration(source_title, source_year=source_year, kind=kind)
-            or classifier_changed
-        ))
+        title, year, provider_binding, requires_corroboration = _provider_query_context(
+            item, kind, source_title, source_year)
 
         def unavailable(reason: str = "unavailable") -> dict[str, Any]:
             self.last_match_diagnostic["reason"] = reason
@@ -1107,13 +1187,13 @@ class TmdbClient:
             # Untouched titles remain uncached so the next run prioritizes them.
             # A failed refresh retains every previously successful metadata field.
             if self.stats["requests"] > requests_before:
-                previous, _fresh = self._read_cache(key)
+                previous, _fresh = self._read_identity_cache(key, item, kind, source_title, source_year)
                 proof = previous.get("identity") if isinstance(previous, dict) else None
                 if cached is not None and cached["matchStatus"].startswith("matched_") and not proof:
                     proof = {"names": [_normalized_title(cached["originalTitle"])],
                              "originalTitle": _normalized_title(cached["originalTitle"]),
                              "year": (cached["releaseDate"] or "")[:4], "tmdbId": cached["tmdbId"]}
-                self._write_identity_cache(key, result, MISS_TTL, proof)
+                self._write_identity_cache(cache_key, result, MISS_TTL, proof)
             return result
 
         def no_match(reason: str = "title_mismatch") -> dict[str, Any]:
@@ -1127,9 +1207,9 @@ class TmdbClient:
                 proof["ignoredWithoutArtwork"] = {"policyVersion": UNMATCHED_PASSTHROUGH_POLICY,
                                                    "fingerprint": fingerprint}
                 self.last_match_diagnostic["ignoredWithoutArtwork"] = True
-            self._write_identity_cache(key, result, MISS_TTL, proof)
+            self._write_identity_cache(cache_key, result, MISS_TTL, proof)
             if fingerprint:
-                self._write_identity_cache(self._passthrough_key(key, fingerprint), result, MISS_TTL, proof)
+                self._write_identity_cache(self._passthrough_key(cache_key, fingerprint), result, MISS_TTL, proof)
             return result
 
         if not (self.token or self.api_key):
@@ -1387,7 +1467,7 @@ class TmdbClient:
         result["rejectedIdentity"] = rejected
         self.stats["matches"] += 1
         self.last_match_diagnostic["reason"] = "matched_poster" if poster_assisted else "matched_alias" if alias_match else match_status
-        self._write_identity_cache(key, result, DETAIL_TTL, proof)
+        self._write_identity_cache(cache_key, result, DETAIL_TTL, proof)
         return result
 
     def trending(self, kind: str) -> dict[str, int]:
