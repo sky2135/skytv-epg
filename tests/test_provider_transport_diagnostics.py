@@ -286,7 +286,7 @@ class ProviderTransportDiagnosticsTests(unittest.TestCase):
         ) as actual, mock.patch.object(
             diagnostics, "redirect_probe", side_effect=requests.ConnectionError(private_error)
         ), redirect_stdout(output):
-            self.assertEqual(diagnostics.main(), 0)
+            self.assertEqual(diagnostics.main(["--servers", "server_1", "server_2"]), 0)
         report = json.loads(output.getvalue())
         self.assertEqual(report["inventory"], inventory_results)
         self.assertEqual(report["actualInventory"], actual_result)

@@ -20,7 +20,9 @@ import hashlib
 import html
 import io
 import json
+import math
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -31,6 +33,7 @@ import xml.parsers.expat as expat
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from itertools import chain
 from pathlib import Path
 from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
@@ -45,6 +48,7 @@ if __package__:
     from .epg_selection_spool import SpoolError, copy_and_open_verified_spool
     from .epg_programme_details import details_json, parse_details_json, xmltv_programme_details
     from . import provider_event_guide, provider_event_slots, provider_presentation
+    from . import private_panel_cache
 else:
     from channel_metadata_enrichment import ChannelRegistry, RegistryError, enrich_metadata
     from logo_enrichment import normalize_logo_url, logo_provenance, load_logo_verification
@@ -53,6 +57,7 @@ else:
     import provider_event_guide
     import provider_event_slots
     import provider_presentation
+    import private_panel_cache
 
 
 PIPELINE_VERSION = "1.0"
@@ -267,11 +272,16 @@ class BuildError(RuntimeError):
 class PanelSourceUnavailable(BuildError):
     """A transient native-panel outage that may use a truthful runtime guide."""
 
-    def __init__(self, server_id: str, last_result: str) -> None:
+    def __init__(
+        self, server_id: str, last_result: str, *, attempts: int = 3,
+        next_attempt_at: int | None = None,
+    ) -> None:
         self.server_id = clean_text(server_id, 40)
         self.last_result = clean_text(last_result, 80) or "request error"
+        self.attempts = attempts
+        self.next_attempt_at = next_attempt_at
         super().__init__(
-            f"{self.server_id} panel XMLTV download failed after 3 attempts "
+            f"{self.server_id} panel XMLTV download failed after {attempts} attempt(s) "
             f"(last result: {self.last_result})."
         )
 
@@ -3301,6 +3311,9 @@ PANEL_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 PANEL_TRANSIENT_HTTP_STATUSES = frozenset({408, 425, 429})
 PANEL_MAX_REDIRECTS = 5
 PANEL_REQUEST_TIMEOUT = (25, 300)
+PANEL_RETRY_DELAYS = (15.0, 45.0)
+PANEL_RETRY_JITTER_SECONDS = 3.0
+PANEL_MAX_RETRY_WAIT_SECONDS = 300
 PANEL_CREDENTIALLESS_REDIRECT_HOSTS = frozenset(
     {
         # Server 2's legacy panel host redirects XMLTV here.  The endpoint is
@@ -3413,8 +3426,42 @@ def close_panel_transport(transport: Any) -> None:
         pass
 
 
-def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[str, Any]]:
+def panel_retry_after_seconds(value: object, *, now: float) -> int | None:
+    """Parse only bounded delta-seconds or an HTTP date, without logging it."""
+
+    if not isinstance(value, str) or len(value) > 200:
+        return None
+    value = value.strip()
+    if re.fullmatch(r"[0-9]+", value):
+        return int(value)
+    try:
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            return None
+        return max(0, math.ceil(parsed.timestamp() - now))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def download_panel_xmltv(
+    server_id: str, destination: Path, *, maximum_attempts: int = 3,
+) -> tuple[Path, dict[str, Any]]:
+    if type(maximum_attempts) is not int or not 1 <= maximum_attempts <= 3:
+        raise BuildError("Panel attempt limit must be an integer from 1 to 3.")
     base_url, username, password = panel_credentials(server_id)
+    cache_value = os.environ.get("SKYTV_PANEL_CACHE_DIR", "").strip()
+    cache_dir = Path(cache_value) if cache_value else None
+    cache_credentials = (base_url, username, password)
+    if cache_dir is not None:
+        cooldown = private_panel_cache.load_cooldown(
+            server_id, cache_dir, credentials=cache_credentials,
+            now_epoch=int(time.time()),
+        )
+        if cooldown is not None:
+            raise PanelSourceUnavailable(
+                server_id, "provider cooldown", attempts=0,
+                next_attempt_at=cooldown,
+            )
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".part")
     session = requests.Session()
@@ -3433,13 +3480,16 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
     last_issue = "request error"
     last_failure_kind = "network"
     last_http_status: int | None = None
+    next_attempt_at: int | None = None
     try:
-        for attempt in range(1, 4):
+        for attempt in range(1, maximum_attempts + 1):
             temporary.unlink(missing_ok=True)
             response = None
             last_issue = "request error"
             last_failure_kind = "network"
             last_http_status = None
+            retry_after = None
+            next_attempt_at = None
             try:
                 request_url = endpoint
                 request_session = session
@@ -3501,6 +3551,21 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                     last_http_status = int(response.status_code)
                     last_issue = f"HTTP {last_http_status}"
                     last_failure_kind = "http"
+                    if last_http_status in {429, 503}:
+                        now = time.time()
+                        retry_after = panel_retry_after_seconds(
+                            response.headers.get("Retry-After"), now=now,
+                        )
+                        if retry_after is not None:
+                            next_attempt_at = math.ceil(now) + retry_after
+                    if not (
+                        500 <= last_http_status <= 599
+                        or last_http_status in PANEL_TRANSIENT_HTTP_STATUSES
+                    ):
+                        raise BuildError(
+                            f"{server_id} panel XMLTV download failed after "
+                            f"{attempt} attempt(s) (last result: {last_issue})."
+                        )
                     raise requests.RequestException()
                 total = 0
                 digest = hashlib.sha256()
@@ -3518,12 +3583,15 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                     output.flush()
                     os.fsync(output.fileno())
                 if total == 0:
-                    last_issue = "empty response"
-                    last_failure_kind = "invalid_payload"
-                    raise requests.RequestException()
+                    raise BuildError(
+                        f"{server_id} panel XMLTV download failed after "
+                        f"{attempt} attempt(s) (last result: empty response)."
+                    )
                 if panel_payload_is_non_xmltv(prefix):
                     raise BuildError(f"{server_id} panel returned a non-XML response.")
                 os.replace(temporary, destination)
+                if cache_dir is not None:
+                    private_panel_cache.clear_cooldown(server_id, cache_dir)
                 return destination, {
                     "sha256": digest.hexdigest(),
                     "bytes": total,
@@ -3540,31 +3608,34 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
                 last_issue = "timeout"
                 last_failure_kind = "network"
                 temporary.unlink(missing_ok=True)
-                if attempt == 3:
-                    break
-                time.sleep(2 ** (attempt - 1))
             except requests.ConnectionError:
                 last_issue = "connection error"
                 last_failure_kind = "network"
                 temporary.unlink(missing_ok=True)
-                if attempt == 3:
-                    break
-                time.sleep(2 ** (attempt - 1))
             except requests.RequestException:
                 temporary.unlink(missing_ok=True)
-                if attempt == 3:
-                    break
-                time.sleep(2 ** (attempt - 1))
             except OSError:
-                last_issue = "local I/O error"
-                last_failure_kind = "local_io"
                 temporary.unlink(missing_ok=True)
-                if attempt == 3:
-                    break
-                time.sleep(2 ** (attempt - 1))
+                raise BuildError(
+                    f"{server_id} panel XMLTV download failed "
+                    "(last result: local I/O error)."
+                ) from None
             finally:
                 if response is not None:
                     close_panel_transport(response)
+            if attempt == maximum_attempts:
+                break
+            # Close the failed response before pausing. A long provider cooldown
+            # is returned to the caller instead of sleeping for hours or making
+            # another request before its advertised Retry-After deadline.
+            if retry_after is not None and retry_after > PANEL_MAX_RETRY_WAIT_SECONDS:
+                break
+            delay = PANEL_RETRY_DELAYS[attempt - 1] + random.uniform(
+                0.0, PANEL_RETRY_JITTER_SECONDS,
+            )
+            if retry_after is not None:
+                delay = max(delay, float(retry_after))
+            time.sleep(delay)
     finally:
         if redirect_session is not None:
             close_panel_transport(redirect_session)
@@ -3572,20 +3643,28 @@ def download_panel_xmltv(server_id: str, destination: Path) -> tuple[Path, dict[
     transient_http = (
         last_http_status is not None
         and (
-            last_http_status >= 500
+            500 <= last_http_status <= 599
             or last_http_status in PANEL_TRANSIENT_HTTP_STATUSES
         )
     )
     if last_failure_kind == "network" or transient_http:
-        raise PanelSourceUnavailable(server_id, last_issue)
+        if cache_dir is not None and next_attempt_at is not None:
+            private_panel_cache.save_cooldown(
+                server_id, cache_dir, credentials=cache_credentials,
+                next_attempt_at=next_attempt_at,
+            )
+        raise PanelSourceUnavailable(
+            server_id, last_issue, attempts=attempt,
+            next_attempt_at=next_attempt_at,
+        )
     raise BuildError(
-        f"{server_id} panel XMLTV download failed after 3 attempts "
+        f"{server_id} panel XMLTV download failed after {attempt} attempt(s) "
         f"(last result: {last_issue})."
     )
 
 
 def activate_native_panel_runtime_fallback(
-    rows: Sequence[MappingRow], server_id: str
+    rows: Sequence[MappingRow], server_id: str, *, epg_ids: set[str] | None = None
 ) -> int:
     """Use per-stream synthetic schedules without changing Sheet decisions."""
 
@@ -3597,10 +3676,160 @@ def activate_native_panel_runtime_fallback(
         if row.server_id == server_id
         and row.runtime_eligible
         and row.effective_source == "panel"
+        and (epg_ids is None or row.epg_id in epg_ids)
     ]
     for row in selected:
         row.runtime_synthetic_reason = "nativePanelUnavailable"
     return len(selected)
+
+
+def usable_cached_panel_ids(
+    connection: sqlite3.Connection, source_key: str, *, now_epoch: int
+) -> set[str]:
+    """Reuse only exact source identities with programmes valid near now.
+
+    A future endpoint elsewhere in the guide cannot qualify an expired channel.
+    Original programme times are retained; nothing is shifted or extended.
+    """
+    return {
+        row[0]
+        for row in connection.execute(
+            "SELECT p.channel_key, p.details_json FROM programmes p JOIN channels c "
+            "ON c.source_key=p.source_key AND c.channel_key=p.channel_key "
+            "WHERE p.source_key=? AND c.source_channel_id=c.channel_key "
+            "AND p.start_epoch<=? AND p.stop_epoch>? AND p.title<>'' "
+            "AND p.stop_epoch-p.start_epoch BETWEEN 1 AND 86400",
+            (source_key, now_epoch + 6 * 3600, now_epoch),
+        )
+        if not parse_details_json(row[1]).get("stopInferred", False)
+    }
+
+
+def panel_cache_directory(work_dir: Path, public_dir: Path) -> Path | None:
+    value = os.environ.get("SKYTV_PANEL_CACHE_DIR", "").strip()
+    if not value:
+        return None
+    path = lexical_absolute_path(Path(value))
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise BuildError("Private panel cache path cannot contain symlinks.")
+    resolved = path.resolve()
+    for output in (work_dir, public_dir, public_dir.with_name(public_dir.name + ".staging")):
+        if resolved == output or resolved.is_relative_to(output) or output.is_relative_to(resolved):
+            raise BuildError("Private panel cache must be separate from build outputs.")
+    return resolved
+
+
+def ingest_native_panel_with_cache(
+    *, connection: sqlite3.Connection, rows: Sequence[MappingRow],
+    server_id: str, wanted_ids: set[str], destination: Path,
+    window_start: int, now_epoch: int, maximum_expanded_bytes: int,
+    cache_dir: Path | None, panel_file: Path | None = None,
+) -> tuple[SourceStats | None, dict[str, Any]]:
+    """Fresh source first; bounded, exact, still-valid private cache on outage."""
+    source_key = f"panel:{server_id}"
+    credentials = panel_credentials(server_id) if cache_dir and panel_file is None else None
+    unavailable = None
+    cached = False
+    if panel_file is not None:
+        path = panel_file
+        details = {"sha256": sha256_file(path), "bytes": path.stat().st_size}
+    else:
+        try:
+            cooldown = private_panel_cache.load_cooldown(
+                server_id, cache_dir, credentials=credentials, now_epoch=now_epoch
+            ) if cache_dir else None
+            if cooldown is not None:
+                raise PanelSourceUnavailable(
+                    server_id, "provider cooldown", attempts=0, next_attempt_at=cooldown
+                )
+            path, details = download_panel_xmltv(server_id, destination)
+        except PanelSourceUnavailable as exc:
+            unavailable = exc
+            if cache_dir and exc.next_attempt_at is not None:
+                private_panel_cache.save_cooldown(
+                    server_id, cache_dir, credentials=credentials,
+                    next_attempt_at=exc.next_attempt_at,
+                )
+            loaded = private_panel_cache.load_source(
+                server_id, cache_dir, credentials=credentials, now_epoch=now_epoch,
+                snapshot_path=destination.with_name(server_id + "_saved.xmltv"),
+            ) if cache_dir else None
+            if loaded is not None:
+                path, details = loaded
+                cached = True
+            else:
+                fallback_rows = activate_native_panel_runtime_fallback(rows, server_id)
+                provenance = {
+                    "inputMode": "builder-download", "status": "unavailable",
+                    "lastResult": exc.last_result,
+                    "fallback": "CHANNEL_DERIVED_LOCAL_SYNTHETIC",
+                    "fallbackStreams": fallback_rows,
+                }
+                if exc.next_attempt_at is not None:
+                    provenance["nextAttemptAt"] = exc.next_attempt_at
+                print(
+                    f"WARNING: {server_id} native panel is temporarily unavailable "
+                    f"({exc.last_result}); using truthful channel-derived synthetic "
+                    f"guides for {fallback_rows:,} runtime streams. "
+                    "The private Sheet mappings remain unchanged.", flush=True,
+                )
+                return None, provenance
+    print(f"Parsing native panel XMLTV for {server_id}.", flush=True)
+    try:
+        stats = ingest_xmltv_source(
+            connection=connection, path=path, source_key=source_key,
+            wanted_ids=wanted_ids, window_start=window_start,
+            source_base_url="", allow_source_icons=False,
+            allow_inert_xmltv_doctype=True,
+            maximum_expanded_bytes=maximum_expanded_bytes,
+        )
+    except BuildError:
+        if not cached:
+            raise
+        # The parser commits bounded batches. Remove this source's partial rows
+        # before falling back; never retain a partially parsed saved document.
+        for table in ("programmes", "channels", "source_channel_ids"):
+            connection.execute(f"DELETE FROM {table} WHERE source_key=?", (source_key,))
+        fallback_rows = activate_native_panel_runtime_fallback(rows, server_id)
+        print(f"WARNING: {server_id} saved native guide failed validation; using placeholders.", flush=True)
+        return None, {
+            "inputMode": "private-cache", "status": "unavailable",
+            "lastResult": unavailable.last_result, "cacheRejected": True,
+            "fallback": "CHANNEL_DERIVED_LOCAL_SYNTHETIC", "fallbackStreams": fallback_rows,
+        }
+    usable = usable_cached_panel_ids(connection, source_key, now_epoch=now_epoch)
+    if not cached:
+        if cache_dir and panel_file is None and usable:
+            private_panel_cache.save_source(
+                server_id, path, cache_dir, credentials=credentials, captured_at=now_epoch
+            )
+        return stats, {**details, **stats.public_dict()}
+    rejected = wanted_ids - usable
+    # Names and case-only spellings cannot establish a cached identity. Each
+    # source row must bind to the exact configured native ID and a valid time.
+    for channel_key in rejected:
+        for table in ("programmes", "channels"):
+            connection.execute(
+                f"DELETE FROM {table} WHERE source_key=? AND channel_key=?",
+                (source_key, channel_key),
+            )
+    fallback_rows = activate_native_panel_runtime_fallback(rows, server_id, epg_ids=rejected)
+    stats.selected_channels = len(usable)
+    stats.selected_programmes = connection.execute(
+        "SELECT COUNT(*) FROM programmes WHERE source_key=?", (source_key,)
+    ).fetchone()[0]
+    print(
+        f"WARNING: {server_id} native source unavailable; reusing {len(usable):,} exact "
+        f"saved schedules still valid near now; {fallback_rows:,} streams require placeholders.",
+        flush=True,
+    )
+    return stats, {
+        **details, **stats.public_dict(), "inputMode": "private-cache",
+        "status": "cache_reused", "lastResult": unavailable.last_result,
+        "cacheReused": True, "cacheUsableChannelIds": len(usable),
+        "fallback": "VALIDATED_PRIVATE_CACHE_THEN_CHANNEL_DERIVED_LOCAL_SYNTHETIC",
+        "fallbackStreams": fallback_rows,
+    }
 
 
 @dataclass(frozen=True)
@@ -5961,6 +6190,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     work_dir = lexical_absolute_path(args.work_dir).resolve()
     public_dir = lexical_absolute_path(args.public_dir).resolve()
     staging_public = public_dir.with_name(public_dir.name + ".staging")
+    native_cache_dir = panel_cache_directory(work_dir, public_dir)
     safe_reset_directory(work_dir, repository_root=repository_root)
     safe_reset_directory(staging_public, repository_root=repository_root)
     (staging_public / "epg").mkdir(parents=True, exist_ok=True)
@@ -6276,61 +6506,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
             if not wanted_panel:
                 continue
-            if server_id in panel_files:
-                panel_path = panel_files[server_id]
-                panel_details = {
-                    "sha256": sha256_file(panel_path),
-                    "bytes": panel_path.stat().st_size,
-                }
-            else:
-                try:
-                    panel_path, panel_details = download_panel_xmltv(
-                        server_id,
-                        work_dir / "downloads" / f"{server_id}_panel.xmltv",
-                    )
-                except PanelSourceUnavailable as exc:
-                    fallback_rows = activate_native_panel_runtime_fallback(
-                        rows, server_id
-                    )
-                    panel_key = f"panel:{server_id}"
-                    source_provenance[panel_key] = {
-                        "inputMode": "builder-download",
-                        "status": "unavailable",
-                        "lastResult": exc.last_result,
-                        "fallback": "CHANNEL_DERIVED_LOCAL_SYNTHETIC",
-                        "fallbackStreams": fallback_rows,
-                    }
-                    print(
-                        f"WARNING: {server_id} native panel is temporarily "
-                        f"unavailable ({exc.last_result}); using truthful "
-                        "channel-derived synthetic guides for "
-                        f"{fallback_rows:,} runtime streams. The private "
-                        "Sheet mappings remain unchanged.",
-                        flush=True,
-                    )
-                    continue
             panel_key = f"panel:{server_id}"
-            print(f"Parsing native panel XMLTV for {server_id}.", flush=True)
-            panel_stats = ingest_xmltv_source(
-                connection=connection,
-                path=panel_path,
-                source_key=panel_key,
+            panel_stats, panel_provenance = ingest_native_panel_with_cache(
+                connection=connection, rows=rows, server_id=server_id,
                 wanted_ids=wanted_panel,
-                window_start=xml_window_start,
-                # Mapping/config URLs are preferred. Relative panel icons are
-                # intentionally ignored, and absolute source icons are disabled,
-                # so a private panel origin or query token is never copied into
-                # a public manifest or output URL.
-                source_base_url="",
-                allow_source_icons=False,
-                allow_inert_xmltv_doctype=True,
+                destination=work_dir / "downloads" / f"{server_id}_panel.xmltv",
+                window_start=xml_window_start, now_epoch=generated_at,
                 maximum_expanded_bytes=args.max_expanded_bytes,
+                cache_dir=native_cache_dir, panel_file=panel_files.get(server_id),
             )
-            source_stats[panel_key] = panel_stats
-            source_provenance[panel_key] = {
-                **panel_details,
-                **panel_stats.public_dict(),
-            }
+            if panel_stats is not None:
+                source_stats[panel_key] = panel_stats
+            source_provenance[panel_key] = panel_provenance
 
         synthetic_stats = insert_synthetic_guides(
             connection=connection,
@@ -6491,7 +6678,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         unavailable_panel_servers = sorted(
             key.split(":", 1)[1] for key, value in source_provenance.items()
-            if key.startswith("panel:") and value.get("status") == "unavailable"
+            if key.startswith("panel:") and value.get("status") in {"unavailable", "cache_reused"}
         )
         degraded = bool(
             inventory_availability["unavailableServers"] or unavailable_panel_servers
