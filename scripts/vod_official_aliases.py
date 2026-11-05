@@ -88,7 +88,10 @@ def translation_aliases(
     if not isinstance(resource, Mapping):
         return OfficialAliasEvidence(False, display_key=display_key)
     identifier = _identifier(details.get("id"))
-    if identifier is None or _identifier(resource.get("id")) != identifier:
+    # Appended resources omit the redundant ID in real TMDB responses. Their
+    # identity is inherited from the validated outer detail response. An
+    # explicit nested ID must still be valid and agree with that outer ID.
+    if identifier is None or ("id" in resource and _identifier(resource["id"]) != identifier):
         return OfficialAliasEvidence(False, display_key=display_key)
     rows = resource.get("translations")
     if not isinstance(rows, list) or len(rows) > MAX_TRANSLATIONS:

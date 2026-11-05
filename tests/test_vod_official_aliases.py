@@ -52,13 +52,43 @@ class OfficialAliasTests(unittest.TestCase):
         self.assertFalse(aliases.translation_aliases(details(["Other"]), "movie", "Example").matched)
 
     def test_resource_must_belong_to_the_requested_detail_record(self):
-        for identifier in (124, None, True, "https://private.example"):
-            value = details(["Example"])
-            value["translations"]["id"] = identifier
-            with self.subTest(identifier=identifier):
-                result = aliases.translation_aliases(value, "movie", "Example")
-                self.assertFalse(result.complete)
-                self.assertFalse(result.matched)
+        for kind in ("movie", "series"):
+            for identifier in (124, None, True, False, 0, "", "0123", {}, "https://private.example"):
+                value = details(["Example"], kind=kind)
+                value["translations"]["id"] = identifier
+                with self.subTest(kind=kind, identifier=identifier):
+                    result = aliases.translation_aliases(value, kind, "Example")
+                    self.assertFalse(result.complete)
+                    self.assertFalse(result.matched)
+
+    def test_appended_resource_can_inherit_valid_outer_identity(self):
+        for kind, title in (("movie", "Nouveau Monde"), ("series", "حريم السلطان")):
+            value = details([title], kind=kind)
+            del value["translations"]["id"]
+            with self.subTest(kind=kind):
+                result = aliases.translation_aliases(value, kind, title)
+                self.assertTrue(result.complete)
+                self.assertTrue(result.matched)
+                self.assertEqual(result.aliases, (title,))
+
+    def test_absent_nested_id_cannot_bypass_outer_id_or_resource_validation(self):
+        for kind in ("movie", "series"):
+            for identifier in (None, True, False, 0, "", "0123", {}, "https://private.example"):
+                value = details(["Example"], kind=kind)
+                del value["translations"]["id"]
+                value["id"] = identifier
+                with self.subTest(kind=kind, identifier=identifier):
+                    result = aliases.translation_aliases(value, kind, "Example")
+                    self.assertFalse(result.complete)
+                    self.assertFalse(result.matched)
+            for rows in (None, {}, "invalid", [{"data": None}],
+                         [{"data": {"title" if kind == "movie" else "name": 123}}],
+                         [{"data": {}}] * (aliases.MAX_TRANSLATIONS + 1)):
+                value = {"id": 123, "translations": {"translations": rows}}
+                with self.subTest(kind=kind, rows_type=type(rows).__name__):
+                    result = aliases.translation_aliases(value, kind, "Example")
+                    self.assertFalse(result.complete)
+                    self.assertFalse(result.matched)
 
     def test_malformed_or_oversized_tail_cannot_hide_competing_alias_evidence(self):
         for tail in (None, {}, {"data": None}, {"data": {"title": 123}},

@@ -15,7 +15,8 @@ def translated_details(identifier=101, *, title="Example Film", translated="Film
     details = movie_details(identifier)
     details.update(title=title, release_date=f"{year}-04-03" if year else None,
                    images={"posters": [{"file_path": "/abc123.jpg"}]},
-                   translations={"id": identifier, "translations": [{"data": {"title": translated}}]})
+                   # Real append_to_response resources omit the nested ID.
+                   translations={"translations": [{"data": {"title": translated}}]})
     return details
 
 
@@ -152,7 +153,7 @@ class SafeMatchingRuleTests(unittest.TestCase):
     def test_arabic_series_classifier_needs_raw_context_and_official_poster(self):
         details = {"id": 34899, "name": "Magnificent Century", "original_name": "Muhteşem Yüzyıl",
                    "first_air_date": "2011-01-05", "poster_path": "/abc123.jpg", "images": {"posters": []},
-                   "translations": {"id": 34899, "translations": [{"data": {"name": "حريم السلطان"}}]}}
+                   "translations": {"translations": [{"data": {"name": "حريم السلطان"}}]}}
         source = provider_item("AR - مسلسل حريم السلطان", tmdbId="34899")
         client = self.client(FakeResponse(details))
         self.assertEqual(client.enrich(source, "series")["matchStatus"], "matched_poster")

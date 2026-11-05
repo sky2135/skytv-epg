@@ -56,6 +56,10 @@ YEAR_PUNCTUATION = re.compile(
 )
 SPACED_PREFIX = re.compile(r"^([A-Z]{2,3}|4K)\s+[-|]\s+")
 COMPACT_PREFIX = re.compile(r"^(DE|PK|IT|FR)-\s*(?=\S)")
+YEAR_ONLY = re.compile(
+    r"(?:(?:19|20)[0-9]{2}|\((?:19|20)[0-9]{2}\)|\[(?:19|20)[0-9]{2}\])"
+    r"[.,:;!?。]*\Z"
+)
 
 
 def _year_context(title: str, source_year: str | None) -> bool:
@@ -105,12 +109,43 @@ def _tail_edit(title: str, source_year: str | None) -> tuple[str, bool] | None:
         return None
     candidate = title[:match.start()].rstrip()
     # Pipe before a wrapped suffix is part of this observed provider field.
+    pipe = pipe or candidate.endswith("|")
     candidate = re.sub(r"\s*\|\s*\Z", "", candidate).rstrip()
     if not candidate or not any(character.isalnum() for character in candidate):
         return None
     if (descriptor == "new" or pipe) and not _year_context(candidate, source_year):
         return None
     return candidate, descriptor == "new" or pipe
+
+
+def _only_year_and_terminal_descriptors(title: str) -> bool:
+    """Protect a possible short title when a prefix would erase all title text.
+
+    This is a structural probe only, never a source of identity or year facts.
+    Unlike normal tail cleanup it can inspect a numeric-only remainder, since
+    finding only one year is exactly the reason not to remove the prefix.
+    Unknown labels, title words and a second number stop the protection.
+    """
+    current = title.strip()
+    for count in range(MAX_DECORATIONS + 1):
+        if YEAR_ONLY.fullmatch(current):
+            return True
+        if count == MAX_DECORATIONS:
+            return False
+        match = TAIL_WRAPPER.search(current)
+        if match:
+            label = next(value for value in match.groups() if value is not None)
+        else:
+            match = TAIL_PIPE.search(current)
+            if match is None:
+                return False
+            label = match.group(1)
+        if _descriptor(label) is None:
+            return False
+        current = re.sub(r"\s*\|\s*\Z", "", current[:match.start()].rstrip()).rstrip()
+        if not current:
+            return False
+    return False
 
 
 def _preprocess(title: str, source_year: str | None, kind: str | None) -> tuple[str, bool]:
@@ -134,13 +169,15 @@ def _preprocess(title: str, source_year: str | None, kind: str | None) -> tuple[
         prefix = SPACED_PREFIX.match(current)
         if prefix and prefix.group(1) in LEGACY_PREFIXES | ADDITIONAL_PREFIXES | QUALITY_PREFIXES:
             candidate = current[prefix.end():].strip()
-            if candidate and any(character.isalnum() for character in candidate):
+            if (candidate and any(character.isalnum() for character in candidate)
+                    and not _only_year_and_terminal_descriptors(candidate)):
                 current, new_rule, prefix_changed = candidate, True, True
                 continue
         prefix = COMPACT_PREFIX.match(current)
         if prefix and _year_context(current, source_year):
             candidate = current[prefix.end():].strip()
-            if candidate and any(character.isalnum() for character in candidate):
+            if (candidate and any(character.isalnum() for character in candidate)
+                    and not _only_year_and_terminal_descriptors(candidate)):
                 current, new_rule, prefix_changed = candidate, True, True
                 continue
         punctuation = YEAR_PUNCTUATION.fullmatch(current)

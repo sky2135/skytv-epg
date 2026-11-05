@@ -82,6 +82,47 @@ class ProviderDecorationDiscoveryTests(unittest.TestCase):
             self.assertEqual(clean(title), title)
             self.assertFalse(needs_proof(title))
 
+    def test_short_titles_are_not_erased_when_only_year_and_known_fields_remain(self):
+        cases = {
+            "PK - 2014 | Hindi": "PK - 2014",
+            "PK - (2014) | [Hindi]": "PK - (2014)",
+            "PK - [2014] (French)": "PK - [2014]",
+            "PK - (2014). | French": "PK - (2014)",
+            "EX - 2014 | Hindi": "EX - 2014",
+            "NF - (2025) (Turkish)": "NF - (2025)",
+            "PK-(2014) | French": "PK-(2014)",
+        }
+        for original, expected in cases.items():
+            for year in (None, "2014"):
+                with self.subTest(original=original, source_year=year):
+                    self.assertEqual(clean(original, source_year=year), expected)
+                    self.assertFalse(needs_proof(original, source_year=year))
+        # Existing-only wrapped fields remain owned by the original parser.
+        for original in ("PK - 2014", "PK - (2014)[Hindi]", "PK - [2014] (HD)"):
+            self.assertEqual(clean(original), original)
+            self.assertFalse(needs_proof(original))
+        # The guard does not erase the title even when normal cleanup lacks
+        # year context before more than one pipe field.
+        multiple = "PK - 2014 | Multi Audio | Hindi"
+        self.assertEqual(clean(multiple), multiple)
+        self.assertFalse(needs_proof(multiple))
+        self.assertEqual(clean(multiple, source_year="2014"), "PK - 2014")
+
+    def test_year_only_prefix_guard_does_not_consume_numeric_titles_or_unknown_fields(self):
+        for original, expected in (
+            ("EX - 1917 (2019)", "1917 (2019)"),
+            ("EX - 1984 (1984) (French)", "1984 (1984)"),
+            ("EX - 2001: A Space Odyssey (1968)", "2001: A Space Odyssey (1968)"),
+            ("PK - 2014 (Unknown)", "2014 (Unknown)"),
+            ("PK - 2014 | Unknown | Hindi", "2014 | Unknown | Hindi"),
+            ("PK - 2014 (Part II)", "2014 (Part II)"),
+        ):
+            with self.subTest(original=original):
+                self.assertEqual(clean(original), expected)
+                self.assertTrue(needs_proof(original))
+        for original in ("EX-1984 (1984)", "EX-Husbands (2024)"):
+            self.assertEqual(clean(original), original)
+
     def test_original_numeric_titles_sequels_and_language_words_are_preserved(self):
         titles = ("1947", "1917", "1984", "2001", "2049", "Blade Runner 2049", "Class of 1984",
                   "English Vinglish", "Tutt Paini English Ne", "Movie Punjabi", "English", "4K",
