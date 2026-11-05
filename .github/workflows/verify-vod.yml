@@ -36,6 +36,15 @@ on:
         description: Maximum source records considered in one durable batch
         default: '25000'
         type: string
+      baseline-state-artifact-id:
+        description: Optional production enrichment checkpoint to copy into a fresh isolated rule evaluation
+        default: ''
+        type: string
+      evaluation-scope:
+        description: Balanced smoke checks or all frozen entries when a rule baseline is supplied
+        default: smoke
+        type: choice
+        options: [smoke, full]
 
 permissions:
   contents: read
@@ -59,6 +68,8 @@ env:
   WORKERS: ${{ inputs.workers }}
   BATCH_SECONDS: ${{ inputs.batch-seconds }}
   BATCH_RECORDS: ${{ inputs.batch-records }}
+  BASELINE_STATE_ARTIFACT_ID: ${{ inputs.baseline-state-artifact-id }}
+  EVALUATION_SCOPE: ${{ inputs.evaluation-scope || 'smoke' }}
 
 jobs:
   verify:
@@ -87,19 +98,29 @@ jobs:
             --artifact-id "$RESUME_ARTIFACT_ID" --test-id "$TEST_ID" \
             --destination .build/verification-state
       - name: Read existing production cache for the initial isolated copy
-        if: inputs.resume-artifact-id == ''
+        if: inputs.resume-artifact-id == '' && inputs.baseline-state-artifact-id == ''
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: .build/vod-cache
           key: ${{ inputs.seed-cache-key }}
           fail-on-cache-miss: true
       - name: Restore the frozen validated source component
-        if: inputs.resume-artifact-id == ''
+        if: inputs.resume-artifact-id == '' && inputs.baseline-state-artifact-id == ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python scripts/vod_verification_artifacts.py restore-component \
             --artifact-id "$SOURCE_ARTIFACT_ID" --destination .build/verification-component
+      - name: Copy a sealed production baseline into a fresh isolated rule evaluation
+        if: inputs.resume-artifact-id == '' && inputs.baseline-state-artifact-id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/vod_rule_evaluation.py prepare \
+            --baseline-state-artifact-id "$BASELINE_STATE_ARTIFACT_ID" \
+            --source-artifact-id "$SOURCE_ARTIFACT_ID" --test-id "$TEST_ID" \
+            --scope "$EVALUATION_SCOPE" --component-dir .build/verification-component \
+            --state-dir .build/verification-state
       - name: Run the next rate-limited batch
         id: batch
         env:
@@ -108,14 +129,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          command=(python -u scripts/verify_vod_catalog.py
-            --state-dir .build/verification-state --test-id "$TEST_ID"
-            --source-artifact-id "$SOURCE_ARTIFACT_ID" --seed-cache-key "$SEED_CACHE_KEY"
-            --rate "$RATE" --workers "$WORKERS"
-            --batch-seconds "$BATCH_SECONDS" --batch-records "$BATCH_RECORDS")
-          if [[ -z "$RESUME_ARTIFACT_ID" ]]; then
-            command+=(--component-dir .build/verification-component --seed-cache .build/vod-cache)
+          if [[ -n "$BASELINE_STATE_ARTIFACT_ID" ]]; then
+            command=(python -u scripts/vod_rule_evaluation.py run
+              --state-dir .build/verification-state --test-id "$TEST_ID"
+              --source-artifact-id "$SOURCE_ARTIFACT_ID"
+              --baseline-state-artifact-id "$BASELINE_STATE_ARTIFACT_ID"
+              --scope "$EVALUATION_SCOPE")
+            if [[ -z "$RESUME_ARTIFACT_ID" ]]; then
+              command+=(--component-dir .build/verification-component)
+            fi
+          else
+            command=(python -u scripts/verify_vod_catalog.py
+              --state-dir .build/verification-state --test-id "$TEST_ID"
+              --source-artifact-id "$SOURCE_ARTIFACT_ID" --seed-cache-key "$SEED_CACHE_KEY")
+            if [[ -z "$RESUME_ARTIFACT_ID" ]]; then
+              command+=(--component-dir .build/verification-component --seed-cache .build/vod-cache)
+            fi
           fi
+          command+=(--rate "$RATE" --workers "$WORKERS"
+            --batch-seconds "$BATCH_SECONDS" --batch-records "$BATCH_RECORDS")
           timeout --signal=TERM --kill-after=30s 30m "${command[@]}"
       - name: Seal the durable checkpoint
         run: |

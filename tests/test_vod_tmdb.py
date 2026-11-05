@@ -113,7 +113,7 @@ class TmdbEnrichmentTests(unittest.TestCase):
         self.assertEqual(item["trailerUrl"], "https://www.youtube.com/watch?v=abcdefghijk")
         url, options = session.calls[0]
         self.assertEqual(url, "https://api.themoviedb.org/3/movie/101")
-        self.assertEqual(options["params"], {"append_to_response": "credits,videos,alternative_titles"})
+        self.assertEqual(options["params"], {"append_to_response": "credits,videos,alternative_titles,translations"})
         self.assertEqual(options["headers"]["Authorization"], "Bearer read-token-secret")
         self.assertFalse(options["allow_redirects"])
         self.assertTrue(options["stream"])

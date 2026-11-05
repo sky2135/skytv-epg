@@ -38,7 +38,8 @@ def code_identity():
     names = ('enrich_vod_catalog.py', 'vod_enrichment_queue.py', 'vod_tmdb.py',
              'vod_poster_index.py', 'vod_reviewed_corrections.py', 'vod_provider_evidence.py',
              'build_skytvplayer_catalog.py', 'build_vod_catalogs.py', 'vod_verification_input.py',
-             'vod_verification_rate_limit.py', 'verify_vod_catalog.py', 'vod_verification_checkpoint.py')
+             'vod_verification_rate_limit.py', 'verify_vod_catalog.py', 'vod_verification_checkpoint.py',
+             'vod_title_cleanup.py', 'vod_official_aliases.py')
     return hashlib.sha256(canonical({name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in names})).hexdigest()
 
 

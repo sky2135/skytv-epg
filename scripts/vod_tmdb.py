@@ -22,6 +22,8 @@ import requests
 
 from vod_reviewed_corrections import correction_for
 from vod_poster_index import POSTER_POLICY, MAX_IMAGES, IMAGE_PATH as POSTER_PATH, official_paths, poster_identity, shared_index, seed_collision_file
+from vod_official_aliases import exact_display_key, translation_aliases
+from vod_title_cleanup import preprocess_provider_decorations, provider_cleanup_requires_corroboration
 
 
 API_ROOT = "https://api.themoviedb.org/3"
@@ -36,7 +38,7 @@ IMAGE_PATH = re.compile(r"/[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|webp)\Z", re.I)
 YOUTUBE_KEY = re.compile(r"[A-Za-z0-9_-]{11}\Z")
 STATUSES = {"matched_id", "matched_search", "matched_poster", "no_match", "unavailable"}
 IDENTITY_POLICY = 2
-MATCH_STRATEGY = 5
+MATCH_STRATEGY = 6
 UNDATED_POSTER_POLICY = 1
 UNMATCHED_PASSTHROUGH_POLICY = 1
 PASSTHROUGH_REASONS = frozenset({"missing_identity", "no_search_results", "title_mismatch",
@@ -107,15 +109,17 @@ def _normalized_title(value: object) -> str:
     return " ".join("".join(c if c.isalnum() else " " for c in text if not unicodedata.combining(c)).split())
 
 
-def _title_and_year(item: Mapping[str, Any]) -> tuple[str, str | None]:
+def _title_and_year(item: Mapping[str, Any], *, cleanup: bool = False, kind: str | None = None) -> tuple[str, str | None]:
     title = _text(item.get("title") or item.get("name")) or ""
-    title = PROVIDER_PREFIX.sub("", title)
     year = None
     for value in (item.get("year"), item.get("releaseDate"), item.get("release_date"), item.get("first_air_date")):
         match = re.match(r"^((?:19|20)\d{2})(?:$|-\d{2})", str(value or ""))
         if match:
             year = match.group(1)
             break
+    if cleanup:
+        title = preprocess_provider_decorations(title, source_year=year, kind=kind)
+    title = PROVIDER_PREFIX.sub("", title)
     displayed_year = False
     # Each iteration removes a complete known terminal segment. A hard bound
     # keeps malformed/repeated provider decoration from becoming a parser loop.
@@ -343,6 +347,105 @@ def _detail_identity(details: Mapping[str, Any], kind: str) -> dict[str, Any]:
             "year": release[:4] if release else None,
             "originalTitle": _normalized_title(details.get("original_title" if kind == "movie" else "original_name")),
             "tmdbId": _identifier(details.get("id"))}
+
+
+def _condense_identity_names(proof: Mapping[str, Any], *official_aliases: str) -> list[str]:
+    mandatory = []
+    for value in (proof.get("originalTitle"), *official_aliases):
+        normalized = _normalized_title(value)
+        if normalized and normalized not in mandatory:
+            mandatory.append(normalized)
+    for value in proof.get("names", []):
+        if value not in mandatory:
+            mandatory.append(value)
+    return mandatory[:102]
+
+
+def _detail_identity_for_query(details: Mapping[str, Any], kind: str, title: str):
+    """Add only an exact official translated name needed by this query."""
+    proof = _detail_identity(details, kind)
+    translated = translation_aliases(details, kind, title)
+    if _normalized_title(title) not in proof["names"] and translated.matched:
+        proof["names"] = _condense_identity_names(proof, translated.aliases[0])
+        proof["translationDisplayKey"] = translated.display_key
+    return proof, translated
+
+
+def _valid_year(value: object) -> bool:
+    return value is None or isinstance(value, str) and bool(re.fullmatch(r"(?:19|20)[0-9]{2}", value))
+
+
+def _identity_binding_valid(proof: Mapping[str, Any]) -> bool:
+    """Validate typed display evidence; current-input binding is separate."""
+    if not isinstance(proof, Mapping):
+        return False
+    provider = proof.get("providerTitle")
+    names = proof.get("names")
+    if (provider is not None or proof.get("translationDisplayKey") is not None) and not isinstance(names, list):
+        return False
+    if provider is not None:
+        if (not isinstance(provider, dict)
+                or set(provider) != {"policyVersion", "sourceTitleKey", "sourceYear", "matchTitleKey", "matchYear"}
+                or type(provider.get("policyVersion")) is not int or provider["policyVersion"] != 1
+                or not _valid_year(provider.get("sourceYear")) or not _valid_year(provider.get("matchYear"))):
+            return False
+        for field in ("sourceTitleKey", "matchTitleKey"):
+            value = provider.get(field)
+            if not isinstance(value, str) or not value or exact_display_key(value) != value:
+                return False
+        if _normalized_title(provider["matchTitleKey"]) not in proof.get("names", []):
+            return False
+    translated = proof.get("translationDisplayKey")
+    if translated is not None:
+        if (not isinstance(translated, str) or not translated or exact_display_key(translated) != translated
+                or _normalized_title(translated) not in proof.get("names", [])
+                or provider is not None and translated != provider["matchTitleKey"]):
+            return False
+    return True
+
+
+def _effective_title_and_year(item, kind, source_title, source_year):
+    # Reviewed source-specific identities retain their explicit existing query.
+    return (source_title, source_year) if _reviewed(item, kind) else _title_and_year(item, cleanup=True, kind=kind)
+
+
+def _provider_title_binding(source_title, source_year, title, year, *, force=False):
+    source_key, matched_key = exact_display_key(source_title), exact_display_key(title)
+    if not source_key or not matched_key:
+        return None
+    if force or source_key != matched_key or source_year != year:
+        return {"policyVersion": 1, "sourceTitleKey": source_key, "sourceYear": source_year,
+                "matchTitleKey": matched_key, "matchYear": year}
+    return None
+
+
+def _current_query_identity(proof, item, kind, source_title, source_year):
+    if not _identity_binding_valid(proof):
+        return None
+    title, year = source_title, source_year
+    binding = proof.get("providerTitle")
+    if binding is not None:
+        if (binding["sourceTitleKey"] != exact_display_key(source_title)
+                or binding["sourceYear"] != source_year):
+            return None
+        title, year = _effective_title_and_year(item, kind, source_title, source_year)
+        if binding["matchTitleKey"] != exact_display_key(title) or binding["matchYear"] != year:
+            return None
+    if proof.get("translationDisplayKey") is not None and proof["translationDisplayKey"] != exact_display_key(title):
+        return None
+    return title, year
+
+
+def _strict_official_title(details, kind, title):
+    field, original = ("title", "original_title") if kind == "movie" else ("name", "original_name")
+    key = exact_display_key(title)
+    names = [details.get(field), details.get(original)]
+    alternatives = details.get("alternative_titles")
+    alternatives = alternatives.get("titles" if kind == "movie" else "results") if isinstance(alternatives, dict) else None
+    if isinstance(alternatives, list):
+        names.extend(value.get("title") for value in alternatives[:100] if isinstance(value, dict))
+    return bool(key and (any(exact_display_key(value) == key for value in names)
+                         or translation_aliases(details, kind, title).matched))
 
 
 def _identity_matches(proof: Mapping[str, Any], title: str, year: str | None) -> bool:
@@ -737,11 +840,12 @@ class TmdbClient:
                     if poster:
                         self._poster_cache_state[key] = (False, fresh, _identifier(attempted))
                     return metadata, fresh, metadata["rejectedIdentity"]
-                identity_agrees = isinstance(proof, dict) and _identity_matches(proof, title, year)
+                query = _current_query_identity(proof, item, kind, title, year) if isinstance(proof, dict) else None
+                identity_agrees = query is not None and _identity_matches(proof, *query)
                 if isinstance(proof, dict) and "undatedPosterPolicy" in proof:
-                    identity_agrees = (value["metadata"].get("releaseDate") is None
+                    identity_agrees = (query is not None and value["metadata"].get("releaseDate") is None
                         and metadata["matchStatus"] == "matched_poster"
-                        and _undated_poster_identity_matches(proof, item, kind, title, year))
+                        and _undated_poster_identity_matches(proof, item, kind, *query))
                 if identity_agrees and (
                     proof.get("tmdbId") == metadata["tmdbId"]
                     and (identifier is None or metadata["tmdbId"] == identifier)
@@ -810,8 +914,9 @@ class TmdbClient:
         path = poster_identity(item)
         if not path:
             return None
-        _key, identifier, title, year = _enrichment_identity(item, kind)
-        candidate = self.poster_index.lookup(path, kind, _normalized_title(title), year)
+        _key, identifier, source_title, source_year = _enrichment_identity(item, kind)
+        title, year = _effective_title_and_year(item, kind, source_title, source_year)
+        candidate = self.poster_index.lookup(path, kind, _normalized_title(title), year, allow_missing_year=year is None)
         correction = _reviewed(item, kind)
         rejected = correction.get("rejectedTmdbIds", []) if correction else []
         return candidate if candidate and candidate not in rejected and (identifier is None or candidate == identifier) else None
@@ -920,7 +1025,7 @@ class TmdbClient:
             return "no_match", None, "title_mismatch"
         if candidate.get("release_date") not in (None, ""):
             return "no_match", None, "year_mismatch"
-        append = "credits,videos,alternative_titles,images,release_dates"
+        append = "credits,videos,alternative_titles,translations,images,release_dates"
         if evidence and evidence["imdbId"]:
             append += ",external_ids"
         state, details = self._request(f"/movie/{identifier}", {"append_to_response": append})
@@ -928,7 +1033,7 @@ class TmdbClient:
             return "unavailable", None, "incomplete_search"
         if details.get("release_date") not in (None, ""):
             return "no_match", None, "year_mismatch"
-        proof = _detail_identity(details, "movie")
+        proof, _translation = _detail_identity_for_query(details, "movie", title)
         if not _identity_matches(proof, title, None) or evidence and not _evidence_matches(details, evidence):
             return "no_match", None, "title_mismatch"
         releases = details.get("release_dates")
@@ -955,6 +1060,7 @@ class TmdbClient:
         api_kind = self._kind(kind)
         self.last_match_diagnostic = _match_diagnostic()
         key, identifier, title, year = _enrichment_identity(item, kind)
+        source_title, source_year = title, year
         evidence = _identity_evidence(item, kind)
         correction = _reviewed(item, kind)
         rejected_ids = correction.get("rejectedTmdbIds", []) if correction else []
@@ -980,6 +1086,16 @@ class TmdbClient:
                 self.last_match_diagnostic["reason"] = cached["matchStatus"] if cached["matchStatus"].startswith("matched_") else "unavailable"
             return cached
         self.stats["cacheMisses"] += 1
+        title, year = _effective_title_and_year(item, kind, source_title, source_year)
+        provider_binding = _provider_title_binding(source_title, source_year, title, year)
+        raw_display = _text(item.get("title") or item.get("name")) or ""
+        classifier_changed = kind == "series" and preprocess_provider_decorations(
+            raw_display, source_year=source_year, kind=kind
+        ) != preprocess_provider_decorations(raw_display, source_year=source_year)
+        requires_corroboration = bool(provider_binding is not None and not correction and (
+            provider_cleanup_requires_corroboration(source_title, source_year=source_year, kind=kind)
+            or classifier_changed
+        ))
 
         def unavailable(reason: str = "unavailable") -> dict[str, Any]:
             self.last_match_diagnostic["reason"] = reason
@@ -1029,7 +1145,10 @@ class TmdbClient:
         poster = poster_identity(item)
         poster_available = bool(poster and not self.poster_index.collided(poster))
         poster_assisted = False
+        missing_year_poster = False
         undated_poster = False
+        if requires_corroboration and not poster_available and not evidence:
+            return no_match("missing_identity" if year is None else "title_mismatch")
         if evidence and evidence["imdbId"]:
             # Bound external identity avoids choosing among same-name works or
             # an incomplete title search. It does not relax display title/year
@@ -1061,7 +1180,7 @@ class TmdbClient:
                     return unavailable()
                 identifier = found_id
                 state, details = self._request(f"/{api_kind}/{identifier}",
-                                               {"append_to_response": "credits,videos,alternative_titles,external_ids"})
+                                               {"append_to_response": "credits,videos,alternative_titles,translations,external_ids"})
                 if state != "ok" or not details or _identifier(details.get("id")) != identifier:
                     if state == "ok":
                         self.stats["errors"] += 1
@@ -1072,6 +1191,7 @@ class TmdbClient:
             if candidate:
                 identifier = candidate
                 poster_assisted = True
+                missing_year_poster = year is None
                 poster_attempt = candidate
         if not identifier:
             # A year is necessary to distinguish remakes, reboots and common titles.
@@ -1168,9 +1288,11 @@ class TmdbClient:
                     return no_match("ambiguous_title_year" if len(matches) > 1 else "alias_candidate_limit")
                 corroborated = []
                 poster_tie = bool(poster_available and len(matches) > 1 and not evidence)
+                translated_candidates = set()
+                translations_complete = True
                 for candidate_id in sorted(check_ids, key=int):
-                    append = "credits,videos,alternative_titles" + (",external_ids" if evidence and evidence["imdbId"] else "")
-                    if poster_tie:
+                    append = "credits,videos,alternative_titles,translations" + (",external_ids" if evidence and evidence["imdbId"] else "")
+                    if poster_tie or requires_corroboration and poster_available:
                         append += ",images"
                     state, candidate_details = self._request(f"/{api_kind}/{candidate_id}", {"append_to_response": append})
                     if state != "ok" or not candidate_details or _identifier(candidate_details.get("id")) != candidate_id:
@@ -1178,11 +1300,17 @@ class TmdbClient:
                             self.stats["errors"] += 1
                         return unavailable("incomplete_search")
                     self.last_match_diagnostic["aliasCandidatesChecked"] += 1
-                    if (_identity_matches(_detail_identity(candidate_details, kind), title, year)
+                    candidate_proof, translated = _detail_identity_for_query(candidate_details, kind, title)
+                    translations_complete = translations_complete and translated.complete
+                    if (_identity_matches(candidate_proof, title, year)
                             and (not evidence or _evidence_matches(candidate_details, evidence))):
                         corroborated.append((candidate_id, candidate_details))
+                        if "translationDisplayKey" in candidate_proof:
+                            translated_candidates.add(candidate_id)
                         if len(corroborated) > 1 and not poster_tie:
                             return no_match("ambiguous_title_year")
+                if translated_candidates and not translations_complete:
+                    return unavailable("incomplete_search")
                 if poster_tie:
                     with_poster = []
                     for candidate_id, candidate_details in corroborated:
@@ -1201,8 +1329,8 @@ class TmdbClient:
                 alias_match = not matches
                 self.last_match_diagnostic["evidenceMatched"] = bool(evidence)
         if details is None:
-            append = "credits,videos,alternative_titles" + (",external_ids" if evidence and evidence["imdbId"] else "")
-            if poster_assisted:
+            append = "credits,videos,alternative_titles,translations" + (",external_ids" if evidence and evidence["imdbId"] else "")
+            if poster_assisted or requires_corroboration and poster_available:
                 append += ",images"
             state, details = self._request(f"/{api_kind}/{identifier}", {"append_to_response": append})
             if state == "not_found":
@@ -1212,7 +1340,7 @@ class TmdbClient:
                 if state == "ok":
                     self.stats["errors"] += 1
                 return unavailable()
-        proof = _detail_identity(details, kind)
+        proof, translated = _detail_identity_for_query(details, kind, title)
         if undated_poster:
             paths, _complete = official_paths(details)
             proof.update(undatedPosterPolicy=UNDATED_POSTER_POLICY, sourceYear=year,
@@ -1221,19 +1349,39 @@ class TmdbClient:
         if not (_identity_matches(proof, title, year)
                 or _undated_poster_identity_matches(proof, item, kind, title, year)):
             rejected = True
-            return no_match("year_mismatch" if proof.get("year") != year else "title_mismatch")
+            if "translations" in details and not translated.complete:
+                return unavailable("incomplete_search")
+            return no_match("year_mismatch" if year is not None and proof.get("year") != year else "title_mismatch")
         if evidence:
             if not _evidence_matches(details, evidence):
                 return no_match("title_mismatch")
             self.last_match_diagnostic["evidenceMatched"] = True
             proof.update(contentId=evidence["contentId"], evidenceFingerprint=evidence["fingerprint"], evidenceDigest=evidence["digest"])
-        paths, _complete = official_paths(details)
+        paths, images_complete = official_paths(details)
+        if missing_year_poster or provider_binding is not None:
+            if not _strict_official_title(details, kind, title):
+                return no_match("title_mismatch")
+        if missing_year_poster:
+            if not images_complete:
+                return unavailable("incomplete_search")
+        if requires_corroboration and not (evidence and self.last_match_diagnostic["evidenceMatched"]):
+            if not images_complete:
+                return unavailable("incomplete_search")
+            if not poster or poster not in paths or self.poster_index.collided(poster):
+                return no_match("title_mismatch")
+            poster_assisted = True
         if poster_assisted:
             if poster not in paths or self.poster_index.collided(poster):
                 return no_match("title_mismatch")
             proof.update(posterPath=poster, posterPolicy=POSTER_POLICY)
             match_status = "matched_poster"
         proof.update(mediaKind=kind, posterPaths=sorted(paths))
+        if missing_year_poster:
+            provider_binding = _provider_title_binding(source_title, source_year, title, year, force=True)
+        if provider_binding is not None:
+            proof["providerTitle"] = provider_binding
+        if not _identity_binding_valid(proof):
+            return unavailable("incomplete_search")
         result = _metadata(details, kind, match_status)
         self._remember_poster(kind, result, proof)
         result["rejectedIdentity"] = rejected

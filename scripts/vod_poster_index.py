@@ -109,15 +109,19 @@ class VerifiedPosterIndex:
                         year = None
                 entries[(kind, identifier)] = {"names": tuple(sorted(combined)[:102]), "year": year}
 
-    def lookup(self, path, kind, normalized_title, year):
+    def lookup(self, path, kind, normalized_title, year, *, allow_missing_year=False):
         with self._lock:
             entries = self._paths.get(path, {})
             if len(entries) != 1:
                 return None
             (identity, proof), = entries.items()
-            if identity is None or identity[0] != kind or not year:
+            if identity is None or identity[0] != kind or (not year and not allow_missing_year):
                 return None
-            return identity[1] if normalized_title in proof["names"] and proof["year"] == year else None
+            year_agrees = proof["year"] == year if year else (
+                allow_missing_year is True and isinstance(proof["year"], str)
+                and bool(re.fullmatch(r"(?:19|20)[0-9]{2}", proof["year"]))
+            )
+            return identity[1] if normalized_title in proof["names"] and year_agrees else None
 
     def collided(self, path):
         with self._lock:

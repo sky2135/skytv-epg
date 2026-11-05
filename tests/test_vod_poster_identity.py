@@ -132,7 +132,9 @@ class PosterIdentityTests(unittest.TestCase):
         self.assertEqual(client.enrich(target, "movie")["matchStatus"], "no_match")
         self.assertIsNone(client.poster_candidate(item("Different Work (2025)"), "movie"))
         self.assertIsNone(client.poster_candidate(item("Example Film (1995)"), "movie"))
-        self.assertIsNone(client.poster_candidate(item("Example Film"), "movie"))
+        # A missing source year may discover this unique verified poster;
+        # enrichment still rechecks exact official title and complete images.
+        self.assertEqual(client.poster_candidate(item("Example Film"), "movie"), "101")
 
     def test_old_positive_cache_reused_and_old_miss_does_not_mask_poster_rule(self):
         session = FakeSession(details())
