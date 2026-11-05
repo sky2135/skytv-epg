@@ -1,182 +1,34 @@
-name: Verify complete VOD catalog without publishing
-run-name: "VOD verification ${{ inputs.test-id }} (resumable batch)"
-
+name: Inspect TMDB appended translation response shape
 on:
   workflow_dispatch:
-    inputs:
-      test-id:
-        description: Stable identity for this frozen full-catalog test
-        default: all-vod-20261022
-        type: string
-      source-artifact-id:
-        description: Validated production VOD component to freeze
-        default: '12447550657'
-        type: string
-      seed-cache-key:
-        description: Exact existing production cache to copy on the first batch
-        default: skytvplayer-vod-v1-Linux-39824081615-1
-        type: string
-      resume-artifact-id:
-        description: Saved verification checkpoint; empty starts the test
-        default: ''
-        type: string
-      rate:
-        description: Shared TMDB requests per second across all workers
-        default: '20'
-        type: string
-      workers:
-        description: Concurrent workers sharing the single rate limit
-        default: '8'
-        type: string
-      batch-seconds:
-        description: Maximum active verification time before saving and resuming
-        default: '900'
-        type: string
-      batch-records:
-        description: Maximum source records considered in one durable batch
-        default: '25000'
-        type: string
-      baseline-state-artifact-id:
-        description: Optional production enrichment checkpoint to copy into a fresh isolated rule evaluation
-        default: ''
-        type: string
-      evaluation-scope:
-        description: Balanced smoke checks or all frozen entries when a rule baseline is supplied
-        default: smoke
-        type: choice
-        options: [smoke, full]
-
 permissions:
   contents: read
-  actions: write
-
-concurrency:
-  group: ${{ github.repository }}-vod-verification-${{ inputs.test-id }}
-  cancel-in-progress: false
-
-env:
-  PYTHONUNBUFFERED: '1'
-  PYTHONIOENCODING: utf-8
-  PYTHONHASHSEED: '0'
-  PIP_DISABLE_PIP_VERSION_CHECK: '1'
-  PIP_NO_INPUT: '1'
-  TEST_ID: ${{ inputs.test-id }}
-  SOURCE_ARTIFACT_ID: ${{ inputs.source-artifact-id }}
-  SEED_CACHE_KEY: ${{ inputs.seed-cache-key }}
-  RESUME_ARTIFACT_ID: ${{ inputs.resume-artifact-id }}
-  RATE: ${{ inputs.rate }}
-  WORKERS: ${{ inputs.workers }}
-  BATCH_SECONDS: ${{ inputs.batch-seconds }}
-  BATCH_RECORDS: ${{ inputs.batch-records }}
-  BASELINE_STATE_ARTIFACT_ID: ${{ inputs.baseline-state-artifact-id }}
-  EVALUATION_SCOPE: ${{ inputs.evaluation-scope || 'smoke' }}
-
 jobs:
-  verify:
-    name: Verify frozen movie and series identities with durable progress
+  shape:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 5
     steps:
-      - name: Check out verification revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.12'
-      - name: Install pinned dependencies
-        run: |
-          python -m pip install --only-binary=:all: -r requirements.txt -r requirements-sync.txt
-      - name: Restore saved verification checkpoint
-        if: inputs.resume-artifact-id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python scripts/vod_verification_artifacts.py restore-state \
-            --artifact-id "$RESUME_ARTIFACT_ID" --test-id "$TEST_ID" \
-            --destination .build/verification-state
-      - name: Read existing production cache for the initial isolated copy
-        if: inputs.resume-artifact-id == '' && inputs.baseline-state-artifact-id == ''
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: .build/vod-cache
-          key: ${{ inputs.seed-cache-key }}
-          fail-on-cache-miss: true
-      - name: Restore the frozen validated source component
-        if: inputs.resume-artifact-id == '' && inputs.baseline-state-artifact-id == ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python scripts/vod_verification_artifacts.py restore-component \
-            --artifact-id "$SOURCE_ARTIFACT_ID" --destination .build/verification-component
-      - name: Copy a sealed production baseline into a fresh isolated rule evaluation
-        if: inputs.resume-artifact-id == '' && inputs.baseline-state-artifact-id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python scripts/vod_rule_evaluation.py prepare \
-            --baseline-state-artifact-id "$BASELINE_STATE_ARTIFACT_ID" \
-            --source-artifact-id "$SOURCE_ARTIFACT_ID" --test-id "$TEST_ID" \
-            --scope "$EVALUATION_SCOPE" --component-dir .build/verification-component \
-            --state-dir .build/verification-state
-      - name: Run the next rate-limited batch
-        id: batch
+      - name: Check only public response structure
         env:
           TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-        shell: bash
         run: |
-          set -euo pipefail
-          if [[ -n "$BASELINE_STATE_ARTIFACT_ID" ]]; then
-            command=(python -u scripts/vod_rule_evaluation.py run
-              --state-dir .build/verification-state --test-id "$TEST_ID"
-              --source-artifact-id "$SOURCE_ARTIFACT_ID"
-              --baseline-state-artifact-id "$BASELINE_STATE_ARTIFACT_ID"
-              --scope "$EVALUATION_SCOPE")
-            if [[ -z "$RESUME_ARTIFACT_ID" ]]; then
-              command+=(--component-dir .build/verification-component)
-            fi
-          else
-            command=(python -u scripts/verify_vod_catalog.py
-              --state-dir .build/verification-state --test-id "$TEST_ID"
-              --source-artifact-id "$SOURCE_ARTIFACT_ID" --seed-cache-key "$SEED_CACHE_KEY")
-            if [[ -z "$RESUME_ARTIFACT_ID" ]]; then
-              command+=(--component-dir .build/verification-component --seed-cache .build/vod-cache)
-            fi
-          fi
-          command+=(--rate "$RATE" --workers "$WORKERS"
-            --batch-seconds "$BATCH_SECONDS" --batch-records "$BATCH_RECORDS")
-          timeout --signal=TERM --kill-after=30s 30m "${command[@]}"
-      - name: Seal the durable checkpoint
-        run: |
-          python scripts/vod_verification_artifacts.py seal \
-            --state-dir .build/verification-state --test-id "$TEST_ID"
-          mkdir -p .build/verification-package
-          tar -C .build/verification-state -cf .build/verification-package/state.tar .
-      - name: Retain the checkpoint before any continuation
-        id: checkpoint
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: vod-verification-${{ inputs.test-id }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .build/verification-package/state.tar
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 6
-      - name: Retain the aggregate report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: vod-verification-report-${{ inputs.test-id }}-${{ github.run_id }}
-          path: .build/verification-state/report.json
-          if-no-files-found: error
-          retention-days: 7
-      - name: Resume pending work in the next durable batch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CHECKPOINT_ARTIFACT_ID: ${{ steps.checkpoint.outputs.artifact-id }}
-          VERIFICATION_INPUTS: ${{ toJSON(inputs) }}
-        run: |
-          python scripts/vod_verification_artifacts.py continue \
-            --state-dir .build/verification-state --artifact-id "$CHECKPOINT_ARTIFACT_ID" \
-            --inputs-json "$VERIFICATION_INPUTS"
+          python3 - <<'PY'
+          import json,os,time,urllib.request,urllib.parse
+          token=os.environ.get('TMDB_READ_ACCESS_TOKEN','');key=os.environ.get('TMDB_API_KEY','')
+          if not(token or key):raise SystemExit('TMDB credential unavailable')
+          headers={'Accept':'application/json'}
+          if token:headers['Authorization']='Bearer '+token
+          for identifier in (297222,11430):
+              query={'append_to_response':'translations'}
+              if not token:query['api_key']=key
+              request=urllib.request.Request('https://api.themoviedb.org/3/movie/'+str(identifier)+'?'+urllib.parse.urlencode(query),headers=headers)
+              try:
+                  with urllib.request.urlopen(request,timeout=30) as response:
+                      raw=response.read(2*1024*1024)
+                  data=json.loads(raw);resource=data.get('translations') or {};rows=resource.get('translations') or []
+                  print(json.dumps({'requestedId':identifier,'outerId':data.get('id'),'outerTitle':data.get('title'),'resourceKeys':list(resource),'nestedIdPresent':'id' in resource,'nestedId':resource.get('id'),'translationCount':len(rows),'sampleDataKeys':list(rows[0].get('data',{})) if rows else [],'englishTitles':[v.get('data',{}).get('title') for v in rows if v.get('iso_639_1')=='en']},ensure_ascii=True))
+              except Exception as error:
+                  print(json.dumps({'requestedId':identifier,'errorType':type(error).__name__}));raise SystemExit(1)
+              time.sleep(1)
+          PY
