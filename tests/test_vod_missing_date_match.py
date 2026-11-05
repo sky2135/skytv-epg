@@ -93,7 +93,7 @@ class MissingMovieDateMatchTests(unittest.TestCase):
         self.assertTrue({"credits", "videos", "alternative_titles", "images", "release_dates"} <= appended)
         self.assertNotIn("external_ids", appended)
         key = tmdb._enrichment_identity(item, "movie")[0]
-        envelope = json.loads(client._cache_path(key).read_text(encoding="utf-8"))["data"]
+        envelope = json.loads(client.identity_cache_path(item, "movie").read_text(encoding="utf-8"))["data"]
         self.assertIsNone(envelope["identity"]["year"])
         self.assertIsNone(envelope["metadata"]["releaseDate"])
 
@@ -118,7 +118,7 @@ class MissingMovieDateMatchTests(unittest.TestCase):
     def test_malformed_cached_date_or_unbound_old_poster_proof_cannot_be_reused(self):
         client, _result = self.matched()
         key = tmdb._enrichment_identity(movie(), "movie")[0]
-        path = client._cache_path(key)
+        path = client.identity_cache_path(movie(), "movie")
         original = json.loads(path.read_text(encoding="utf-8"))
         malformed = copy.deepcopy(original)
         malformed["data"]["metadata"]["releaseDate"] = "not-a-date"

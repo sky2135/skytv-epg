@@ -39,7 +39,8 @@ def code_identity():
              'vod_reviewed_corrections.py', 'vod_provider_evidence.py',
              'build_skytvplayer_catalog.py', 'build_vod_catalogs.py',
              'vod_verification_input.py', 'vod_verification_checkpoint.py',
-             'vod_verification_rate_limit.py')
+             'vod_verification_rate_limit.py', 'vod_title_cleanup.py',
+             'vod_official_aliases.py', 'vod_rule_evaluation.py', 'vod_rule_sampling.py')
     hashes = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in names}
     hashes['data/vod_reviewed_corrections.json'] = hashlib.sha256(
         (root.parent / 'data/vod_reviewed_corrections.json').read_bytes()).hexdigest()
@@ -66,6 +67,7 @@ class VerificationClient(tmdb.TmdbClient):
                 value, valid_fresh, invalid = self._main_identity_cache(
                     candidate, item, kind, identifier, title, year)
                 if value and value['matchStatus'].startswith('matched_') and not invalid:
+                    self._adopt_identity_cache_path(key, candidate, item, kind, title, year)
                     self.stats['sourceCacheMigrations'] = self.stats.get('sourceCacheMigrations', 0) + 1
                     return value, valid_fresh, invalid
         # A full verification pass revisits negative outcomes. Transient cached
@@ -142,7 +144,9 @@ def atomic_json(path, value):
 def run_batch(*, state_dir, test_id, component_dir=None, seed_cache=None,
               source_artifact_id=0, seed_cache_key='', rate=20, workers=8,
               batch_seconds=900, batch_records=25000, client_factory=VerificationClient,
-              token='', api_key='', session_factory=PacedSession):
+              token='', api_key='', session_factory=PacedSession,
+              input_loader=None, record_selector=None,
+              verification_context=None):
     state_dir = Path(state_dir)
     for source in (component_dir, seed_cache):
         if source is not None:
@@ -160,6 +164,10 @@ def run_batch(*, state_dir, test_id, component_dir=None, seed_cache=None,
     config = {'testId': test_id, 'sourceArtifactId': source_artifact_id,
               'seedCacheKey': seed_cache_key, 'codeIdentity': code_identity(),
               'requestsPerSecond': rate, 'workers': workers, 'requestQuota': None}
+    if verification_context is not None:
+        if not isinstance(verification_context, dict) or len(canonical(verification_context)) > 32768:
+            raise ValueError('Invalid frozen verification context')
+        config['context'] = copy.deepcopy(verification_context)
     cache_root = state_dir / 'cache'
     checkpoint = Checkpoint(state_dir / 'checkpoint.sqlite')
     contexts, thread_local, contexts_lock = [], threading.local(), threading.Lock()
@@ -179,13 +187,31 @@ def run_batch(*, state_dir, test_id, component_dir=None, seed_cache=None,
                 raise ValueError('Interrupted initialization belongs to another test')
             checkpoint.set_meta('initializingConfig', config)
             checkpoint.set_meta('firstStartedAt', checkpoint.get_meta('firstStartedAt', time.time()))
-            document = load_component_input(Path(component_dir))
+            document = (input_loader or load_component_input)(Path(component_dir))
             source = Path(seed_cache) / 'tmdb'
             if source.is_dir():
                 shutil.copytree(source, cache_root / 'tmdb', dirs_exist_ok=True)
             with client_factory(cache_root / 'tmdb', token=token, api_key=api_key,
                                 max_requests=0) as warm_client:
                 records, warmed = prepare_records(document, Path(seed_cache) / 'provider-evidence', warm_client)
+            if record_selector is not None:
+                original_records = {row['contentId']: row for row in records}
+                original_warmed = dict(warmed)
+                records, warmed = record_selector(records, warmed)
+                identifiers = [row['contentId'] for row in records]
+                selected_identifiers = set(identifiers)
+                if (not identifiers or len(identifiers) != len(selected_identifiers)
+                        or any(row is not original_records.get(row['contentId']) for row in records)
+                        or any(cid not in selected_identifiers or original_warmed.get(cid) != metadata
+                               for cid, metadata in warmed)):
+                    raise ValueError('Verification selection must preserve validated source records and cache proof')
+                del original_records, original_warmed, identifiers, selected_identifiers
+            # An input's previous verification is comparison evidence only.
+            # Completion comes exclusively from a freshly validated cache proof
+            # below, or a real verification attempt. This also lets explicit
+            # positive controls bypass caches without retaining an old outcome.
+            for row in records:
+                row['baselineVerified'] = False
             identity = {key: value for key, value in document.items() if key != 'records'}
             identity['verificationConfig'] = config
             checkpoint.initialize(records, identity)

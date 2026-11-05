@@ -132,7 +132,9 @@ class PosterIdentityTests(unittest.TestCase):
         self.assertEqual(client.enrich(target, "movie")["matchStatus"], "no_match")
         self.assertIsNone(client.poster_candidate(item("Different Work (2025)"), "movie"))
         self.assertIsNone(client.poster_candidate(item("Example Film (1995)"), "movie"))
-        self.assertIsNone(client.poster_candidate(item("Example Film"), "movie"))
+        # A missing source year may discover this unique verified poster;
+        # enrichment still rechecks exact official title and complete images.
+        self.assertEqual(client.poster_candidate(item("Example Film"), "movie"), "101")
 
     def test_old_positive_cache_reused_and_old_miss_does_not_mask_poster_rule(self):
         session = FakeSession(details())
@@ -185,14 +187,15 @@ class PosterIdentityTests(unittest.TestCase):
         self.seed(client)
         self.assertEqual(client.enrich(item(), "movie")["matchStatus"], "matched_poster")
         key, identifier, title, year = tmdb._enrichment_identity(item(), "movie")
-        original, _fresh = client._read_cache(key)
+        variant_key = tmdb._identity_cache_key(key, item(), "movie", title, year)
+        original, _fresh = client._read_cache(variant_key)
         for field, value in (("mediaKind", "series"), ("posterPath", "/wrong.jpg"), ("posterPolicy", 999)):
             with self.subTest(field=field):
                 changed = copy.deepcopy(original)
                 changed["identity"][field] = value
-                client._write_cache(key, changed, tmdb.DETAIL_TTL)
+                client._write_cache(variant_key, changed, tmdb.DETAIL_TTL)
                 self.assertIsNone(client._identity_cache(key, item(), "movie", identifier, title, year)[0])
-        client._write_cache(key, original, tmdb.DETAIL_TTL)
+        client._write_cache(variant_key, original, tmdb.DETAIL_TTL)
         self.seed(client, identifier=202, kind="series")
         self.assertIsNone(client._identity_cache(key, item(), "movie", identifier, title, year)[0])
 

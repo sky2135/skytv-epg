@@ -133,7 +133,8 @@ class UnmatchedPassthroughTests(unittest.TestCase):
         target = movie()
         client = self.client(empty_search())
         client.enrich(target, "movie")
-        key = tmdb._enrichment_identity(target, "movie")[0]
+        old_key, _identifier, title, year = tmdb._enrichment_identity(target, "movie")
+        key = tmdb._identity_cache_key(old_key, target, "movie", title, year)
         details = movie_details()
         metadata = tmdb._metadata(details, "movie", "matched_search")
         proof = tmdb._detail_identity(details, "movie")
@@ -203,7 +204,8 @@ class UnmatchedPassthroughTests(unittest.TestCase):
         client = self.client(empty_search(), empty_search())
         client.enrich(first, "movie")
         client.enrich(second, "movie")
-        shared_key = tmdb._enrichment_identity(first, "movie")[0]
+        old_key, _identifier, title, year = tmdb._enrichment_identity(first, "movie")
+        shared_key = tmdb._identity_cache_key(old_key, first, "movie", title, year)
         shared_before = client._cache_path(shared_key).read_bytes()
         self.assertTrue(client.reopen_unmatched_without_artwork(first, "movie"))
         self.assertFalse(client.ignored_without_artwork(first, "movie"))
@@ -228,7 +230,8 @@ class UnmatchedPassthroughTests(unittest.TestCase):
         result = client.enrich(target, "movie")
         self.assertTrue(result["rejectedIdentity"])
         self.assertTrue(client.reopen_unmatched_without_artwork(target, "movie"))
-        key = tmdb._enrichment_identity(target, "movie")[0]
+        old_key, _identifier, title, year = tmdb._enrichment_identity(target, "movie")
+        key = tmdb._identity_cache_key(old_key, target, "movie", title, year)
         value, _fresh = client._read_cache(key)
         self.assertTrue(value["metadata"]["rejectedIdentity"])
         self.assertEqual(value["matchDiagnostic"]["reason"], "title_mismatch")
@@ -236,7 +239,8 @@ class UnmatchedPassthroughTests(unittest.TestCase):
         plain = movie()
         client.session = FakeSession(empty_search())
         client.enrich(plain, "movie")
-        key = tmdb._enrichment_identity(plain, "movie")[0]
+        old_key, _identifier, title, year = tmdb._enrichment_identity(plain, "movie")
+        key = tmdb._identity_cache_key(old_key, plain, "movie", title, year)
         details = movie_details()
         client.last_match_diagnostic = tmdb._match_diagnostic({"reason": "matched_search"})
         client._write_identity_cache(key, tmdb._metadata(details, "movie", "matched_search"),

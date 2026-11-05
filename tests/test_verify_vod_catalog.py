@@ -112,6 +112,41 @@ class VerificationRunnerTests(unittest.TestCase):
         self.assertEqual(bounded._request("/movie/101"), ("unavailable", None))
         self.assertEqual(bounded.stats["budgetExhausted"], 1)
 
+    def test_selection_runs_after_full_validation_and_does_not_verify_omitted_records(self):
+        rows = [record(), record("server_2", "2", title="Other Film (2025)", tmdb_id="202")]
+        seen = []
+        def select(prepared, warmed):
+            seen.extend(row["contentId"] for row in prepared)
+            return [prepared[1]], []
+        report = self.batch(input_loader=lambda _directory: document(rows), record_selector=select,
+                            verification_context={"scope": "fixture-smoke"})
+        self.assertEqual(seen, [row["contentId"] for row in rows])
+        self.assertEqual(CountingClient.calls, [(rows[1]["contentId"], "movie")])
+        self.assertEqual(report["totals"]["total"], 1)
+        self.assertFalse(report["productionCatalogWritten"])
+        with self.assertRaisesRegex(ValueError, "different frozen verification configuration"):
+            self.batch(verification_context={"scope": "different-selection"})
+
+    def test_selection_cannot_invent_validated_records_or_positive_warm_results(self):
+        rows = [record()]
+        for selected, warmed in (([dict(rows[0])], []),
+                                  (rows, [(rows[0]["contentId"], {"matchStatus": "matched_id", "tmdbId": "999"})])):
+            with self.subTest(selected=selected, warmed=warmed):
+                with self.assertRaisesRegex(ValueError, "preserve validated source records"):
+                    self.batch(input_loader=lambda _directory: document(rows),
+                               record_selector=lambda _records, _warmed: (selected, warmed))
+
+    def test_previous_positive_flags_do_not_complete_records_without_current_cache_proof(self):
+        row = record()
+        row.update(baselineVerified=True, baselineStatus="matched_id",
+                   baselineMetadata={"tmdbId": "101", "matchStatus": "matched_id"})
+        report = self.batch(input_loader=lambda _directory: document([row]))
+        self.assertEqual(CountingClient.calls, [(row["contentId"], "movie")])
+        self.assertEqual(report["totals"]["previouslyVerified"], 1)
+        self.assertEqual(report["totals"]["retainedVerified"], 1)
+        self.assertEqual(report["totals"]["lostVerification"], 0)
+        self.assertEqual(report["initialVerifiedCacheReuse"], 0)
+
     def test_japan_sinks_year_in_title_is_not_removed(self):
         self.assertEqual(tmdb._title_and_year({"title": "Japan Sinks: 2020"}), ("Japan Sinks: 2020", None))
         self.assertEqual(tmdb._title_and_year({"title": "Japan Sinks: 2020", "releaseDate": "2020-07-09"}),
@@ -140,7 +175,8 @@ class VerificationRunnerTests(unittest.TestCase):
         current = record()["item"]
         client = verification.VerificationClient(self.seed / "tmdb", token="fixture", session=FakeSession(),
                                                  now=NOW + 1, max_requests=0)
-        key = tmdb._enrichment_identity(current, "movie")[0]
+        old_key, _identifier, title, year = tmdb._enrichment_identity(current, "movie")
+        key = tmdb._identity_cache_key(old_key, current, "movie", title, year)
         negative = tmdb._empty(None, "no_match")
         negative["rejectedIdentity"] = True
         client._write_identity_cache(key, negative, tmdb.MISS_TTL, {})

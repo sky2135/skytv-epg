@@ -114,7 +114,10 @@ def _positive(value):
     if ('matchDiagnostic' in data and data['matchDiagnostic'] != tmdb._match_diagnostic(data['matchDiagnostic'])
             or set(proof) - {'names', 'year', 'originalTitle', 'tmdbId', 'mediaKind', 'posterPaths',
                              'posterPath', 'posterPolicy', 'undatedPosterPolicy', 'sourceYear',
-                             'contentId', 'evidenceFingerprint', 'evidenceDigest'}):
+                             'contentId', 'evidenceFingerprint', 'evidenceDigest',
+                             'providerTitle', 'translationDisplayKey'}):
+        return False
+    if not tmdb._identity_binding_valid(proof):
         return False
     for key in ('evidenceFingerprint', 'evidenceDigest'):
         if key in proof and (not isinstance(proof[key], str) or not SHA.fullmatch(proof[key])):
