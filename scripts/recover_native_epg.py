@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from datetime import datetime, timezone
 import json
 import os
@@ -34,8 +35,9 @@ def active_or_recent(runs: list[dict], now: int) -> bool:
     for run in runs:
         if run.get("status") != "completed":
             return True
-        created = datetime.fromisoformat(run["created_at"].replace("Z", "+00:00")).timestamp()
-        if now - created < 600:
+        stamp = run.get("updated_at") or run["created_at"]
+        finished = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+        if now - finished < 600:
             return True
     return False
 
@@ -72,6 +74,24 @@ def dispatch_allowed(report: dict, health: dict, runs: list[dict], now: int) -> 
     if [item.get("serverId") for item in checks] != report["targets"]:
         return False
     return any(item.get("usable") is True and item.get("status") == "ok" for item in checks)
+
+
+def cache_signature() -> str | None:
+    directory = os.environ.get("SKYTV_PANEL_CACHE_DIR", "").strip()
+    if not directory:
+        return None
+    digest = hashlib.sha256()
+    for server in sorted(NATIVE_SERVERS):
+        for suffix in (".json", ".xmltv", ".cooldown.json"):
+            path = Path(directory) / (server + suffix)
+            if path.is_symlink():
+                raise ValueError("Unsafe private cache path")
+            if path.is_file():
+                digest.update(path.name.encode())
+                with path.open('rb') as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        digest.update(chunk)
+    return digest.hexdigest()
 
 
 class Controller:
@@ -125,17 +145,28 @@ class Controller:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("probe", "dispatch"))
+    parser.add_argument("mode", choices=("plan", "probe", "dispatch"))
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args(argv)
     controller = Controller()
     try:
         health, runs = controller.state()
         now = int(time.time())
-        if args.mode == "probe":
+        output = {}
+        if args.mode == "plan":
+            selected = targets(health)
+            needed = bool(selected) and not active_or_recent(runs, now)
+            report = {"schemaVersion": 1, "checkedAt": now, "generation": health["generatedAt"],
+                      "targets": selected, "probeNeeded": needed, "refreshNeeded": False,
+                      "outcome": "probe_required" if needed else "no_recovery_work_needed"}
+            output['needed'] = needed
+        elif args.mode == "probe":
+            before = cache_signature()
             report = probe(health, runs, now)
             report["probeStartedAt"] = now
             report["checkedAt"] = int(time.time())
+            report['cacheChanged'] = before is not None and before != cache_signature()
+            output['cache_changed'] = report['cacheChanged']
         else:
             if args.report.stat().st_size > 64 * 1024:
                 raise ValueError("Oversized recovery report")
@@ -147,6 +178,10 @@ def main(argv=None):
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(report, sort_keys=True))
+        if os.environ.get('GITHUB_OUTPUT'):
+            with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as handle:
+                for key, value in output.items():
+                    handle.write(key + '=' + str(value).lower() + '\n')
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
             with Path(summary).open("a", encoding="utf-8") as handle:

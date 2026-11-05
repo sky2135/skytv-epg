@@ -98,7 +98,7 @@
   "vodEnrichmentArtifactsSha256": "c5b9d60b8a337f33c7c67e8bc177436188ee572c12757b27e8cd11dad6843b96",
   "vodSourceProvenanceSha256": "913e08e32c8ce3f5a16e7ffd1cf54575be76e282a2d5dbc3eaa0b26cac1d658c",
   "privatePanelCacheSha256": "47fcefc0e393be413532513a502cd639a92c0c64191a594fb6597c6b188105f1",
-  "nativeEpgRecoverySha256": "1e7f39b33ded09ef6ef4b1a7c855f3ccd59e9e2b8d2a0b4e6ff0f8bcc27e857c",
-  "nativeEpgRecoveryWorkflowSha256": "b1906ee2a71bfa0dca824a937cd2d127e26631545c9d974656255075fe305c38",
+  "nativeEpgRecoverySha256": "445fc0e9c5cf581b7e524c951366b64c1e45dfbc8b33a24d0fbcc452d615ce62",
+  "nativeEpgRecoveryWorkflowSha256": "fa0fc8eaa3ad4673e1a92dd56408929ec1d833413dec1b085d178a9d0aa13256",
   "providerTransportDiagnosticSha256": "b081e2638711045a7291d6fa8fb6cb7b37c450093702f107aa3a84b85bf97e52"
 }
