@@ -9,7 +9,7 @@ import re
 import unicodedata
 from collections import Counter
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import sync_channel_inventory as inventory
 import verified_guide_connections as reviewed
@@ -105,12 +105,14 @@ def group_for_row(row: Mapping[str, str]) -> str | None:
     return group if not vetoes else None
 
 
-def epg_id_provenance(row: Mapping[str, str], source: str) -> str:
+def epg_id_provenance(
+    row: Mapping[str, str], source: str, *, known_epg_ids: Mapping[str, str] = KNOWN_EPG_IDS,
+) -> str:
     identifier = str(row.get("epg_id", ""))
     if not identifier.strip():
         return "blank"
-    if identifier in KNOWN_EPG_IDS:
-        return KNOWN_EPG_IDS[identifier]
+    if identifier in known_epg_ids:
+        return known_epg_ids[identifier]
     if source == "panel":
         return "other_panel_id"
     if source == "dummy":
@@ -118,7 +120,11 @@ def epg_id_provenance(row: Mapping[str, str], source: str) -> str:
     return "other_nonempty"
 
 
-def summarize(table: inventory.MappingTable) -> dict[str, Any]:
+def summarize(
+    table: inventory.MappingTable, *, groups: Sequence[str] = GROUPS,
+    classifier: Callable[[Mapping[str, str]], tuple[str | None, tuple[str, ...]]] = classify_row,
+    known_epg_ids: Mapping[str, str] = KNOWN_EPG_IDS,
+) -> dict[str, Any]:
     groups = {
         group: {
             "group": group, "rowCount": 0, "vetoedLookalikeRows": 0,
@@ -132,12 +138,12 @@ def summarize(table: inventory.MappingTable) -> dict[str, Any]:
             **{field: Counter() for field in (
                 "actionCounts", "sourceCounts", "protectedTermCounts", "epgIdProvenanceCounts", "vetoReasonCounts",
             )},
-        } for group in GROUPS
+        } for group in groups
     }
     for row in table.rows:
         if row.get("server_id") != "server_1":
             continue
-        group, vetoes = classify_row(row)
+        group, vetoes = classifier(row)
         if group is None:
             continue
         item = groups[group]
@@ -175,7 +181,7 @@ def summarize(table: inventory.MappingTable) -> dict[str, Any]:
         except inventory.streaming.BuildError:
             source, invalid = "invalid", True
         item["sourceCounts"][source] += 1
-        item["epgIdProvenanceCounts"][epg_id_provenance(row, source)] += 1
+        item["epgIdProvenanceCounts"][epg_id_provenance(row, source, known_epg_ids=known_epg_ids)] += 1
         item["enabledRows"] += enabled is True
         item["disabledRows"] += enabled is False
         item["metadataLockedRows"] += locked is True
@@ -198,15 +204,15 @@ def summarize(table: inventory.MappingTable) -> dict[str, Any]:
     }
 
 
-def diagnose() -> dict[str, Any]:
+def diagnose(*, summarizer: Callable[[inventory.MappingTable], dict[str, Any]] = summarize) -> dict[str, Any]:
     session = None
     try:
         sheet_id = inventory.validate_sheet_id(os.environ.get("GOOGLE_SHEET_ID", ""))
         session = inventory.authorized_google_session(os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", ""))
         values = inventory.google_sheet_values(session, sheet_id, os.environ.get("GOOGLE_SHEET_TAB", "Mappings"))
-        return summarize(inventory.parse_table_values(values, maximum_rows=inventory.MAX_GOOGLE_MAPPING_ROWS))
+        return summarizer(inventory.parse_table_values(values, maximum_rows=inventory.MAX_GOOGLE_MAPPING_ROWS))
     except (inventory.SyncError, inventory.streaming.BuildError):
-        report = summarize(inventory.MappingTable([], [], []))
+        report = summarizer(inventory.MappingTable([], [], []))
         report["status"] = "source_unavailable"
         return report
     finally:

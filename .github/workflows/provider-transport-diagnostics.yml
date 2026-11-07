@@ -14,6 +14,7 @@ on:
           - vod_recent_samples
           - cricket_mapping
           - uk_mapping
+          - sports_mapping
         default: live
 
 permissions:
@@ -36,7 +37,7 @@ jobs:
         run: |
           python -m pip install --only-binary=:all: -r requirements.txt -r requirements-sync.txt
       - name: Run the selected read-only transport diagnostic
-        if: ${{ inputs.mode != 'cricket_mapping' && inputs.mode != 'uk_mapping' }}
+        if: ${{ inputs.mode != 'cricket_mapping' && inputs.mode != 'uk_mapping' && inputs.mode != 'sports_mapping' }}
         env:
           DIAGNOSTIC_MODE: ${{ inputs.mode || 'live' }}
           ALLOW_INSECURE_PANEL_HTTP: ${{ vars.ALLOW_INSECURE_PANEL_HTTP || 'false' }}
@@ -112,6 +113,27 @@ jobs:
         with:
           name: uk-mapping-gates-${{ github.run_id }}
           path: .build/uk-mapping-gates/report.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
+
+      - name: Check aggregate sports mapping gates without changing the Sheet
+        if: ${{ inputs.mode == 'sports_mapping' }}
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_TAB: ${{ vars.GOOGLE_SHEET_TAB || 'Mappings' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10s 2m python -u scripts/diagnose_sports_mapping_gates.py
+
+      - name: Retain aggregate sports mapping diagnostic
+        if: ${{ success() && inputs.mode == 'sports_mapping' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sports-mapping-gates-${{ github.run_id }}
+          path: .build/sports-mapping-gates/report.json
           if-no-files-found: error
           retention-days: 1
           compression-level: 6
