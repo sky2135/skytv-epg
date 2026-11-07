@@ -263,6 +263,9 @@ class MatcherIntegrityTests(unittest.TestCase):
             hashlib.sha256(CHANNEL_INVENTORY_REQUIREMENTS_PATH.read_bytes()).hexdigest(),
         )
         for key, relative_path in (
+            ("providerGuideLinksSha256", "scripts/provider_guide_links.py"),
+            ("verifiedGuideConnectionsSha256", "scripts/verified_guide_connections.py"),
+            ("tivimateGuideHealthSha256", "scripts/tivimate_guide_health.py"),
             ("providerEventGuideSha256", "scripts/provider_event_guide.py"),
             ("providerPresentationSha256", "scripts/provider_presentation.py"),
             ("automationConfigSha256", "scripts/automation_config.py"),
