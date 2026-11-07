@@ -8,6 +8,7 @@ on:
         type: choice
         options:
           - live
+          - live_playlist_links
           - native_epg
           - vod_evidence
           - vod_identity_coverage
@@ -49,7 +50,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$DIAGNOSTIC_MODE" == "vod_evidence" ]]; then
+          if [[ "$DIAGNOSTIC_MODE" == "live_playlist_links" ]]; then
+            timeout --signal=TERM --kill-after=10s 100s python -u scripts/diagnose_tivimate_playlist_links.py
+          elif [[ "$DIAGNOSTIC_MODE" == "vod_evidence" ]]; then
             timeout --signal=TERM --kill-after=10s 60s python -u scripts/diagnose_vod_provider_evidence.py
           elif [[ "$DIAGNOSTIC_MODE" == "vod_identity_coverage" ]]; then
             mkdir -p .build/vod-identity-coverage
@@ -70,6 +73,16 @@ jobs:
             echo "Unsupported diagnostic mode." >&2
             exit 2
           fi
+
+      - name: Retain bounded TiviMate playlist link evidence
+        if: ${{ success() && inputs.mode == 'live_playlist_links' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tivimate-playlist-links-${{ github.run_id }}
+          path: .build/tivimate-playlist-links/report.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
 
       - name: Retain aggregate native guide diagnostic
         if: ${{ success() && inputs.mode == 'native_epg' }}
