@@ -49,6 +49,7 @@ if __package__:
     from .epg_programme_details import details_json, parse_details_json, xmltv_programme_details
     from . import provider_event_guide, provider_event_slots, provider_presentation
     from . import private_panel_cache
+    from . import provider_guide_links, verified_guide_connections, tivimate_guide_health
 else:
     from channel_metadata_enrichment import ChannelRegistry, RegistryError, enrich_metadata
     from logo_enrichment import normalize_logo_url, logo_provenance, load_logo_verification
@@ -58,6 +59,9 @@ else:
     import provider_event_slots
     import provider_presentation
     import private_panel_cache
+    import provider_guide_links
+    import verified_guide_connections
+    import tivimate_guide_health
 
 
 PIPELINE_VERSION = "1.0"
@@ -4027,6 +4031,7 @@ class ScheduleStats:
     latest_future_stop: int
     conflicting_slots: int
     overlapping_rows: int = 0
+    current_rows: int | None = None
 
 
 def load_schedule_stats(
@@ -4040,7 +4045,8 @@ def load_schedule_stats(
                MIN(start_epoch), MAX(stop_epoch),
                MAX(CASE WHEN stop_epoch > ? THEN stop_epoch ELSE 0 END),
                SUM(CASE WHEN title_count > 1 THEN 1 ELSE 0 END),
-               SUM(CASE WHEN prior_max_stop > start_epoch THEN 1 ELSE 0 END)
+               SUM(CASE WHEN prior_max_stop > start_epoch THEN 1 ELSE 0 END),
+               SUM(CASE WHEN start_epoch <= ? AND stop_epoch > ? THEN 1 ELSE 0 END)
         FROM (
             SELECT source_key, channel_key, start_epoch, stop_epoch,
                    title_count,
@@ -4058,7 +4064,7 @@ def load_schedule_stats(
         )
         GROUP BY source_key, channel_key
     """
-    for row in connection.execute(query, (now_epoch, now_epoch)):
+    for row in connection.execute(query, (now_epoch, now_epoch, now_epoch, now_epoch)):
         stats[(str(row[0]), str(row[1]))] = ScheduleStats(
             programme_rows=int(row[2] or 0),
             future_rows=int(row[3] or 0),
@@ -4067,6 +4073,7 @@ def load_schedule_stats(
             latest_future_stop=int(row[6] or 0),
             conflicting_slots=int(row[7] or 0),
             overlapping_rows=int(row[8] or 0),
+            current_rows=int(row[9] or 0),
         )
     return stats
 
@@ -4083,6 +4090,91 @@ def schedule_quality(stats: ScheduleStats | None, source_key: str) -> tuple[int,
         -stats.conflicting_slots,
         -stats.overlapping_rows,
     )
+
+
+def apply_reviewed_guide_connections(
+    rows: Sequence[MappingRow], connection: sqlite3.Connection, *,
+    now_epoch: int, provider_links: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> tuple[list[MappingRow], list[dict[str, Any]]]:
+    """Project reviewed Server 1 identities onto fresh exact EPGShare schedules.
+
+    The private snapshot remains unchanged. A current authenticated inventory
+    must independently confirm the same provider stream/channel identity. No
+    review quarantine or explicit exclusion is bypassed.
+    """
+    wanted = verified_guide_connections.wanted_connection_ids(
+        (row for row in rows if row.server_id == "server_1"), allow_review=True,
+    )
+    if not wanted:
+        return list(rows), []
+    # Reuse the normal placeholder classifier on the small set of already
+    # selected schedules. This reads no source XML and performs no network I/O.
+    from epg_catalog_stream import informative_programme_title
+    placeholders = ",".join("?" for _ in wanted)
+    evidence: dict[str, dict[str, Any]] = {}
+    for channel, start, stop, title in connection.execute(
+        "SELECT channel_key,start_epoch,stop_epoch,title FROM programmes "
+        "WHERE source_key='epgshare01' "
+        f"AND channel_key IN ({placeholders}) AND stop_epoch > ? AND start_epoch < ?",
+        (*sorted(wanted), now_epoch, now_epoch + 72 * 3600),
+    ):
+        if (not informative_programme_title(title) or not 0 < stop - start <= 86400
+                or stop > now_epoch + 96 * 3600):
+            continue
+        item = evidence.setdefault(channel, {"slots": set(), "titles": set(), "first": start, "last": stop})
+        if len(item["slots"]) < 8:
+            item["slots"].add((start, stop))
+        if len(item["titles"]) < 2:
+            item["titles"].add(clean_text(title, 2000).casefold())
+        item["first"] = min(item["first"], start)
+        item["last"] = max(item["last"], stop)
+    usable = {channel for channel, item in evidence.items()
+              if len(item["slots"]) >= 2 and len(item["titles"]) >= 2
+              and item["first"] <= now_epoch + 6 * 3600 and item["last"] >= now_epoch + 6 * 3600}
+    output: list[MappingRow] = []
+    audit: list[dict[str, Any]] = []
+    for row in rows:
+        key = row.server_id, row.stream_id
+        link = provider_links.get(key, {})
+        rule = verified_guide_connections.connection_for_row(row, allow_review=True)
+        if (row.server_id != "server_1" or rule is None
+                or row.reason in RESERVED_EFFECTIVE_QUARANTINE_REASONS
+                or link.get("identity_verified") is not True):
+            output.append(row)
+            continue
+        selected = (
+            row.schedule_channel_key
+            if row.source_key == "epgshare01" and not row.uses_local_synthetic
+            and row.schedule_channel_key in rule.candidate_ids
+            and row.schedule_channel_key in usable
+            else verified_guide_connections.select_usable_connection(rule, usable)
+        )
+        if not selected:
+            audit.append({"streamId": row.stream_id, "channelName": row.channel_name,
+                          "identity": rule.identity, "outcome": "no_current_or_upcoming_schedule"})
+            output.append(row)
+            continue
+        if (row.runtime_eligible and not row.uses_local_synthetic
+                and row.source_key == "epgshare01" and row.schedule_channel_key == selected):
+            output.append(row)
+            continue
+        output.append(replace(
+            row, enabled=True, action="AUTO_EPGSHARE", requested_source="epgshare01",
+            effective_source="epgshare01", epg_feed=rule.epg_feed, epg_id=selected,
+            runtime_epg_id="", runtime_synthetic_reason="",
+            metadata_evidence={**row.metadata_evidence, "guideConnection": {
+                "method": rule.evidence, "identity": rule.identity,
+                "programmeGate": "CURRENT_OR_UPCOMING_WITHIN_6H",
+                "minimumInformativeIntervals": 2, "minimumDistinctTitles": 2,
+                "minimumFutureCoverageHours": 6,
+                "providerIdentity": "same-run-authenticated-server-stream-and-name",
+            }},
+        ))
+        audit.append({"streamId": row.stream_id, "channelName": row.channel_name,
+                      "identity": rule.identity, "outcome": "connected",
+                      "previousSource": row.requested_source, "previousEpgId": row.epg_id,
+                      "epgId": selected, "source": "epgshare01"})
+    return output, audit
 
 
 def source_channel_info(
@@ -5447,6 +5539,7 @@ def build_server(
     icon_overrides: IconOverrides,
     source_provenance: Mapping[str, Any],
     minimum_coverage: float,
+    provider_links: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     server_rows = [row for row in rows if row.server_id == server_id]
     if not server_rows:
@@ -5524,6 +5617,17 @@ def build_server(
         )
 
     report_dir = staging_public / "reports" / server_id
+    link_health, link_records = tivimate_guide_health.build_guide_link_health(
+        rows=server_rows, entries=entries, schedule_stats=schedule_stats,
+        generated_at=generated_at, provider_links=provider_links,
+    )
+    write_json(report_dir / f"{server_id}_guide_link_health.json", link_health)
+    write_csv(
+        report_dir / f"{server_id}_guide_link_health.csv",
+        tivimate_guide_health.CSV_HEADERS, tivimate_guide_health.csv_rows(
+            record for record in link_records if record["runtime_eligible"]
+        ),
+    )
     report_counts = write_server_reports(
         report_dir=report_dir,
         rows=server_rows,
@@ -5641,6 +5745,11 @@ def build_server(
         "schemaVersion": 2,
         "format": "XMLTV",
         "targetApp": "TiviMate",
+        "guideLinkHealth": {
+            "summaryFile": f"{server_id}_guide_link_health.json",
+            "channelsFile": f"{server_id}_guide_link_health.csv",
+            "summary": link_health,
+        },
         "builderVersion": PIPELINE_VERSION,
         "builderBuildId": PIPELINE_BUILD_ID,
         "serverId": server_id,
@@ -6311,6 +6420,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "playlistAliasRows": 0,
         "sha256": "",
     }
+    provider_links: dict[tuple[str, str], dict[str, Any]] = {}
+    playlist_link_summary: dict[str, int] = {}
     if args.provider_inventory_file is not None:
         inventory_content = bounded_private_file_bytes(
             args.provider_inventory_file,
@@ -6322,6 +6433,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             inventory_content,
             selected_servers,
         )
+        try:
+            rows, provider_links, playlist_link_summary = provider_guide_links.apply_provider_playlist_aliases(
+                rows, inventory_content, selected_servers,
+                quarantine_reason=EFFECTIVE_QUARANTINE_REASON,
+            )
+        except (ValueError, UnicodeError) as exc:
+            raise BuildError("Provider playlist identity evidence failed validation.") from exc
         print(
             "Applied current provider event titles to "
             f"{provider_event_title_overlays['appliedRows']:,} exact numbered "
@@ -6345,6 +6463,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     source_stats: dict[str, SourceStats] = {}
     try:
         if args.provider_inventory_file is not None:
+            source_provenance["providerPlaylistLinks"] = {
+                "inputMode": "same-run-private-inventory", **playlist_link_summary,
+            }
             source_provenance["providerEventTitles"] = {
                 "inputMode": "same-run-private-inventory",
                 **provider_event_title_overlays,
@@ -6354,6 +6475,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for row in rows
             if row.runtime_eligible and row.source_key == "epgshare01"
         }
+        wanted_epgshare.update(verified_guide_connections.selection_connection_ids(
+            (row for row in rows if row.server_id == "server_1"), allow_review=True,
+        ))
         if args.all_source_file:
             all_source_path = Path(args.all_source_file).resolve()
             if not all_source_path.is_file():
@@ -6493,6 +6617,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         }
 
+        rows, reviewed_connections = apply_reviewed_guide_connections(
+            rows, connection, now_epoch=generated_at, provider_links=provider_links,
+        )
+        rows, shared_link_rows = provider_guide_links.apply_shared_playlist_aliases(rows, provider_links)
+        if "providerPlaylistLinks" in source_provenance:
+            source_provenance["providerPlaylistLinks"]["sharedIdRowsBoundToSameSchedule"] = shared_link_rows
+        source_provenance["reviewedGuideConnections"] = {
+            "scope": "server_1", "connectedRows": sum(
+                item["outcome"] == "connected" for item in reviewed_connections
+            ), "unavailableRows": sum(
+                item["outcome"] == "no_current_or_upcoming_schedule"
+                for item in reviewed_connections
+            ), "rows": [item for item in reviewed_connections if item["outcome"] == "connected"],
+        }
+
         panel_files = parse_panel_files(args.panel_file)
         for server_id in sorted(selected_servers):
             if server_id == "server_1":
@@ -6610,6 +6749,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 icon_overrides=icon_overrides,
                 source_provenance=source_provenance,
                 minimum_coverage=args.minimum_coverage,
+                provider_links=provider_links,
             )
             tivimate_builds.append(
                 {

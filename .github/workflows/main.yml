@@ -292,6 +292,7 @@ jobs:
               --review-recheck-mode apply
               --review-recheck-servers server_1 server_2 server_3
               --validate-native-review
+              --provider-playlist-links
               --review-apply-limit "$REVIEW_APPLY_LIMIT"
               --ai-review-limit "$AI_REVIEW_LIMIT"
               --coverage-fallback-limit "$EPG_COVERAGE_FALLBACK_LIMIT"

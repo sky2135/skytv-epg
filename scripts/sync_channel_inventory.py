@@ -529,6 +529,8 @@ def normalize_stream_row(
     return {
         "stream_id": stream_id_text,
         "name": name_text,
+        "_provider_stream_id_exact": str(stream_id) == stream_id_text,
+        "_provider_channel_name_exact": str(name) == name_text,
         "category_id": streaming.clean_identifier(
             first_present(item, ("category_id", "categoryId", "group_id", "groupId")),
             120,
@@ -1252,7 +1254,7 @@ def parse_xtream_m3u(
                     "without its stream URL."
                 )
             metadata, display_name = split_extinf(line)
-            pending = (m3u_attributes(metadata), display_name.strip())
+            pending = (m3u_attributes(metadata), display_name)
             continue
         if line.startswith("#"):
             continue
@@ -1317,6 +1319,8 @@ def parse_xtream_m3u(
             {
                 "stream_id": stream_id,
                 "name": name,
+                "_provider_stream_id_exact": bool(re.fullmatch(r"[0-9]+", stream_id)),
+                "_provider_channel_name_exact": (display_name or attributes.get("tvg-name", "")) == name,
                 "category_id": category_id,
                 "category_name": group,
                 "epg_channel_id": tvg_id,
@@ -1365,7 +1369,10 @@ def fetch_m3u_inventory(
     diagnostics: list[str],
     *,
     allow_insecure_http: bool,
+    maximum_attempts: int | None = None,
+    request_timeout: tuple[int, int] = (25, 240),
 ) -> PanelInventory | None:
+    attempts = 0
     for base_number, service_base in enumerate(service_bases, start=1):
         endpoint = f"{service_base}/get.php"
         for playlist_type, output in (
@@ -1373,6 +1380,10 @@ def fetch_m3u_inventory(
             ("m3u_plus", "m3u8"),
             ("m3u", "ts"),
         ):
+            if maximum_attempts is not None and attempts >= maximum_attempts:
+                diagnostics.append("Authenticated M3U attribute probe reached its request bound.")
+                return None
+            attempts += 1
             try:
                 status, content = safe_credentialed_get(
                     session,
@@ -1384,7 +1395,7 @@ def fetch_m3u_inventory(
                         "output": output,
                     },
                     maximum_bytes=MAX_M3U_BYTES,
-                    timeout=(25, 240),
+                    timeout=request_timeout,
                     allow_insecure_http=allow_insecure_http,
                 )
             except SyncError:
@@ -1826,11 +1837,220 @@ def _event_presentation_hints(channel: Mapping[str, Any]) -> tuple[str, str, tup
     return alias_name, alias_id, tuple(aliases)
 
 
+_PROVIDER_PLAYLIST_HINT = "_provider_playlist_identity"
+_PROVIDER_PLAYLIST_ID_CLAIM = "_provider_playlist_id_claim"
+_PROVIDER_PLAYLIST_STATUSES = frozenset({
+    "verified", "name_only", "shared_id", "invalid_id", "conflicting_id",
+    "name_mismatch", "unavailable",
+})
+_PROVIDER_PLAYLIST_SOURCES = frozenset({
+    "player_api", "authenticated_m3u", "player_api+authenticated_m3u",
+})
+
+
+def _safe_playlist_text(value: object) -> bool:
+    """Opaque XML attributes may contain arrows/angles, but not URLs or controls."""
+    return bool(
+        isinstance(value, str) and value
+        and value == streaming.clean_identifier(value, 300)
+        and not any(unicodedata.category(char).startswith("C") for char in value)
+        and not re.search(r"https?://|(?:password|username)=", value, re.I)
+    )
+
+
+def _playlist_identity_seed(inventory: PanelInventory, channel: dict[str, Any]) -> None:
+    """Bind non-secret playlist attributes to a fresh exact provider stream.
+
+    A provider EPG ID is an output alias, never an EPGShare schedule ID.  The
+    builder must independently verify the mapped channel before using it.
+    These private proofs are rebuilt, not accepted from provider JSON fields.
+    """
+    channel.pop(_PROVIDER_PLAYLIST_HINT, None)
+    channel.pop(_PROVIDER_PLAYLIST_ID_CLAIM, None)
+    stream_id = str(channel.get("stream_id", ""))
+    name = str(channel.get("name", ""))
+    raw_id = str(channel.get("epg_channel_id", ""))
+    if (
+        inventory.source in _PROVIDER_PLAYLIST_SOURCES
+        and stream_id and _safe_playlist_text(raw_id)
+        and channel.get("_native_epg_id_exact") is True
+    ):
+        # Keep every raw member, even when its name or numeric stream identity
+        # is unsuitable for an alias. Native REVIEW processing may later clear
+        # a contradictory provider ID; that must not erase its shared claim.
+        channel[_PROVIDER_PLAYLIST_ID_CLAIM] = (inventory.server_id, stream_id, raw_id)
+    if (
+        inventory.source not in _PROVIDER_PLAYLIST_SOURCES
+        or not re.fullmatch(r"[0-9]{1,120}", stream_id)
+        or channel.get("_provider_stream_id_exact") is not True
+        or not _safe_playlist_text(name)
+        or channel.get("_provider_channel_name_exact") is not True
+    ):
+        return
+    invalid_id = bool(channel.get("_native_epg_id_raw_present")) and (
+        channel.get("_native_epg_id_exact") is not True
+        or not _safe_playlist_text(raw_id)
+    )
+    valid_id = bool(raw_id) and not invalid_id and channel.get("_native_epg_id_exact") is True
+    names = [name]
+    tvg_name = str(channel.get("_m3u_tvg_name", ""))
+    if (
+        inventory.source == "authenticated_m3u" and tvg_name and tvg_name != name
+        and _safe_playlist_text(tvg_name)
+        and exact_inventory_name_key(tvg_name) == exact_inventory_name_key(name)
+    ):
+        names.append(tvg_name)
+    channel[_PROVIDER_PLAYLIST_HINT] = {
+        "server_id": inventory.server_id,
+        "stream_id": stream_id,
+        "channel_name": name,
+        "names": names,
+        "epg_id": raw_id if valid_id else "",
+        "status": "invalid_id" if invalid_id else ("verified" if valid_id else "name_only"),
+        "source": inventory.source,
+    }
+
+
+def _playlist_identity_merge(
+    channel: dict[str, Any], m3u_channel: Mapping[str, Any],
+    *, shared_ids: Mapping[str, set[str]],
+) -> None:
+    proof = channel.get(_PROVIDER_PLAYLIST_HINT)
+    if not isinstance(proof, dict) or proof.get("status") == "invalid_id":
+        return
+    raw_id = str(m3u_channel.get("epg_channel_id", ""))
+    raw_present = bool(m3u_channel.get("_native_epg_id_raw_present", raw_id))
+    name = str(m3u_channel.get("name", ""))
+    if (
+        m3u_channel.get("_provider_stream_id_exact") is not True
+        or m3u_channel.get("_provider_channel_name_exact") is not True
+        or str(m3u_channel.get("stream_id", "")) != proof["stream_id"]
+        or not _safe_playlist_text(name)
+    ):
+        proof.update(epg_id="", status="unavailable")
+        return
+    if exact_inventory_name_key(channel.get("name", "")) != exact_inventory_name_key(name):
+        proof.update(epg_id="", status="name_mismatch")
+        return
+    if raw_present and (
+        m3u_channel.get("_native_epg_id_exact") is not True
+        or not _safe_playlist_text(raw_id)
+    ):
+        proof.update(epg_id="", status="invalid_id")
+        return
+    api_id = str(proof.get("epg_id", ""))
+    if api_id and raw_id and api_id != raw_id:
+        proof.update(epg_id="", status="conflicting_id")
+        return
+    names = list(proof["names"])
+    for candidate in (name, m3u_channel.get("_m3u_tvg_name", "")):
+        candidate = str(candidate)
+        if (
+            _safe_playlist_text(candidate)
+            and exact_inventory_name_key(candidate) == exact_inventory_name_key(name)
+            and candidate not in names
+        ):
+            names.append(candidate)
+    epg_id = raw_id or api_id
+    shared = bool(epg_id) and len(shared_ids.get(epg_id, ())) > 1
+    proof.update(
+        names=names[:3], epg_id="" if shared else epg_id,
+        status="shared_id" if shared else ("verified" if epg_id else "name_only"),
+        source="player_api+authenticated_m3u",
+        shared_epg_id=epg_id if shared else "",
+        # Reuse one same-run membership set across HD/FHD members; copying a
+        # large shared group into every row would make discovery quadratic.
+        shared_stream_ids=shared_ids.get(epg_id, frozenset()) if shared else frozenset(),
+    )
+
+
+def _playlist_identity_hints(
+    inventory: PanelInventory, channel: Mapping[str, Any],
+) -> tuple[str, tuple[str, ...], str, str]:
+    proof = channel.get(_PROVIDER_PLAYLIST_HINT)
+    if not isinstance(proof, dict):
+        return "", (), "unavailable", ""
+    stream_id = str(channel.get("stream_id", ""))
+    names = proof.get("names")
+    epg_id = proof.get("epg_id", "")
+    if (
+        proof.get("server_id") != inventory.server_id
+        or proof.get("stream_id") != stream_id
+        or not re.fullmatch(r"[0-9]{1,120}", stream_id)
+        or proof.get("channel_name") != str(channel.get("name", ""))
+        or proof.get("source") not in _PROVIDER_PLAYLIST_SOURCES
+        or proof.get("status") not in _PROVIDER_PLAYLIST_STATUSES
+        or not isinstance(names, (list, tuple)) or not 1 <= len(names) <= 3
+        or names[0] != proof["channel_name"]
+        or any(not _safe_playlist_text(name) for name in names)
+        or not isinstance(epg_id, str) or (epg_id and not _safe_playlist_text(epg_id))
+        or (bool(epg_id) != (proof["status"] == "verified"))
+    ):
+        return "", (), "unavailable", ""
+    if proof["status"] in {"invalid_id", "conflicting_id", "name_mismatch", "unavailable"}:
+        return "", (), str(proof["status"]), str(proof["source"])
+    return epg_id, tuple(names), str(proof["status"]), str(proof["source"])
+
+
+def _playlist_shared_identity_hints(
+    inventory: PanelInventory, channel: Mapping[str, Any],
+) -> tuple[str, set[str] | frozenset[str]]:
+    _alias, _names, status, _source = _playlist_identity_hints(inventory, channel)
+    if status != "shared_id":
+        return "", frozenset()
+    proof = channel[_PROVIDER_PLAYLIST_HINT]
+    candidate = proof.get("shared_epg_id", "")
+    members = proof.get("shared_stream_ids")
+    if (
+        not _safe_playlist_text(candidate)
+        or not isinstance(members, (set, frozenset))
+        or not 2 <= len(members) <= MAX_CHANNELS_PER_SERVER
+        or str(channel.get("stream_id", "")) not in members
+    ):
+        return "", frozenset()
+    return candidate, members
+
+
 def inventory_rows(inventories: Sequence[PanelInventory]) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
+    alias_streams: dict[tuple[str, str], set[str]] = {}
+    checked_shared_groups: set[tuple[str, str, int]] = set()
+    for inventory in inventories:
+        for channel in inventory.channels:
+            claim = channel.get(_PROVIDER_PLAYLIST_ID_CLAIM)
+            if (
+                isinstance(claim, (tuple, list)) and len(claim) == 3
+                and claim[:2] == (inventory.server_id, str(channel.get("stream_id", "")))
+                and _safe_playlist_text(claim[2])
+            ):
+                alias_streams.setdefault((inventory.server_id, claim[2]), set()).add(claim[1])
+            raw_id = str(channel.get("epg_channel_id", ""))
+            if (
+                _safe_playlist_text(raw_id)
+                and channel.get("_native_epg_id_exact") is True
+            ):
+                # Include even unexportable/nonnumeric rows in ambiguity
+                # checks; one safe row must not claim a shared provider ID.
+                alias_streams.setdefault((inventory.server_id, raw_id), set()).add(str(channel.get("stream_id", "")))
+            alias, _names, _status, _source = _playlist_identity_hints(inventory, channel)
+            if alias:
+                alias_streams.setdefault((inventory.server_id, alias), set()).add(str(channel.get("stream_id", "")))
+            shared_id, shared_members = _playlist_shared_identity_hints(inventory, channel)
+            group_key = (inventory.server_id, shared_id, id(shared_members))
+            if shared_id and group_key not in checked_shared_groups and all(
+                isinstance(member, str) and member for member in shared_members
+            ):
+                alias_streams.setdefault((inventory.server_id, shared_id), set()).update(shared_members)
+                checked_shared_groups.add(group_key)
     for inventory in inventories:
         for channel in inventory.channels:
             event_name_alias, event_epg_id_alias, event_name_aliases = _event_presentation_hints(channel)
+            playlist_id, playlist_names, playlist_status, playlist_source = _playlist_identity_hints(inventory, channel)
+            shared_id, _shared_members = _playlist_shared_identity_hints(inventory, channel)
+            if playlist_id and len(alias_streams.get((inventory.server_id, playlist_id), ())) != 1:
+                shared_id = playlist_id
+                playlist_id, playlist_status = "", "shared_id"
+            shared_count = len(alias_streams.get((inventory.server_id, shared_id), ())) if shared_id else 0
             result.append(
                 {
                     "server_id": inventory.server_id,
@@ -1845,6 +2065,12 @@ def inventory_rows(inventories: Sequence[PanelInventory]) -> list[dict[str, str]
                     "provider_event_name_alias": event_name_alias,
                     "provider_event_epg_id_alias": event_epg_id_alias,
                     "provider_event_name_aliases": json.dumps(event_name_aliases, ensure_ascii=False, separators=(",", ":")) if event_name_aliases else "",
+                    "provider_playlist_epg_id_alias": playlist_id,
+                    "provider_playlist_name_aliases": json.dumps(playlist_names, ensure_ascii=False, separators=(",", ":")) if playlist_names else "",
+                    "provider_playlist_link_status": playlist_status,
+                    "provider_playlist_identity_source": playlist_source,
+                    "provider_playlist_shared_epg_id": shared_id if shared_count > 1 else "",
+                    "provider_playlist_shared_stream_count": str(shared_count) if shared_count > 1 else "",
                 }
             )
     return sorted(
@@ -1905,8 +2131,9 @@ def enrich_review_inventories_from_m3u(
     *,
     selected_servers: Iterable[str],
     allow_insecure_http: bool,
+    playlist_link_servers: Iterable[str] = (),
 ) -> tuple[list[PanelInventory], dict[str, int]]:
-    """Add only corroborated M3U EPG IDs to private REVIEW-mode copies.
+    """Add corroborated M3U IDs and optional private playlist-link proofs.
 
     Xtream's otherwise-authoritative ``get_live_streams`` response commonly
     omits ``epg_channel_id``.  The authenticated M3U is therefore consulted as
@@ -1915,11 +2142,16 @@ def enrich_review_inventories_from_m3u(
     an exact numeric stream-ID join and the same normalized channel name.
     Independently proven same-category numbered event slots may retain M3U
     name/EPG-ID presentation aliases without authorizing a native mapping.
+    Optional playlist link servers also export exact API/M3U IDs and names
+    for ordinary channels; these are XMLTV output aliases, never source IDs.
     """
 
     allowed_servers = {
         streaming.normalize_server_id(value) for value in selected_servers
     }.intersection({"server_2", "server_3"})
+    playlist_servers = {
+        streaming.normalize_server_id(value) for value in playlist_link_servers
+    }.intersection(DEFAULT_SERVERS)
     configs = {config.server_id: config for config in server_configs}
     stats = {
         "native_review_provider_ids_present": 0,
@@ -1935,6 +2167,8 @@ def enrich_review_inventories_from_m3u(
         "provider_event_m3u_epg_id_aliases": 0,
         "provider_event_m3u_ambiguous_stream_ids": 0,
         "provider_event_m3u_shared_epg_id_aliases": 0,
+        "provider_playlist_m3u_servers_attempted": 0,
+        "provider_playlist_m3u_servers_available": 0,
     }
     enriched: list[PanelInventory] = []
     for inventory in inventories:
@@ -1948,6 +2182,11 @@ def enrich_review_inventories_from_m3u(
             quarantined_stream_ids=inventory.quarantined_stream_ids,
         )
         for channel in copied.channels:
+            if inventory.server_id in playlist_servers:
+                _playlist_identity_seed(copied, channel)
+            else:
+                channel.pop(_PROVIDER_PLAYLIST_HINT, None)
+                channel.pop(_PROVIDER_PLAYLIST_ID_CLAIM, None)
             # These proofs must be rebuilt from this authenticated fetch,
             # never inherited from input data or a preceding enrichment.
             for field_name in _PROVIDER_EVENT_HINT_FIELDS:
@@ -1969,17 +2208,29 @@ def enrich_review_inventories_from_m3u(
                     channel["epg_channel_id"] = ""
                     channel["_native_epg_id_conflict"] = True
                     stats["native_review_invalid_provider_ids"] += 1
+        needs_playlist_m3u = inventory.server_id in playlist_servers and any(
+            isinstance(channel.get(_PROVIDER_PLAYLIST_HINT), dict)
+            and channel[_PROVIDER_PLAYLIST_HINT].get("status") == "name_only"
+            for channel in copied.channels
+        )
         if (
-            inventory.server_id not in allowed_servers
+            (inventory.server_id not in allowed_servers and not needs_playlist_m3u)
             or inventory.source != "player_api"
             or config is None
         ):
             enriched.append(copied)
             continue
 
-        stats["native_review_m3u_servers_attempted"] += 1
+        if inventory.server_id in allowed_servers:
+            stats["native_review_m3u_servers_attempted"] += 1
+        if inventory.server_id in playlist_servers:
+            stats["provider_playlist_m3u_servers_attempted"] += 1
         diagnostics: list[str] = []
         try:
+            playlist_probe_bounds = (
+                {"maximum_attempts": 2, "request_timeout": (10, 60)}
+                if inventory.server_id not in allowed_servers else {}
+            )
             m3u_inventory = fetch_m3u_inventory(
                 session,
                 config,
@@ -1988,10 +2239,11 @@ def enrich_review_inventories_from_m3u(
                 ),
                 diagnostics,
                 allow_insecure_http=allow_insecure_http,
+                **playlist_probe_bounds,
             )
         except SyncError:
             m3u_inventory = None
-        if m3u_inventory is None:
+        if m3u_inventory is None or m3u_inventory.server_id != inventory.server_id:
             copied.diagnostics.append(
                 "Authenticated M3U EPG-ID enrichment was unavailable."
             )
@@ -2007,7 +2259,10 @@ def enrich_review_inventories_from_m3u(
                 ),
             ),
         )
-        stats["native_review_m3u_servers_available"] += 1
+        if inventory.server_id in allowed_servers:
+            stats["native_review_m3u_servers_available"] += 1
+        if inventory.server_id in playlist_servers:
+            stats["provider_playlist_m3u_servers_available"] += 1
         m3u_by_stream: dict[str, Mapping[str, Any]] = {}
         ambiguous_m3u_streams: set[str] = set()
         m3u_epg_id_streams: dict[str, set[str]] = {}
@@ -2047,7 +2302,14 @@ def enrich_review_inventories_from_m3u(
                 continue
             m3u_channel = m3u_by_stream.get(stream_id)
             if m3u_channel is None:
-                stats["native_review_m3u_missing_rows"] += 1
+                if inventory.server_id in allowed_servers:
+                    stats["native_review_m3u_missing_rows"] += 1
+                continue
+            if inventory.server_id in playlist_servers:
+                _playlist_identity_merge(channel, m3u_channel, shared_ids=m3u_epg_id_streams)
+            # Server 1 playlist IDs are only XMLTV output aliases. They must
+            # never enable native schedule matching or native REVIEW writes.
+            if inventory.server_id not in allowed_servers:
                 continue
             if channel.get("_native_epg_id_conflict") is True:
                 continue
@@ -3571,6 +3833,12 @@ def write_reports(
         "provider_event_name_alias",
         "provider_event_epg_id_alias",
         "provider_event_name_aliases",
+        "provider_playlist_epg_id_alias",
+        "provider_playlist_name_aliases",
+        "provider_playlist_link_status",
+        "provider_playlist_identity_source",
+        "provider_playlist_shared_epg_id",
+        "provider_playlist_shared_stream_count",
     )
     changed_headers = (
         "server_id",
@@ -8830,6 +9098,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--provider-playlist-links",
+        action="store_true",
+        help=(
+            "Export same-run, exact-stream provider playlist IDs as private "
+            "XMLTV connection hints. Does not authorize native EPG on Server 1."
+        ),
+    )
+    parser.add_argument(
         "--validate-native-review",
         action="store_true",
         help=(
@@ -9026,13 +9302,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             except SyncError as exc:
                 provider_failures[config.server_id] = str(exc)
-        if args.validate_native_review:
+        if args.validate_native_review or args.provider_playlist_links:
             inventories, native_hint_summary = enrich_review_inventories_from_m3u(
                 session,
                 inventories,
                 configs,
-                selected_servers=args.review_recheck_servers,
+                selected_servers=args.review_recheck_servers if args.validate_native_review else (),
                 allow_insecure_http=args.allow_insecure_http,
+                playlist_link_servers=selected_servers if args.provider_playlist_links else (),
             )
     finally:
         session.close()
