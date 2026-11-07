@@ -38,6 +38,7 @@ for import_path in (SCRIPT_DIR, SRC_DIR):
 import build_epg_streaming as streaming  # noqa: E402
 import epg_catalog_stream as catalog_stream  # noqa: E402
 import matcher_decision_cache as decision_cache  # noqa: E402
+import verified_guide_connections  # noqa: E402
 from matcher_alias_index import install_alias_index  # noqa: E402
 from epg_selection_spool import EpgSelectionSpoolWriter, SpoolError  # noqa: E402
 from skytv_epg_auto_match_v1 import (  # noqa: E402
@@ -3333,7 +3334,13 @@ def auto_match_and_spool(
         key for key in synthetic_upgrade_keys
         if verified_coverage_fallback_preimage(rows_by_key[key]) is not None
     )
-    fixed_ids = active_combined_source_ids(mapping_rows)
+    fixed_ids = active_combined_source_ids(mapping_rows) | frozenset(
+        verified_guide_connections.selection_connection_ids(
+            (row for row in (*mapping_rows, *new_rows, *review_rows, *synthetic_upgrade_rows)
+             if row.get("server_id") == "server_1"),
+            allow_review=True,
+        )
+    )
     window_start = now_epoch - DEFAULT_EPG_HISTORY_DAYS * 86400
     # A caller may pin the rotation for exact replay. Otherwise advance it
     # once per UTC day by a full shortlist window. Round to a complete server

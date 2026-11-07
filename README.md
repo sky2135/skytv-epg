@@ -22,6 +22,26 @@ programme times still valid near the build time, and expires after 36 hours.
 Expired or missing schedules use the existing disclosed channel placeholders;
 cached reuse and provider outages remain visible in health reports.
 
+TiviMate compatibility links are rebuilt from the current authenticated provider
+inventory. Exact playlist IDs and names are exported only after confirming the
+same server, stream and channel identity. A shared ID is used only when every
+provider stream carrying it resolves to the same schedule. Conflicting or unsafe
+attributes are reported without replacing another channel's guide.
+
+Server 1 has reviewed EPGShare connections for the UK Sky Sports lineup. These
+reuse the existing one-pass schedule selection and require a current or upcoming
+programme within six hours plus current provider identity confirmation. Explicit
+exclusions, manual mappings and identity quarantines remain protected. The private
+Sheet snapshot stays unchanged; applied runtime connections are disclosed in build
+provenance. Server 1 never reads provider programme schedules.
+
+Each server publishes a `server_X_guide_link_health.json` summary and a companion
+CSV in `reports/server_X/`. Reports distinguish real schedules, placeholders,
+expired data and exact-ID conflicts. Omitted private rows contribute aggregate
+counts only; their identities are excluded from public reports. These checks use
+the builder's existing schedule statistics rather than downloading or parsing the
+guide again.
+
 **Recover unavailable native EPG** checks affected sources every two hours and
 requests a live refresh after genuine current and upcoming schedules return.
 It skips another refresh when one is already active or recently started.
