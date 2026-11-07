@@ -8,6 +8,15 @@ on:
       timezone: "America/Toronto"
 
   workflow_dispatch:
+    inputs:
+      inventory_mode:
+        description: "Update mappings, or refresh guides using existing mappings only"
+        type: choice
+        required: true
+        default: normal
+        options:
+          - normal
+          - existing-mappings
 
 # Share this group with the manual inventory workflow. This prevents concurrent
 # Sheet appends. VOD builds have their own group; final publication is serialized.
@@ -250,9 +259,10 @@ jobs:
           --directory "${{ runner.temp }}/skytv-native-panel-cache"
           --file .build/native-panel-cache.enc
 
-      - name: Refresh the private Google Sheet and create this run's mapping snapshot
+      - name: Prepare provider inventory and this run's mapping snapshot
         shell: bash
         env:
+          INVENTORY_MODE: ${{ inputs.inventory_mode || 'normal' }}
           SKYTV_PANEL_CACHE_DIR: ${{ runner.temp }}/skytv-native-panel-cache
           # These credentials exist only in this inventory step. Server 1's
           # credentials are never available to the EPG-building step below.
@@ -269,6 +279,13 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euo pipefail
+          case "$INVENTORY_MODE" in
+            normal|existing-mappings) ;;
+            *)
+              echo "::error::Invalid inventory mode."
+              exit 1
+              ;;
+          esac
           mkdir -p .build/channel-sync
           sync_command=(
             python -u scripts/sync_channel_inventory.py
@@ -289,19 +306,36 @@ jobs:
                 "$RUNNER_TEMP/skytv-epg-v1/selected_epg.sqlite3"
               --epgshare-icon-catalog-out
                 "$RUNNER_TEMP/skytv-epg-v1/source_icons.json"
-              --review-recheck-mode apply
               --review-recheck-servers server_1 server_2 server_3
-              --validate-native-review
               --provider-playlist-links
-              --review-apply-limit "$REVIEW_APPLY_LIMIT"
               --ai-review-limit "$AI_REVIEW_LIMIT"
-              --coverage-fallback-limit "$EPG_COVERAGE_FALLBACK_LIMIT"
               --minimum-server-channels
                 server_1=4000 server_2=10500 server_3=9400
-              --write-to-sheet
           )
-          if [[ "${USE_GEMINI_AI,,}" == "true" ]]; then
-            sync_command+=(--use-gemini-ai)
+          if [[ "$INVENTORY_MODE" == "normal" ]]; then
+            sync_command+=(
+              --review-recheck-mode apply
+              --review-apply-limit "$REVIEW_APPLY_LIMIT"
+              --coverage-fallback-limit "$EPG_COVERAGE_FALLBACK_LIMIT"
+              --validate-native-review
+              --write-to-sheet
+            )
+            if [[ "${USE_GEMINI_AI,,}" == "true" ]]; then
+              sync_command+=(--use-gemini-ai)
+            fi
+            echo "Inventory mode: normal (verified Google Sheet updates enabled)."
+            echo '- Inventory mode: **normal**; verified mapping updates and new-channel appends are enabled.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            # This is a separate no-write mode, not an exception to any
+            # pre-write identity check. Unwritten proposals remain private and
+            # cannot enter the authoritative/effective mapping snapshot.
+            sync_command+=(
+              --review-recheck-mode off
+              --review-apply-limit 0
+              --coverage-fallback-limit 0
+            )
+            echo "Inventory mode: existing-mappings (no Google Sheet writes)."
+            echo '- Inventory mode: **existing mappings only**; no Google Sheet writes. Fresh provider identity, quarantine and guide checks remain enabled; new-channel proposals stay private.' >> "$GITHUB_STEP_SUMMARY"
           fi
           if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
             sync_command+=(--allow-insecure-http)

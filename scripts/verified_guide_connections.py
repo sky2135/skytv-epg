@@ -1,4 +1,4 @@
-"""Reviewed same-feed EPGShare connections for the UK Sky Sports lineup.
+"""Reviewed same-feed EPGShare connections for specific linear channels.
 
 Names identify a reviewed channel family; they never prove that a schedule is
 current. Callers must select from these exact IDs only after the ordinary
@@ -20,6 +20,8 @@ class ReviewedGuideConnection:
     candidate_ids: tuple[str, ...]
     epg_feed: str = "UK1"
     evidence: str = "reviewed_same_country_linear_channel_identity"
+    country: str = "GB"
+    languages: tuple[str, ...] = ()
 
     @property
     def key(self) -> str:
@@ -28,6 +30,12 @@ class ReviewedGuideConnection:
     @property
     def family(self) -> str:
         return self.identity.removeprefix("sky_sports_").removesuffix("_uk")
+
+    def feed_for_id(self, epg_id: str) -> str:
+        """Retain the observed source feed when a reviewed alternate is used."""
+        if epg_id in self.candidate_ids and epg_id in _SONY_IN4_IDS:
+            return "IN4"
+        return self.epg_feed
 
 
 # Exact identities observed in the EPGShare UK1 channel catalog. This is an
@@ -68,7 +76,78 @@ _CONNECTIONS = {
     ),
 }
 
+# Sony's current India lineup retains the numbered TEN identities. Provider
+# labels commonly omit TEN or keep the older Sony Ten spelling. Language is
+# part of the identity: 3 is Hindi, and 4 must explicitly say Tamil or Telugu.
+# Sony ESPN is not a numbered TEN alias. IN1 candidates precede the separately
+# observed IN4 spellings; no fallback crosses a language edition.
+_SONY_CONNECTIONS = {
+    ("1", "en"): ReviewedGuideConnection(
+        "sony_sports_ten_1_in", "Sony Sports Ten 1",
+        ("Sony.Ten.1.HD.in", "Sony.Ten.1.in", "SONY.SPORTS.TEN.1.HD.in", "SONY.SPORTS.TEN.1.in"),
+        epg_feed="IN1", country="IN", languages=("en",),
+    ),
+    ("2", "en"): ReviewedGuideConnection(
+        "sony_sports_ten_2_in", "Sony Sports Ten 2",
+        ("Sony.Ten.2.HD.in", "SONY.SPORTS.TEN.2.HD.in", "SONY.SPORTS.TEN.2.in"),
+        epg_feed="IN1", country="IN", languages=("en",),
+    ),
+    ("3", "hi"): ReviewedGuideConnection(
+        "sony_sports_ten_3_hindi_in", "Sony Sports Ten 3 Hindi",
+        ("Sony.Ten.3.HD.Hindi.in", "Sony.Ten.3.Hindi.in", "SONY.SPORTS.TEN.3.HD.in", "SONY.SPORTS.TEN.3.in"),
+        epg_feed="IN1", country="IN", languages=("hi",),
+    ),
+    ("4", "ta"): ReviewedGuideConnection(
+        "sony_sports_ten_4_tamil_in", "Sony Sports Ten 4 Tamil",
+        ("Sony.Ten.4.HD.Tamil.in", "Sony.Ten.4.Tamil.in", "SONY.SPORTS.TEN.4.TAMIL.in"),
+        epg_feed="IN1", country="IN", languages=("ta",),
+    ),
+    ("4", "te"): ReviewedGuideConnection(
+        "sony_sports_ten_4_telugu_in", "Sony Sports Ten 4 Telugu",
+        ("Sony.Ten.4.HD.Telugu.in", "Sony.Ten.4.Telugu.in"),
+        epg_feed="IN1", country="IN", languages=("te",),
+    ),
+    ("5", "en"): ReviewedGuideConnection(
+        "sony_sports_ten_5_in", "Sony Sports Ten 5",
+        ("Sony.Ten.5.HD.in", "Sony.Ten.5.in", "SONY.SPORTS.TEN.5.HD.in", "SONY.SPORTS.TEN.5.in"),
+        epg_feed="IN1", country="IN", languages=("en",),
+    ),
+}
+_SONY_IN4_IDS = frozenset(
+    epg_id for connection in _SONY_CONNECTIONS.values()
+    for epg_id in connection.candidate_ids if epg_id.startswith("SONY.SPORTS.TEN.")
+)
+_HUB_SPORTS_4 = ReviewedGuideConnection(
+    "hub_sports_4_sg", "Hub Sports 4", ("Hub.Sports.4.HD.sg",),
+    epg_feed="SG1", country="SG",
+)
+
 _QUALITY = r"(?:sd|hd|fhd|uhd|4k|2160p|1080p|720p)"
+_SONY_PREFIX = re.compile(r"\A(?:in|india|cric|cri)\s*(?:\|+|:|-)\s*", re.I)
+_SONY_PLAIN = re.compile(r"\Asony\s*(?:sports(?:\s*ten)?|ten)\s*(?P<number>[1-5])(?P<suffix>.*)\Z", re.I)
+_SONY_LANGUAGE_TOKENS = {
+    "english": "en", "eng": "en", "en": "en",
+    "hindi": "hi", "hin": "hi", "hi": "hi",
+    "tamil": "ta", "tam": "ta", "ta": "ta",
+    "telugu": "te", "tel": "te", "te": "te",
+}
+_SONY_QUALIFIER_TOKENS = frozenset({"sd", "hd", "fhd", "uhd", "4k", "2160p", "1080p", "720p", "hevc"})
+_SONY_FOREIGN_CATEGORY = re.compile(
+    r"(?:\A|[^a-z])(?:uk|gb|british|united kingdom|de|germany|german|it|italy|italian|"
+    r"ie|ireland|irish|us|usa|united states|ca|canada|au|australia|nz|new zealand|"
+    r"pk|pakistan|bd|bangladesh|lk|sri lanka|sg|singapore|my|malaysia|id|indonesia|"
+    r"jp|japan|cn|china|hk|hong kong|kr|korea|za|south africa|fr|france|es|spain|pt|portugal)(?:\Z|[^a-z])", re.I,
+)
+_HUB_PREFIX = re.compile(
+    rf"\A(?:sg|sgp|singapore|cric|cri)(?:\s+{_QUALITY})?\s*(?:\|+|:|-)\s*", re.I,
+)
+_HUB_PLAIN = re.compile(r"\Ahub\s*sports\s*4(?P<suffix>.*)\Z", re.I)
+_HUB_FOREIGN_CATEGORY = re.compile(
+    r"(?:\A|[^a-z])(?:uk|gb|british|united kingdom|de|germany|german|it|italy|italian|"
+    r"ie|ireland|irish|us|usa|united states|ca|canada|au|australia|nz|new zealand|"
+    r"in|india|pk|pakistan|bd|bangladesh|lk|sri lanka|my|malaysia|id|indonesia|"
+    r"jp|japan|cn|china|hk|hong kong|kr|korea|za|south africa|fr|france|es|spain|pt|portugal)(?:\Z|[^a-z])", re.I,
+)
 _UK_PREFIX = re.compile(
     rf"\A(?:uk|gb)(?:\s+{_QUALITY})?\s*(?:\|+|:|-)\s*", re.I,
 )
@@ -76,7 +155,7 @@ _UK_CATEGORY = re.compile(r"(?:\A|[^a-z])(?:uk|gb|united kingdom)(?:\Z|[^a-z])",
 _FOREIGN_CATEGORY = re.compile(
     r"(?:\A|[^a-z])(?:de|germany|german|it|italy|italian|ie|ireland|irish|"
     r"us|usa|united states|ca|canada|au|australia|nz|new zealand|"
-    r"in|india|pk|pakistan|fr|france|es|spain|pt|portugal)(?:\Z|[^a-z])", re.I,
+    r"in|india|pk|pakistan|sg|singapore|fr|france|es|spain|pt|portugal)(?:\Z|[^a-z])", re.I,
 )
 _PLAIN = re.compile(
     rf"\Asky\s+sports\s*(?P<family>news|main\s+event|premier\s+league|"
@@ -140,24 +219,98 @@ def _text(value: object, maximum: int) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
+def _reviewed_sony_connection(
+    text: str, category: object, country_set: set[str],
+) -> ReviewedGuideConnection | None:
+    category_text = _text(category, 200)
+    if isinstance(category, str) and category and not category_text:
+        return None
+    if _SONY_FOREIGN_CATEGORY.search(category_text):
+        return None
+    # The named TEN lineup is specifically Indian, so an absent/unknown
+    # market is allowed. Positive evidence of another market still vetoes it.
+    known_countries = country_set - {"UNKNOWN", "ZZ", "XX"}
+    if known_countries - {"IN"}:
+        return None
+    for _ in range(2):
+        prefix = _SONY_PREFIX.match(text)
+        if prefix is None:
+            break
+        text = text[prefix.end():]
+    text = re.sub(r"\s*\[(?:IN|INDIA)\]\Z", "", text, flags=re.I)
+    matched = _SONY_PLAIN.fullmatch(text)
+    if matched is None:
+        return None
+    suffix = matched.group("suffix").strip().casefold()
+    # Balanced presentation brackets are allowed around known language or
+    # quality words only. Timeshifts, backup feeds and extra numerals survive
+    # tokenization and therefore fail the exact qualifier allowlist below.
+    suffix = re.sub(r"\(([^()]*)\)|\[([^\[\]]*)\]", lambda m: " " + (m[1] or m[2] or "") + " ", suffix)
+    tokens = suffix.split()
+    if any(token not in _SONY_QUALIFIER_TOKENS and token not in _SONY_LANGUAGE_TOKENS for token in tokens):
+        return None
+    languages = {_SONY_LANGUAGE_TOKENS[token] for token in tokens if token in _SONY_LANGUAGE_TOKENS}
+    if len(languages) > 1:
+        return None
+    number = matched.group("number")
+    language = next(iter(languages), "hi" if number == "3" else "en")
+    if number == "4" and not languages:
+        return None
+    return _SONY_CONNECTIONS.get((number, language))
+
+
+def _reviewed_hub_connection(
+    text: str, category: object, country_set: set[str],
+) -> ReviewedGuideConnection | None:
+    category_text = _text(category, 200)
+    if isinstance(category, str) and category and not category_text:
+        return None
+    if _HUB_FOREIGN_CATEGORY.search(category_text):
+        return None
+    if (country_set - {"UNKNOWN", "ZZ", "XX"}) - {"SG"}:
+        return None
+    for _ in range(2):
+        prefix = _HUB_PREFIX.match(text)
+        if prefix is None:
+            break
+        text = text[prefix.end():]
+    text = re.sub(r"\s*\[(?:SG|SINGAPORE)\]\Z", "", text, flags=re.I)
+    matched = _HUB_PLAIN.fullmatch(text)
+    if matched is None:
+        return None
+    suffix = re.sub(r"\(([^()]*)\)", r" \1 ", matched.group("suffix").casefold()).strip()
+    if any(token not in _SONY_QUALIFIER_TOKENS for token in suffix.split()):
+        return None
+    return _HUB_SPORTS_4
+
+
 def reviewed_connection(
     name: object,
     category: object = "",
     countries: Iterable[str] = (),
 ) -> ReviewedGuideConnection | None:
-    """Return a reviewed UK linear identity, without selecting any schedule.
+    """Return a reviewed linear identity, without selecting any schedule.
 
     An explicit UK prefix or UK category is required unless country metadata
     independently binds a plain channel name to GB. Foreign country metadata
     vetoes a match. Technical quality suffixes do not change a linear feed;
-    timeshift, regional, numbered, event and alternate-feed suffixes do.
+    timeshift, regional, numbered, event and alternate-feed suffixes do. The
+    explicitly reviewed Sony TEN lineup is Indian and Hub Sports 4 is from
+    Singapore even when country metadata is absent. Numbered and language
+    editions remain separate; programme titles do not establish audio language.
     """
     text = _text(name, 300)
     if not text:
         return None
+    country_set = {str(country).strip().upper() for country in countries if country}
+    sony = _reviewed_sony_connection(text, category, country_set)
+    if sony is not None:
+        return sony
+    hub = _reviewed_hub_connection(text, category, country_set)
+    if hub is not None:
+        return hub
     if _FOREIGN_CATEGORY.search(_text(category, 200)):
         return None
-    country_set = {str(country).strip().upper() for country in countries if country}
     if country_set - {"GB", "UK"}:
         return None
     match = _UK_PREFIX.match(text)
@@ -213,11 +366,11 @@ def selection_connection_ids(
 ) -> set[str]:
     """Reserve a superset before registry enrichment, without approving a row.
 
-    A raw Sheet row can lack GB metadata that the builder later obtains from
-    its public registry. Reserve IDs for an exact reviewed Sky Sports spelling
-    in that case as well. This selection-only UK assumption is never returned
-    as a binding and must not be used for activation. Existing foreign-country
-    or foreign-market evidence, exclusions and quarantines still veto it.
+    Market-specific identities (including Sony India) are considered first.
+    A raw Sheet row can also lack GB metadata that the builder later obtains
+    from its public registry. Reserve exact reviewed Sky Sports candidates in
+    that case as a selection-only superset, never as activation authority.
+    Existing foreign-country/category evidence and decision gates still veto.
     """
     wanted: set[str] = set()
     for row in rows:
@@ -226,8 +379,12 @@ def selection_connection_ids(
         countries = tuple(_row_countries(row))
         connection = reviewed_connection(
             _value(row, "channel_name"), _value(row, "category_name"),
-            countries or ("GB",),
+            countries,
         )
+        if connection is None and not countries:
+            connection = reviewed_connection(
+                _value(row, "channel_name"), _value(row, "category_name"), ("GB",),
+            )
         if connection is not None:
             wanted.update(connection.candidate_ids)
     return wanted

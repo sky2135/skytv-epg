@@ -4142,6 +4142,12 @@ def apply_reviewed_guide_connections(
                 or link.get("identity_verified") is not True):
             output.append(row)
             continue
+        locked_languages = ({row.metadata.primary_language, *row.metadata.languages}
+                            - {"", "und", "unknown", "mul"})
+        if (row.metadata.locked and rule.languages
+                and locked_languages - set(rule.languages)):
+            output.append(row)
+            continue
         selected = (
             row.schedule_channel_key
             if row.source_key == "epgshare01" and not row.uses_local_synthetic
@@ -4158,16 +4164,29 @@ def apply_reviewed_guide_connections(
                 and row.source_key == "epgshare01" and row.schedule_channel_key == selected):
             output.append(row)
             continue
+        reviewed_metadata = row.metadata
+        if not reviewed_metadata.locked:
+            reviewed_metadata = replace(
+                reviewed_metadata,
+                countries=reviewed_metadata.countries or [rule.country],
+                region=({"GB": "europe", "IN": "south_asia", "SG": "southeast_asia"}.get(
+                    rule.country, reviewed_metadata.region
+                ) if reviewed_metadata.region in {"", "unknown"} else reviewed_metadata.region),
+                primary_language=rule.languages[0] if rule.languages else reviewed_metadata.primary_language,
+                languages=list(rule.languages) if rule.languages else reviewed_metadata.languages,
+            )
         output.append(replace(
             row, enabled=True, action="AUTO_EPGSHARE", requested_source="epgshare01",
-            effective_source="epgshare01", epg_feed=rule.epg_feed, epg_id=selected,
+            effective_source="epgshare01", epg_feed=rule.feed_for_id(selected), epg_id=selected,
             runtime_epg_id="", runtime_synthetic_reason="",
+            metadata=reviewed_metadata,
             metadata_evidence={**row.metadata_evidence, "guideConnection": {
                 "method": rule.evidence, "identity": rule.identity,
                 "programmeGate": "CURRENT_OR_UPCOMING_WITHIN_6H",
                 "minimumInformativeIntervals": 2, "minimumDistinctTitles": 2,
                 "minimumFutureCoverageHours": 6,
                 "providerIdentity": "same-run-authenticated-server-stream-and-name",
+                "country": rule.country, "languages": list(rule.languages),
             }},
         ))
         audit.append({"streamId": row.stream_id, "channelName": row.channel_name,
