@@ -50,6 +50,7 @@ def _empty_target(stream_id: str, status: str) -> dict[str, Any]:
         "streamId": stream_id, "found": False, "name": "",
         "providerEpgId": "", "idStatus": status,
         "memberCount": 0, "members": [], "membersOmitted": 0,
+        "memberCountCompleteness": "unknown",
     }
 
 
@@ -61,6 +62,8 @@ def build_report(
         "schemaVersion": 1, "mode": "tivimate_playlist_links",
         "serverId": "server_1", "status": status,
         "source": "", "candidateLookups": 0, "playlistRows": 0,
+        "quarantinedRowsExcluded": 0,
+        "membershipCountCompleteness": "unknown",
         "targets": [_empty_target(stream_id, "unavailable") for stream_id in TARGET_STREAM_IDS],
     }
     if source is None:
@@ -69,6 +72,12 @@ def build_report(
         report["status"] = "invalid_source"
         return report
     report.update(status="available", source=expected_source, playlistRows=len(source.channels))
+    quarantined = source.quarantined_stream_ids
+    completeness = "lower_bound" if quarantined else "complete"
+    report.update(
+        quarantinedRowsExcluded=len(quarantined),
+        membershipCountCompleteness=completeness,
+    )
     groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     targets: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for channel in source.channels:
@@ -83,8 +92,11 @@ def build_report(
     for index, stream_id in enumerate(TARGET_STREAM_IDS):
         rows = targets.get(stream_id, [])
         target = _empty_target(stream_id, "not_found")
+        target["memberCountCompleteness"] = completeness
         report["targets"][index] = target
         if not rows:
+            if stream_id in quarantined:
+                target.update(found=True, idStatus="quarantined")
             continue
         target["found"] = True
         if len(rows) != 1:
@@ -150,11 +162,24 @@ def _api_inventory_probe(session, config, bases, *, allow_insecure_http, observa
             continue
         try:
             payload = json.loads(content.decode("utf-8-sig", errors="strict"))
-            channels = inventory.normalize_panel_action_rows(payload, "get_live_streams")
-        except (UnicodeDecodeError, json.JSONDecodeError, inventory.SyncError):
+        except (UnicodeDecodeError, json.JSONDecodeError):
             continue
+        quarantined: tuple[str, ...] = ()
+        try:
+            channels = inventory.normalize_panel_action_rows(payload, "get_live_streams")
+        except inventory.SyncError:
+            try:
+                channels, quarantined = inventory.normalize_blank_name_quarantine(
+                    payload,
+                    reflection_policy=inventory.provider_reflection_needles(config, bases[:2]),
+                )
+            except inventory.SyncError:
+                continue
         if channels:
-            return inventory.PanelInventory("server_1", "Server 1", [], channels, "player_api")
+            return inventory.PanelInventory(
+                "server_1", "Server 1", [], channels, "player_api",
+                quarantined_stream_ids=quarantined,
+            )
     return None
 
 

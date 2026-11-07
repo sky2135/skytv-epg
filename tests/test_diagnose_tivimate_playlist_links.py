@@ -183,6 +183,38 @@ class DiagnoseTiviMatePlaylistLinksTests(unittest.TestCase):
         self.assertEqual(report["status"], "source_rejected")
         self.assertNotIn("pass123", json.dumps(report))
 
+    def test_api_uses_production_blank_name_quarantine_and_marks_lower_bound(self):
+        payload = [
+            {"stream_id": "122410", "name": "Sky Sports Premier League", "epg_channel_id": "shared"},
+            {"stream_id": "500", "name": "Sky Sports Premier League FHD", "epg_channel_id": "shared"},
+            *[{"stream_id": str(200000 + index), "name": f"Valid Channel {index}"} for index in range(100)],
+            {"stream_id": "999999", "name": "", "epg_channel_id": "shared"},
+        ]
+        with self.assertRaises(inventory.SyncError):
+            inventory.normalize_panel_action_rows(payload, "get_live_streams")
+        with mock.patch.object(inventory, "load_server_configs", return_value=[self.config]), mock.patch.object(inventory, "safe_credentialed_get", return_value=(200, json.dumps(payload).encode())) as fetch:
+            report = diagnostic.diagnose(allow_insecure_http=False, source_mode="api")
+        fetch.assert_called_once()
+        self.assertEqual(report["status"], "available")
+        self.assertEqual(report["quarantinedRowsExcluded"], 1)
+        self.assertNotIn("999999", json.dumps(report))
+        self.assertEqual(report["playlistRows"], 102)
+        self.assertEqual(report["membershipCountCompleteness"], "lower_bound")
+        self.assertEqual(report["targets"][0]["memberCount"], 2)
+        self.assertEqual(report["targets"][0]["memberCountCompleteness"], "lower_bound")
+
+    def test_api_other_schema_errors_still_fail_closed(self):
+        payloads = [
+            [{"stream_id": "122410", "name": "Sky Sports Premier League"}, {}],
+            [{"stream_id": "122410", "name": "Sky Sports Premier League"}, {"stream_id": "122410", "name": "Different Channel"}],
+            [{"stream_id": "122410", "name": "Sky Sports Premier League"}, {"stream_id": "999999", "name": ""}],
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload), mock.patch.object(inventory, "load_server_configs", return_value=[self.config]), mock.patch.object(inventory, "safe_credentialed_get", return_value=(200, json.dumps(payload).encode())):
+                report = diagnostic.diagnose(allow_insecure_http=False, source_mode="api")
+            self.assertEqual(report["status"], "unavailable")
+            self.assertEqual(report["membershipCountCompleteness"], "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()
