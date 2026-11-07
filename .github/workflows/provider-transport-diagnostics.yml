@@ -9,6 +9,7 @@ on:
         options:
           - live
           - live_playlist_links
+          - live_playlist_api_links
           - native_epg
           - vod_evidence
           - vod_identity_coverage
@@ -50,7 +51,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$DIAGNOSTIC_MODE" == "live_playlist_links" ]]; then
+          if [[ "$DIAGNOSTIC_MODE" == "live_playlist_api_links" ]]; then
+            timeout --signal=TERM --kill-after=10s 100s python -u scripts/diagnose_tivimate_playlist_links.py --source api
+          elif [[ "$DIAGNOSTIC_MODE" == "live_playlist_links" ]]; then
             timeout --signal=TERM --kill-after=10s 100s python -u scripts/diagnose_tivimate_playlist_links.py
           elif [[ "$DIAGNOSTIC_MODE" == "vod_evidence" ]]; then
             timeout --signal=TERM --kill-after=10s 60s python -u scripts/diagnose_vod_provider_evidence.py
@@ -75,7 +78,7 @@ jobs:
           fi
 
       - name: Retain bounded TiviMate playlist link evidence
-        if: ${{ success() && inputs.mode == 'live_playlist_links' }}
+        if: ${{ success() && (inputs.mode == 'live_playlist_links' || inputs.mode == 'live_playlist_api_links') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tivimate-playlist-links-${{ github.run_id }}

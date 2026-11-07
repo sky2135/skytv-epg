@@ -55,6 +55,7 @@ def _empty_target(stream_id: str, status: str) -> dict[str, Any]:
 
 def build_report(
     source: inventory.PanelInventory | None, *, status: str = "unavailable",
+    expected_source: str = "authenticated_m3u",
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
         "schemaVersion": 1, "mode": "tivimate_playlist_links",
@@ -64,10 +65,10 @@ def build_report(
     }
     if source is None:
         return report
-    if source.server_id != "server_1" or source.source != "authenticated_m3u":
+    if source.server_id != "server_1" or source.source != expected_source:
         report["status"] = "invalid_source"
         return report
-    report.update(status="available", source="authenticated_m3u", playlistRows=len(source.channels))
+    report.update(status="available", source=expected_source, playlistRows=len(source.channels))
     groups: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     targets: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for channel in source.channels:
@@ -112,10 +113,56 @@ def build_report(
     return report
 
 
-def diagnose(*, allow_insecure_http: bool) -> dict[str, Any]:
+def _api_inventory_probe(session, config, bases, *, allow_insecure_http, observations):
+    """Only get_live_streams, without the ordinary API retry/category lanes."""
+    def observe_response(response, **_kwargs):
+        if response.status_code == 429:
+            observations["rateLimited"] = True
+        delay = inventory.streaming.panel_retry_after_seconds(
+            response.headers.get("Retry-After"), now=time.time(),
+        )
+        if delay is not None:
+            observations["retryAfterSeconds"] = delay
+            observations["nextAttemptAtEpoch"] = int(time.time()) + delay
+        return response
+
+    session.hooks.setdefault("response", []).append(observe_response)
+    for base in bases[:2]:
+        observations["candidateLookups"] += 1
+        try:
+            status, content = inventory.safe_credentialed_get(
+                session, f"{base}/player_api.php",
+                params={"username": config.username, "password": config.password, "action": "get_live_streams"},
+                maximum_bytes=inventory.MAX_PANEL_JSON_BYTES, timeout=(10, 20),
+                allow_insecure_http=allow_insecure_http,
+            )
+        except inventory.SyncError:
+            if observations.get("rateLimited") or observations.get("retryAfterSeconds") is not None:
+                break
+            continue
+        observations["httpStatuses"].append(status)
+        # A second safe-base candidate is discovery, never an HTTP retry.
+        # Respect any advertised service cooldown without issuing it early.
+        if status == 429 or observations.get("retryAfterSeconds") is not None:
+            observations["rateLimited"] = status == 429
+            break
+        if status != 200:
+            continue
+        try:
+            payload = json.loads(content.decode("utf-8-sig", errors="strict"))
+            channels = inventory.normalize_panel_action_rows(payload, "get_live_streams")
+        except (UnicodeDecodeError, json.JSONDecodeError, inventory.SyncError):
+            continue
+        if channels:
+            return inventory.PanelInventory("server_1", "Server 1", [], channels, "player_api")
+    return None
+
+
+def diagnose(*, allow_insecure_http: bool, source_mode: str = "m3u") -> dict[str, Any]:
     started = time.monotonic()
     report = build_report(None)
     config = None
+    observations = {"candidateLookups": 0, "httpStatuses": [], "rateLimited": False}
     try:
         configs = inventory.load_server_configs(["server_1"])
         if len(configs) != 1 or configs[0].server_id != "server_1":
@@ -130,24 +177,35 @@ def diagnose(*, allow_insecure_http: bool) -> dict[str, Any]:
         report["status"] = "configuration_unavailable"
     else:
         with requests.Session() as session:
-            session.headers.update({"User-Agent": "SKYTV-TiviMate-ID-Diagnostic/1"})
+            session.trust_env = False
+            session.auth = inventory.streaming.PanelCredentiallessAuth()
+            session.headers.update({
+                "User-Agent": f"SKYTV-Channel-Inventory/{inventory.SYNC_VERSION}",
+                "Accept": "application/json,text/plain,application/x-mpegURL,*/*",
+            })
             try:
-                source = inventory.fetch_m3u_inventory(
-                    session, config, bases[:1], [],
-                    allow_insecure_http=allow_insecure_http,
-                    maximum_attempts=1, request_timeout=(10, 60),
-                )
+                if source_mode == "api":
+                    source = _api_inventory_probe(
+                        session, config, bases,
+                        allow_insecure_http=allow_insecure_http, observations=observations,
+                    )
+                else:
+                    observations["candidateLookups"] = 1
+                    source = inventory.fetch_m3u_inventory(
+                        session, config, bases[:1], [],
+                        allow_insecure_http=allow_insecure_http,
+                        maximum_attempts=1, request_timeout=(10, 60),
+                    )
                 if source is not None:
                     inventory.validate_provider_inventory_secret_safe(
                         source.categories, source.channels,
-                        inventory.provider_reflection_needles(config, bases[:1]),
+                        inventory.provider_reflection_needles(config, bases[:2]),
                     )
-                report = build_report(source)
+                report = build_report(source, expected_source="player_api" if source_mode == "api" else "authenticated_m3u")
             except inventory.SyncError:
                 # Existing transport/parser/reflection guards intentionally do
                 # not expose provider bodies, endpoint URLs or error text.
                 report = build_report(None, status="source_rejected")
-            report["candidateLookups"] = 1
     if config is not None:
         try:
             inventory.validate_provider_inventory_secret_safe(
@@ -163,7 +221,8 @@ def diagnose(*, allow_insecure_http: bool) -> dict[str, Any]:
             )
         except inventory.SyncError:
             report = build_report(None, status="reflection_blocked")
-            report["candidateLookups"] = 1
+    report.update(observations)
+    report["requestedSource"] = source_mode
     report["elapsedSeconds"] = round(time.monotonic() - started, 3)
     return report
 
@@ -171,9 +230,11 @@ def diagnose(*, allow_insecure_http: bool) -> dict[str, Any]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--source", choices=("m3u", "api"), default="m3u")
     args = parser.parse_args(argv)
     report = diagnose(
         allow_insecure_http=os.environ.get("ALLOW_INSECURE_PANEL_HTTP", "").strip().casefold() == "true",
+        source_mode=args.source,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     inventory.atomic_write_bytes(

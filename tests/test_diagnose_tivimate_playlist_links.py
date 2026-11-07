@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -129,6 +130,58 @@ class DiagnoseTiviMatePlaylistLinksTests(unittest.TestCase):
         counts = json.loads(stdout.getvalue())
         self.assertTrue(all(type(value) is int for value in counts.values()))
         self.assertNotIn("shared", stdout.getvalue().replace('"sharedTargets"', '"count"'))
+
+    def test_api_probe_is_live_streams_only_and_preserves_shared_ids(self):
+        payload = [{"stream_id": "122410", "name": "Sky Sports Premier League", "epg_channel_id": "shared"}, {"stream_id": "500", "name": "Other Feed", "epg_channel_id": "shared"}]
+        def fetch(session, endpoint, **kwargs):
+            self.assertFalse(session.trust_env)
+            self.assertEqual(session.headers["User-Agent"], f"SKYTV-Channel-Inventory/{inventory.SYNC_VERSION}")
+            self.assertEqual(kwargs["params"]["action"], "get_live_streams")
+            self.assertEqual(kwargs["timeout"], (10, 20))
+            return 200, json.dumps(payload).encode()
+        with mock.patch.object(inventory, "load_server_configs", return_value=[self.config]), mock.patch.object(inventory, "safe_credentialed_get", side_effect=fetch) as request, mock.patch.object(inventory, "fetch_m3u_inventory", side_effect=AssertionError("M3U not permitted")):
+            report = diagnostic.diagnose(allow_insecure_http=False, source_mode="api")
+        request.assert_called_once()
+        self.assertEqual(report["source"], "player_api")
+        self.assertEqual(report["candidateLookups"], 1)
+        self.assertEqual(report["targets"][0]["memberCount"], 2)
+
+    def test_api_uses_at_most_two_safe_base_candidates_without_retries(self):
+        config = inventory.ServerConfig("server_1", "Server 1", "https://panel.example/service", "user123", "pass123")
+        with mock.patch.object(inventory, "load_server_configs", return_value=[config]), mock.patch.object(inventory, "safe_credentialed_get", return_value=(500, b"")) as request:
+            report = diagnostic.diagnose(allow_insecure_http=False, source_mode="api")
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual([call.args[1] for call in request.call_args_list], ["https://panel.example/service/player_api.php", "https://panel.example/player_api.php"])
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(report["httpStatuses"], [500, 500])
+
+    def test_api_stops_on_429_and_reports_retry_after_without_wait_or_retry(self):
+        config = inventory.ServerConfig("server_1", "Server 1", "https://panel.example/service", "user123", "pass123")
+        def fetch(session, *_args, **_kwargs):
+            response = SimpleNamespace(status_code=429, headers={"Retry-After": "120"})
+            for hook in session.hooks["response"]:
+                hook(response)
+            return 429, b""
+        with mock.patch.object(inventory, "load_server_configs", return_value=[config]), mock.patch.object(inventory, "safe_credentialed_get", side_effect=fetch) as request, mock.patch.object(diagnostic.time, "sleep", side_effect=AssertionError("No retry waits")):
+            report = diagnostic.diagnose(allow_insecure_http=False, source_mode="api")
+        request.assert_called_once()
+        self.assertTrue(report["rateLimited"])
+        self.assertEqual(report["retryAfterSeconds"], 120)
+        self.assertEqual(report["candidateLookups"], 1)
+
+    def test_api_absent_ids_are_reported_without_guessing(self):
+        payload = [{"stream_id": "122410", "name": "Sky Sports Premier League"}]
+        with mock.patch.object(inventory, "load_server_configs", return_value=[self.config]), mock.patch.object(inventory, "safe_credentialed_get", return_value=(200, json.dumps(payload).encode())):
+            report = diagnostic.diagnose(allow_insecure_http=False, source_mode="api")
+        self.assertEqual(report["status"], "available")
+        self.assertEqual(report["targets"][0]["idStatus"], "absent")
+
+    def test_api_reflected_password_is_rejected_without_output(self):
+        payload = [{"stream_id": "122410", "name": "Sky Sports Premier League", "epg_channel_id": "pass123"}]
+        with mock.patch.object(inventory, "load_server_configs", return_value=[self.config]), mock.patch.object(inventory, "safe_credentialed_get", return_value=(200, json.dumps(payload).encode())):
+            report = diagnostic.diagnose(allow_insecure_http=False, source_mode="api")
+        self.assertEqual(report["status"], "source_rejected")
+        self.assertNotIn("pass123", json.dumps(report))
 
 
 if __name__ == "__main__":
