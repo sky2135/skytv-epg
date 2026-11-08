@@ -25,12 +25,18 @@ from vod_tmdb import (TmdbClient, _date as tmdb_date, _enrichment_identity, _pro
                       poster_identity,
                       unmatched_passthrough_fingerprint)
 from vod_series import enrich_series
+from vod_series_language import classify_series_language
 from vod_reviewed_corrections import apply_reviewed_correction, correction_for
 from vod_resolution_queue import ResolutionQueue
 from vod_provider_evidence import MovieEvidenceCollector
 from vod_tmdb import MATCH_STRATEGY
 
 SCHEMA_VERSION = 1
+SERIES_METADATA_VERSION = 2
+SERIES_METADATA_FIELDS = {
+    "isMultilingual", "languageListComplete", "languageSource", "originalPlatforms",
+    "airedEpisodeCount", "serverEpisodeCount", "episodeInventoryComplete", "episodeInventoryCheckedAt",
+}
 MAX_SHARD_RECORDS = 500
 MAX_SHARD_BYTES = 512 * 1024
 MAX_JSON_BYTES = 64 * 1024 * 1024
@@ -371,7 +377,8 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
                statuses: Mapping[str, str] | None = None,
                evidence: MovieEvidenceCollector | None = None,
                resolution_queue: ResolutionQueue | None = None,
-               prepared: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+               prepared: Mapping[str, Any] | None = None,
+               *, inventory_facts: Mapping[str, Mapping[str, Any]] | None = None) -> list[dict[str, Any]]:
     movie = kind == "movie"
     prepared = prepared if prepared is not None else _prepare_catalog(server_id, kind, source, config)
     normalized, raw_rows, details = (prepared[key] for key in ("normalized", "raw_rows", "details"))
@@ -450,8 +457,22 @@ def make_items(server_id: str, kind: str, source: Mapping[str, Any],
             item["artwork"][name] = metadata.get(name) or item["artwork"][name]
         next_state = {"firstSeenAt": item["firstSeenAt"], "addedAt": item["addedAt"]}
         if not movie:
+            item.update(classify_series_language(
+                item["title"], item.get("originalLanguage"), sources,
+                metadata_verified=verified_external or bool(correction and correction["metadata"].get("originalLanguage")),
+            ))
+            item["originalPlatforms"] = list(metadata.get("originalPlatforms") or []) if verified_external else []
+            item["airedEpisodeCount"] = metadata.get("airedEpisodeCount") if verified_external else None
+            # Air dates describe the work, not provider inventory. An expired
+            # cached next-episode date must not become an app Up Next promise.
+            if item.get("nextEpisode") and item["nextEpisode"].get("airDate", "") < now[:10]:
+                item["nextEpisode"] = None
             item["episodes"] = list((episodes or {}).get(provider_id, []))
             item["episodesStatus"] = (statuses or {}).get(provider_id, "pending")
+            facts = (inventory_facts or {}).get(provider_id, {})
+            item["serverEpisodeCount"] = facts.get("serverEpisodeCount")
+            item["episodeInventoryComplete"] = facts.get("episodeInventoryComplete", False)
+            item["episodeInventoryCheckedAt"] = facts.get("episodeInventoryCheckedAt")
             known = old.get("episodeIds", [])
             detected = old.get("episodeDetectedAt")
             current = [episode["id"] for episode in item["episodes"]]
@@ -720,6 +741,10 @@ def home_preview(item: Mapping[str, Any]) -> dict:
             "language", "languages", "genres", "adult", "tmdbId", "artwork", "releaseDate",
             "rating", "containerExtension", "addedAt", "firstSeenAt", "lastAirDate", "status",
             "latestEpisodeAddedAt", "episodesStatus")
+    if "providerSeriesId" in item and SERIES_METADATA_FIELDS <= item.keys():
+        keys += ("originalLanguage", "seasonCount", "episodeCount", "isMultilingual", "languageListComplete",
+                 "languageSource", "originalPlatforms", "airedEpisodeCount", "serverEpisodeCount",
+                 "episodeInventoryComplete", "episodeInventoryCheckedAt")
     preview = {**{key: item[key] for key in keys if key in item},
                "overview": (item.get("overview") or "")[:500] or None}
     if "providerSeriesId" in item and has_series_inventory(item):
@@ -783,6 +808,8 @@ def write_dataset(output: Path, server_id: str, kind: str, items: list[dict], no
     manifest = {"schemaVersion": 1, "serverId": server_id, "dataset": dataset,
                 "generatedAt": now, "totalRecords": len(items),
                 "categories": [categories[key] for key in sorted(categories)], "shards": shards}
+    if kind == "series" and all(SERIES_METADATA_FIELDS <= item.keys() for item in items):
+        manifest["seriesMetadataVersion"] = SERIES_METADATA_VERSION
     return write_artifact(output, f"{server_id}_{plural}_manifest", manifest,
                           compressed=False, count=len(shards))
 
@@ -831,21 +858,41 @@ def epg_references(epg_dir: Path | None, server_id: str) -> dict:
     return result
 
 
+def _priority_series_ids(source: Mapping[str, Any]) -> list[str]:
+    """Check the reported examples first; inventory still remains server-scoped."""
+    from vod_series_facts import priority_series_title
+    result = []
+    for row in vod.normalize_rows(source.get("get_series", []), "priority series"):
+        if priority_series_title(row.get("name", row.get("title", ""))) is not None:
+            identifier = vod.normalize_item_id(row.get("series_id", row.get("id")))
+            if identifier:
+                result.append(identifier)
+    return sorted(set(result), key=lambda value: (len(value), value))[:1000]
+
+
 def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClient,
           now: str, epg_dir: Path | None = None, fetch_episodes=False,
           max_episode_requests=600, timings: dict | None = None,
-          tmdb_workers: int = 1) -> dict:
+          tmdb_workers: int = 1, series_facts_limit: int = 0) -> dict:
     build_started = time.monotonic()
     if type(tmdb_workers) is not int or not 1 <= tmdb_workers <= 3:
         raise vod.CatalogBuildError("Metadata worker count must be between 1 and 3.")
+    if type(series_facts_limit) is not int or not 0 <= series_facts_limit <= 1000:
+        raise vod.CatalogBuildError("Series facts refresh limit is invalid.")
     output.mkdir(parents=True, exist_ok=True)
     if len({server_id for server_id, _source, _config in sources}) != len(sources):
         raise vod.CatalogBuildError("Each app server must be selected once.")
     if cache.resolve() == output.resolve() or output.resolve() in cache.resolve().parents:
         raise vod.CatalogBuildError("Private app caches must stay outside the publication directory.")
     reset_time = getattr(client, "reset_elapsed_budget", lambda _seconds: None)
+    configured_limit = client.max_requests
+    if series_facts_limit:
+        # This allowance belongs to verified series facts, never a new movie
+        # search or a trending refresh that could starve the reported shows.
+        client.max_requests = client.stats.get("requests", 0)
     reset_time(30)
     trends = {kind: client.trending(kind) for kind in ("movie", "series")}
+    client.max_requests = configured_limit
     trend_seconds = time.monotonic() - build_started
     metadata_seconds = 0
     episode_seconds = 0
@@ -863,7 +910,8 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
             session.trust_env = False
         try:
             return enrich_series(source, server_id, cache / "episodes", config,
-                                 session, max_requests=quota, now=now, deadline_seconds=deadline, previous=previous)
+                                 session, max_requests=quota, now=now, deadline_seconds=deadline, previous=previous,
+                                 priority_series_ids=_priority_series_ids(source))
         finally:
             episode_elapsed[server_id] = episode_elapsed.get(server_id, 0) + time.monotonic() - episode_started
             if session:
@@ -905,14 +953,25 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
     resolution_queue = ResolutionQueue(cache / "resolution-queue.json", policy_version=MATCH_STRATEGY, now=now)
     prefetched = None
     prepared_groups = {}
+    series_facts_summary = None
     warm_serial = tmdb_workers == 1 and callable(getattr(client, "poster_candidate", None))
-    if tmdb_workers > 1 or warm_serial:
+    if tmdb_workers > 1 or warm_serial or series_facts_limit:
         metadata_started = time.monotonic()
         for server_id, source, config in sources:
             for kind in ("movie", "series"):
                 prepared_groups[(server_id, kind)] = _prepare_catalog(server_id, kind, source, config)
         groups = [{"serverId": server_id, "kind": kind, "prepared": prepared_groups[(server_id, kind)]}
                   for server_id, _source, _config in sources for kind in ("movie", "series")]
+        if series_facts_limit:
+            from vod_series_facts import backfill_series_facts
+            candidates = [
+                _matching_item(base, group["prepared"]["raw_rows"].get(base["id"], {}), "series", None)
+                for group in groups if group["kind"] == "series"
+                for base in group["prepared"]["normalized"]
+            ]
+            series_facts_summary = backfill_series_facts(candidates, client, cache, now, limit=series_facts_limit)
+            # The ordinary metadata pass now consumes only verified caches.
+            client.max_requests = client.stats.get("requests", 0)
         if tmdb_workers > 1:
             prefetched = _prefetch_metadata(groups, client, tmdb_workers, evidence, resolution_queue)
         else:
@@ -943,7 +1002,8 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
             catalogs.append(make_items(server_id, kind, source, state, prefetched or client, now, config,
                                        episodes, episode_stats["statusBySeries"], evidence,
                                        None if prefetched else resolution_queue,
-                                       prepared_groups.pop((server_id, kind), None)))
+                                       prepared_groups.pop((server_id, kind), None),
+                                       inventory_facts=episode_stats.get("inventoryBySeries", {})))
             metadata_seconds += time.monotonic() - metadata_started
             groups_remaining -= 1
         client.max_requests = tmdb_limit
@@ -961,16 +1021,19 @@ def build(output: Path, cache: Path, sources: Sequence[tuple], client: TmdbClien
                  "home": write_artifact(output, f"{server_id}_home", home, count=len(home["items"])),
                  "epg": epg_references(epg_dir, server_id),
                  "episodeRefresh": {
-                     **{key: value for key, value in episode_stats.items() if key not in {"statusBySeries", "attemptedSeriesIds"}},
+                     **{key: value for key, value in episode_stats.items() if key not in {"statusBySeries", "attemptedSeriesIds", "inventoryBySeries"}},
                      "statusCounts": {status: sum(value == status for value in episode_stats["statusBySeries"].values())
                                       for status in ("available", "stale", "pending", "unavailable")}}}
         vod.ensure_no_secret_reflection({"movies": movies, "series": series, "home": home}, config)
         servers.append(entry)
         states.append((state_path, state))
     index = {"schemaVersion": 1, "appName": "SkyTVPlayer", "generatedAt": now,
+             "seriesMetadataVersion": SERIES_METADATA_VERSION,
              "serverCount": len(servers), "servers": servers,
              "metadata": {"provider": "TMDB", "notice": ATTRIBUTION,
                           "url": "https://www.themoviedb.org", "stats": client.stats}}
+    if series_facts_summary is not None:
+        index["seriesFactRefresh"] = series_facts_summary
     # Reject accidental token reflection in any public artifact, including cache
     # contents replayed from a previous run. Do not log the matched value.
     for secret in (os.environ.get("TMDB_READ_ACCESS_TOKEN"), os.environ.get("TMDB_API_KEY")):
@@ -1033,6 +1096,48 @@ def read_artifact(output: Path, ref: Mapping[str, Any]) -> dict:
     return payload
 
 
+def validate_series_metadata(item: Mapping[str, Any], generated_at: str | None = None) -> None:
+    """Validate additive edition and count facts without rejecting old releases."""
+    present = SERIES_METADATA_FIELDS.intersection(item)
+    if not present:
+        return
+    if present != SERIES_METADATA_FIELDS:
+        raise vod.CatalogBuildError("App series metadata fields are incomplete.")
+    multilingual, complete = item["isMultilingual"], item["languageListComplete"]
+    if (type(multilingual) is not bool or type(complete) is not bool
+            or item["languageSource"] not in {"provider_audio", "title_suffix", "provider_multilingual", "verified_original", "unknown"}
+            or (item.get("language") == "mul" and not multilingual)
+            or (complete and item.get("language") == "und")
+            or (multilingual and complete and len(item.get("languages", [])) < 2)):
+        raise vod.CatalogBuildError("App series language evidence is invalid.")
+    platforms = item["originalPlatforms"]
+    if not isinstance(platforms, list) or len(platforms) > 40:
+        raise vod.CatalogBuildError("App original platform list is invalid.")
+    seen = set()
+    for platform in platforms:
+        if (not isinstance(platform, dict) or set(platform) - {"name", "type", "tmdbNetworkId"}
+                or not isinstance(platform.get("name"), str) or not platform["name"].strip()
+                or platform["name"] != vod.clean_text(platform["name"], 160)
+                or "://" in platform["name"] or platform.get("type") not in {"streaming_service", "tv_channel", "network"}
+                or ("tmdbNetworkId" in platform and (not isinstance(platform["tmdbNetworkId"], str)
+                    or not re.fullmatch(r"[1-9][0-9]{0,9}", platform["tmdbNetworkId"])))):
+            raise vod.CatalogBuildError("App original platform is invalid.")
+        identity = (platform["name"].casefold(), platform["type"], platform.get("tmdbNetworkId"))
+        if identity in seen:
+            raise vod.CatalogBuildError("App original platform is duplicated.")
+        seen.add(identity)
+    for field, maximum in (("airedEpisodeCount", 1_000_000), ("serverEpisodeCount", 50_000)):
+        value = item[field]
+        if value is not None and (type(value) is not int or not 0 <= value <= maximum):
+            raise vod.CatalogBuildError("App series episode count is invalid.")
+    checked = item["episodeInventoryCheckedAt"]
+    if (type(item["episodeInventoryComplete"]) is not bool
+            or (checked is not None and (timestamp(checked) != checked or generated_at is not None and checked > generated_at))
+            or (item["serverEpisodeCount"] is not None and checked is None)
+            or (item["episodeInventoryComplete"] and (item["serverEpisodeCount"] is None or checked is None))):
+        raise vod.CatalogBuildError("App series episode inventory evidence is invalid.")
+
+
 def validate_episode_inventory(output: Path, server_id: str, item: Mapping[str, Any], generated_at: str) -> None:
     from vod_series import MAX_EPISODES_PER_SERIES, normalize_episodes
     episodes = item.get("episodes")
@@ -1048,6 +1153,7 @@ def validate_episode_inventory(output: Path, server_id: str, item: Mapping[str, 
     if episodes and len(gzip.compress(json_bytes(item), mtime=0)) > MAX_INLINE_EPISODE_BYTES:
         raise vod.CatalogBuildError("App inline episode inventory exceeds its size limit.")
     total = len(episodes)
+    logical_episodes = {(episode["seasonNumber"], episode["episodeNumber"]) for episode in episodes}
     seen_ids: set[str] = set()
     previous_key = None
     for reference in files:
@@ -1070,6 +1176,7 @@ def validate_episode_inventory(output: Path, server_id: str, item: Mapping[str, 
             if episode["id"] in seen_ids:
                 raise vod.CatalogBuildError("App episode shards contain duplicate provider IDs.")
             seen_ids.add(episode["id"])
+            logical_episodes.add((episode["seasonNumber"], episode["episodeNumber"]))
             key = (episode["seasonNumber"], episode["episodeNumber"], episode["id"])
             if previous_key is not None and key <= previous_key:
                 raise vod.CatalogBuildError("App episode shards are out of order.")
@@ -1079,6 +1186,9 @@ def validate_episode_inventory(output: Path, server_id: str, item: Mapping[str, 
             raise vod.CatalogBuildError("App episode inventory exceeds its item limit.")
     if total != count:
         raise vod.CatalogBuildError("App available episode count does not match its inventory.")
+    validate_series_metadata(item, generated_at)
+    if item.get("episodeInventoryComplete") and item["serverEpisodeCount"] != len(logical_episodes):
+        raise vod.CatalogBuildError("App server episode count does not match its complete inventory.")
 
 
 def validate_metadata_identity(server_id: str, kind: str, item: Mapping[str, Any]) -> None:
@@ -1113,6 +1223,9 @@ def validate(output: Path, *, epg_dir=None, expected_servers=vod.DEFAULT_SERVERS
         index = vod._read_bounded_json(output / "index.json", 2 * 1024 * 1024, "App index")
     if index.get("schemaVersion") != 1 or index.get("appName") != "SkyTVPlayer":
         raise vod.CatalogBuildError("App index schema is invalid.")
+    if (index.get("seriesMetadataVersion") is not None
+            and (type(index["seriesMetadataVersion"]) is not int or index["seriesMetadataVersion"] != SERIES_METADATA_VERSION)):
+        raise vod.CatalogBuildError("App series metadata version is invalid.")
     servers = index.get("servers", [])
     if len(servers) != index.get("serverCount") or sorted(row["serverId"] for row in servers) != sorted(expected_servers):
         raise vod.CatalogBuildError("App index server set is incomplete or duplicated.")
@@ -1120,6 +1233,10 @@ def validate(output: Path, *, epg_dir=None, expected_servers=vod.DEFAULT_SERVERS
         all_items = {}
         for plural in ("movies", "series"):
             manifest = read_artifact(output, server[plural])
+            version = manifest.get("seriesMetadataVersion") if plural == "series" else None
+            if (version is not None and (type(version) is not int or version != SERIES_METADATA_VERSION)
+                    or plural == "series" and index.get("seriesMetadataVersion") == SERIES_METADATA_VERSION and version != SERIES_METADATA_VERSION):
+                raise vod.CatalogBuildError("App series metadata version is invalid.")
             if manifest.get("serverId") != server["serverId"] or manifest.get("dataset") != f"vod-{plural}" or len(manifest["shards"]) != server[plural]["recordCount"]:
                 raise vod.CatalogBuildError("App dataset identity does not match.")
             count = 0
@@ -1148,6 +1265,8 @@ def validate(output: Path, *, epg_dir=None, expected_servers=vod.DEFAULT_SERVERS
                         if extension is not None and (not isinstance(extension, str) or not SAFE_EXTENSION.fullmatch(extension)):
                             raise vod.CatalogBuildError("App movie extension is invalid.")
                     else:
+                        if version == SERIES_METADATA_VERSION and not SERIES_METADATA_FIELDS <= item.keys():
+                            raise vod.CatalogBuildError("App series lost its advertised metadata fields.")
                         if item.get("episodesStatus") not in {"available", "stale", "pending", "unavailable"}:
                             raise vod.CatalogBuildError("App episode status is invalid.")
                         validate_episode_inventory(output, server["serverId"], item, manifest["generatedAt"])
@@ -1193,6 +1312,8 @@ def main(argv=None):
     parser.add_argument("--max-tmdb-requests", type=int, default=1500)
     parser.add_argument("--tmdb-workers", type=int, default=1,
                         help="Parallel metadata groups (1-3); each keeps a fixed fair request quota.")
+    parser.add_argument("--series-facts-limit", type=int, default=0,
+                        help="Resume bounded verified series platform/air-date facts; ordinary matching stays cache-only.")
     parser.add_argument("--backfill-release-dates", action="append", metavar="SERVER",
                         help="Warm current-year English movie metadata caches for selected offline servers; do not publish.")
     parser.add_argument("--backfill-max-seconds", type=float, default=600)
@@ -1212,6 +1333,8 @@ def main(argv=None):
         raise vod.CatalogBuildError("Each app server must be selected once.")
     if not 1 <= args.tmdb_workers <= 3:
         raise vod.CatalogBuildError("Metadata worker count must be between 1 and 3.")
+    if not 0 <= args.series_facts_limit <= 1000:
+        raise vod.CatalogBuildError("Series facts refresh limit is invalid.")
     if not math.isfinite(args.backfill_max_seconds) or not 1 <= args.backfill_max_seconds <= 900:
         raise vod.CatalogBuildError("Release-date backfill time budget is invalid.")
     if (not 1 <= args.resolution_limit <= 1000 or not 0 <= args.max_provider_detail_requests <= 200
@@ -1291,7 +1414,7 @@ def main(argv=None):
         index = build(args.output_dir, args.cache_dir, sources, client,
                       vod.generated_timestamp(args.now_utc), args.epg_dir,
                       args.fetch_series_details, args.max_series_requests, timings=timings,
-                      tmdb_workers=args.tmdb_workers)
+                      tmdb_workers=args.tmdb_workers, series_facts_limit=args.series_facts_limit)
     finally:
         client.close()
     print(f"SkyTVPlayer: published catalogs and Home feeds for {index['serverCount']} servers.")

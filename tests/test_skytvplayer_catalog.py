@@ -107,6 +107,14 @@ class SkytvPlayerCatalogTests(unittest.TestCase):
     def home(self, index, server=0):
         return app.read_artifact(self.output, index["servers"][server]["home"])
 
+    def test_legacy_home_projection_does_not_gain_version_two_fields(self):
+        item = {"providerSeriesId": "1", "title": "Legacy show", "originalLanguage": "hi",
+                "seasonCount": 1, "episodeCount": 8, "availableEpisodeCount": 0,
+                "episodes": [], "episodeFiles": [], "episodesStatus": "pending"}
+        preview = app.home_preview(item)
+        self.assertEqual(preview, {"providerSeriesId": "1", "title": "Legacy show",
+                                  "episodesStatus": "pending", "overview": None})
+
     def test_three_servers_keep_identity_and_references_separate_with_epg(self):
         epg_dir = self.root / "EPG"
         epg_dir.mkdir()
@@ -273,7 +281,7 @@ class SkytvPlayerCatalogTests(unittest.TestCase):
         # even when its provider episode inventory is available.
         source["get_series"].append({
             "series_id": 205, "name": "Big Little Lies (2017)", "category_id": "50",
-            "adult": False, "releaseDate": "2017-02-19",
+            "adult": False, "releaseDate": "2017-02-19", "audio_language": "en",
         })
         source["series_details"]["205"] = {
             "episodes": {"1": [{"id": "9501", "episode_num": 1, "title": "Episode One"}]},
@@ -300,7 +308,7 @@ class SkytvPlayerCatalogTests(unittest.TestCase):
         for identifier, released in candidates:
             source["get_series"].append({
                 "series_id": identifier, "name": f"Series {identifier}",
-                "category_id": "50", "adult": False, "releaseDate": released, "added": NOW,
+                "category_id": "50", "adult": False, "releaseDate": released, "added": NOW, "audio_language": "en",
             })
             source["series_details"][identifier] = {
                 "episodes": {"1": [{"id": f"9{identifier}", "episode_num": 1, "title": "Premiere"}]},

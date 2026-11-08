@@ -14,7 +14,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 import requests
@@ -25,7 +25,7 @@ except ImportError:
     import build_vod_catalogs as vod
 
 
-CACHE_SCHEMA = 1
+CACHE_SCHEMA = 2
 CACHE_TTL = timedelta(days=1)
 MAX_CACHE_BYTES = 8 * 1024 * 1024
 MAX_EPISODES_PER_SERIES = 50_000
@@ -33,10 +33,12 @@ EPISODE_KEYS = {
     "id", "seasonNumber", "episodeNumber", "title", "containerExtension",
     "addedAt", "airDate", "overview", "durationSeconds", "stillUrl",
 }
-CACHE_KEYS = {
+LEGACY_CACHE_KEYS = {
     "schemaVersion", "serverId", "seriesId", "sourceFingerprint", "checkedAt",
     "fetchedAt", "status", "episodes",
 }
+INVENTORY_KEYS = {"serverEpisodeCount", "episodeInventoryComplete", "episodeInventoryCheckedAt"}
+CACHE_KEYS = LEGACY_CACHE_KEYS | INVENTORY_KEYS
 
 
 def _integer(value: Any, *, minimum: int = 0, maximum: int = 100_000) -> int | None:
@@ -124,31 +126,80 @@ def _episode(row: Mapping[str, Any], season_hint: Any, config: vod.ServerConfig 
     return result
 
 
-def normalize_episodes(detail: Any, config: vod.ServerConfig | None = None) -> list[dict[str, Any]]:
-    """Normalize standard Xtream series details, preserving season/episode zero."""
+def _normalize_inventory(detail: Any, config: vod.ServerConfig | None = None) -> tuple[list[dict[str, Any]], bool]:
+    """Retain usable rows, but certify only an explicit, wholly valid inventory."""
     if not isinstance(detail, Mapping):
-        return []
+        return [], False
     payload = detail.get("episodes")
+    complete = isinstance(payload, (Mapping, list))
+    # Some panels return an HTTP 200 authentication/error envelope. An episodes
+    # key in that envelope does not make an empty or partial inventory reliable.
+    for key in ("error", "errors"):
+        if detail.get(key):
+            complete = False
+    if detail.get("message") or ("info" in detail and not isinstance(detail["info"], Mapping)):
+        complete = False
+    if "seasons" in detail and not isinstance(detail["seasons"], (Mapping, list)):
+        complete = False
+    if str(detail.get("status", "")).casefold() in {"0", "false", "error", "failed", "failure", "unauthorized", "forbidden"}:
+        complete = False
+    for envelope in (detail, detail.get("user_info")):
+        if isinstance(envelope, Mapping):
+            if "auth" in envelope and str(envelope["auth"]).casefold() not in {"1", "true"}:
+                complete = False
+            if "success" in envelope and str(envelope["success"]).casefold() in {"0", "false"}:
+                complete = False
+            if str(envelope.get("status", "")).casefold() in {"expired", "disabled", "banned"}:
+                complete = False
     groups = payload.items() if isinstance(payload, Mapping) else [(None, payload)]
     episodes: dict[str, dict[str, Any]] = {}
     seen_rows = 0
     for season_hint, rows in groups:
         if not isinstance(rows, list):
+            complete = False
             continue
         for row in rows:
             seen_rows += 1
             if seen_rows > MAX_EPISODES_PER_SERIES:
                 raise vod.CatalogBuildError("Series episode metadata exceeds its item limit.")
             if not isinstance(row, Mapping):
+                complete = False
                 continue
             item = _episode(row, season_hint, config)
             if item is None:
+                complete = False
                 continue
             previous = episodes.get(item["id"])
             if previous is not None and previous != item:
                 raise vod.CatalogBuildError("Series contains conflicting episode IDs.")
             episodes[item["id"]] = item
-    return sorted(episodes.values(), key=lambda row: (row["seasonNumber"], row["episodeNumber"], row["id"]))
+    return sorted(episodes.values(), key=lambda row: (row["seasonNumber"], row["episodeNumber"], row["id"])), complete
+
+
+def normalize_episodes(detail: Any, config: vod.ServerConfig | None = None) -> list[dict[str, Any]]:
+    """Normalize standard Xtream series details, preserving season/episode zero."""
+    return _normalize_inventory(detail, config)[0]
+
+
+def _inventory_facts(count: int | None = None, complete: bool = False, checked_at: str | None = None) -> dict[str, Any]:
+    return {"serverEpisodeCount": count, "episodeInventoryComplete": complete, "episodeInventoryCheckedAt": checked_at}
+
+
+def _episode_count(episodes: list[dict[str, Any]]) -> int:
+    return len({(row["seasonNumber"], row["episodeNumber"]) for row in episodes})
+
+
+def _validated_facts(value: Any, episodes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping) or not INVENTORY_KEYS <= value.keys():
+        return None
+    count, complete, checked_at = (value[key] for key in ("serverEpisodeCount", "episodeInventoryComplete", "episodeInventoryCheckedAt"))
+    if (not isinstance(complete, bool)
+            or (count is not None and (isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= MAX_EPISODES_PER_SERIES))
+            or (checked_at is not None and (not isinstance(checked_at, str) or _timestamp(checked_at) != checked_at))
+            or ((count is None) != (checked_at is None))
+            or (complete and (count is None or count != _episode_count(episodes)))):
+        return None
+    return _inventory_facts(count, complete, checked_at)
 
 
 def _fingerprint(row: Mapping[str, Any]) -> str:
@@ -170,8 +221,10 @@ def _load_cache(path: Path, server_id: str, series_id: str, config: vod.ServerCo
             return None
         value = json.loads(path.read_text(encoding="utf-8"))
         if (
-            not isinstance(value, dict) or set(value) != CACHE_KEYS
-            or value.get("schemaVersion") != CACHE_SCHEMA
+            not isinstance(value, dict)
+            or (value.get("schemaVersion"), frozenset(value)) not in {
+                (1, frozenset(LEGACY_CACHE_KEYS)), (CACHE_SCHEMA, frozenset(CACHE_KEYS)),
+            }
             or value.get("serverId") != server_id or value.get("seriesId") != series_id
             or value.get("status") not in {"available", "stale", "unavailable"}
             or not isinstance(value.get("checkedAt"), str)
@@ -191,6 +244,12 @@ def _load_cache(path: Path, server_id: str, series_id: str, config: vod.ServerCo
             return None
         if value["status"] in {"available", "stale"} and not episodes:
             return None
+        facts = _inventory_facts() if value["schemaVersion"] == 1 else _validated_facts(value, episodes)
+        if facts is None or (value["status"] == "stale" and facts["episodeInventoryComplete"]):
+            return None
+        if facts["episodeInventoryComplete"] and value["fetchedAt"] != facts["episodeInventoryCheckedAt"]:
+            return None
+        value = dict(value, **facts)
         return value
     except (OSError, ValueError, TypeError, vod.CatalogBuildError):
         return None
@@ -227,10 +286,12 @@ def enrich_series(
     now: str = "",
     deadline_seconds: float = 90,
     previous: tuple[Mapping[str, Any], Mapping[str, Any]] | None = None,
+    priority_series_ids: Sequence[str] = (),
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     """Return episodes and per-series availability using a bounded request budget.
 
-    Missing inventories precede old inventories. Failed attempts are timestamped,
+    Explicit priorities and changed inventories precede ordinary missing/old
+    inventories. Failed attempts are timestamped,
     so the same failing titles cannot consume every later run's request budget.
     Cached episodes survive transient errors with an explicit ``stale`` status.
     A supplemental pass over the same source can retain its predecessor's
@@ -243,17 +304,22 @@ def enrich_series(
         raise vod.CatalogBuildError("The series request limit must be a non-negative integer.")
     if isinstance(deadline_seconds, bool) or not isinstance(deadline_seconds, (int, float)) or not math.isfinite(deadline_seconds) or deadline_seconds < 0:
         raise vod.CatalogBuildError("The series time limit must be a finite non-negative number.")
+    if not isinstance(priority_series_ids, (tuple, list, set, frozenset)) or len(priority_series_ids) > 1000:
+        raise vod.CatalogBuildError("Series priorities must be a bounded collection of identifiers.")
+    priorities = {identifier for value in priority_series_ids if (identifier := vod.normalize_item_id(value))}
     started = time.monotonic()
     timestamp = vod.generated_timestamp(now)
     current = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     rows = vod.normalize_rows(source.get("get_series", []), f"{server_id} series")
     details = vod.normalize_detail_map(source.get("series_details", {}), kind="series", label=f"{server_id} series details")
-    prior_episodes, prior_statuses, prior_attempted = {}, {}, set()
+    prior_episodes, prior_statuses, prior_attempted, prior_inventory = {}, {}, set(), {}
     if (isinstance(previous, tuple) and len(previous) == 2
             and isinstance(previous[0], Mapping) and isinstance(previous[1], Mapping)):
         prior_episodes = previous[0]
         statuses_value = previous[1].get("statusBySeries")
         prior_statuses = statuses_value if isinstance(statuses_value, Mapping) else {}
+        inventory_value = previous[1].get("inventoryBySeries")
+        prior_inventory = inventory_value if isinstance(inventory_value, Mapping) else {}
         attempted_value = previous[1].get("attemptedSeriesIds")
         if isinstance(attempted_value, list):
             # A real first pass cannot attempt more series than its source has.
@@ -263,18 +329,53 @@ def enrich_series(
                                if isinstance(value, str) and value in current_ids}
     result: dict[str, list[dict[str, Any]]] = {}
     statuses: dict[str, str] = {}
+    inventories: dict[str, dict[str, Any]] = {}
     queue: list[tuple[int, str, str, dict[str, Any] | None, Path, str]] = []
     requests_used = 0
     cache_hits = 0
     deadline_reached = False
     attempted_series_ids = []
+
+    def retain_inventory(series_id: str) -> None:
+        old = inventories[series_id]
+        inventories[series_id] = (
+            _inventory_facts(old["serverEpisodeCount"], False, old["episodeInventoryCheckedAt"])
+            if result[series_id] else _inventory_facts()
+        )
+
+    def store_inventory(series_id, episodes, complete, cached, path, fingerprint):
+        fetched_at = cached.get("fetchedAt") if cached is not None else inventories[series_id]["episodeInventoryCheckedAt"]
+        if complete:
+            result[series_id] = episodes
+            statuses[series_id] = "available" if episodes else "unavailable"
+            inventories[series_id] = _inventory_facts(_episode_count(episodes), True, timestamp)
+            fetched_at = timestamp
+        elif episodes:
+            had_episodes = bool(result[series_id])
+            # A partially invalid response must not delete validated old rows.
+            merged = {row["id"]: row for row in result[series_id]}
+            merged.update((row["id"], row) for row in episodes)
+            if len(merged) <= MAX_EPISODES_PER_SERIES:
+                result[series_id] = sorted(merged.values(), key=lambda row: (row["seasonNumber"], row["episodeNumber"], row["id"]))
+            statuses[series_id] = "stale" if had_episodes else "available"
+            retain_inventory(series_id)
+            fetched_at = timestamp
+        else:
+            statuses[series_id] = "stale" if result[series_id] else "unavailable"
+            retain_inventory(series_id)
+        _write_cache(path, {
+            "schemaVersion": CACHE_SCHEMA, "serverId": server_id, "seriesId": series_id,
+            "sourceFingerprint": fingerprint, "checkedAt": timestamp, "fetchedAt": fetched_at,
+            "status": statuses[series_id], "episodes": result[series_id], **inventories[series_id],
+        })
+
     for row in rows:
         series_id = vod.normalize_item_id(row.get("series_id", row.get("id")))
         if not series_id or series_id in statuses:
             continue
         prior_status = prior_statuses.get(series_id)
-        if (isinstance(prior_status, str) and prior_status in {"available", "stale", "unavailable"}
-                and (prior_status == "available" or series_id in prior_attempted)):
+        prior_rows, prior_facts = None, _inventory_facts()
+        if isinstance(prior_status, str) and prior_status in {"available", "stale", "unavailable"}:
             prior_rows = prior_episodes.get(series_id)
             if isinstance(prior_rows, list) and len(prior_rows) <= MAX_EPISODES_PER_SERIES:
                 try:
@@ -283,31 +384,46 @@ def enrich_series(
                     normalized = None
                 if (normalized is not None and normalized == prior_rows
                         and (bool(normalized) if prior_status in {"available", "stale"} else not normalized)):
-                    result[series_id] = normalized
-                    statuses[series_id] = prior_status
-                    continue
+                    prior_rows = normalized
+                    prior_facts = _validated_facts(prior_inventory.get(series_id), normalized) or _inventory_facts()
+                    if prior_status == "stale":
+                        prior_facts["episodeInventoryComplete"] = False
+                    if prior_status == "available" or series_id in prior_attempted:
+                        result[series_id] = normalized
+                        statuses[series_id] = prior_status
+                        inventories[series_id] = prior_facts
+                        continue
+                else:
+                    prior_rows = None
+            else:
+                prior_rows = None
         path = _cache_path(Path(cache_dir), server_id, series_id)
         fingerprint = _fingerprint(row)
         cached = _load_cache(path, server_id, series_id, config)
-        episodes = list(cached["episodes"]) if cached is not None else []
+        episodes = list(cached["episodes"]) if cached is not None else (prior_rows or [])
         result[series_id] = episodes
+        inventories[series_id] = (
+            {key: cached[key] for key in INVENTORY_KEYS} if cached is not None else prior_facts
+        )
         if series_id in details:
-            normalized = normalize_episodes(details[series_id], config)
-            if normalized:
-                result[series_id] = normalized
-                statuses[series_id] = "available"
-                _write_cache(path, {"schemaVersion": CACHE_SCHEMA, "serverId": server_id, "seriesId": series_id, "sourceFingerprint": fingerprint, "checkedAt": timestamp, "fetchedAt": timestamp, "status": "available", "episodes": normalized})
+            normalized, complete = _normalize_inventory(details[series_id], config)
+            if normalized or complete:
+                store_inventory(series_id, normalized, complete, cached, path, fingerprint)
                 continue
         checked_at = cached["checkedAt"] if cached is not None else ""
         age = current - datetime.fromisoformat(checked_at.replace("Z", "+00:00")) if checked_at else None
-        fresh = cached is not None and cached["sourceFingerprint"] == fingerprint and age is not None and timedelta(0) <= age < CACHE_TTL
+        changed = cached is not None and cached["sourceFingerprint"] != fingerprint
+        fresh = cached is not None and not changed and series_id not in priorities and age is not None and timedelta(0) <= age < CACHE_TTL
         if fresh:
             statuses[series_id] = cached["status"]
             cache_hits += 1
             continue
         statuses[series_id] = "stale" if episodes else "pending"
-        # First attempts come before retries; among fetched rows the oldest wins.
-        queue.append((0 if cached is None else 1, checked_at, series_id, cached, path, fingerprint))
+        retain_inventory(series_id)
+        # Priorities explicitly refresh even a fresh cache. Changed provider
+        # fingerprints come next, then first attempts, then oldest retries.
+        rank = 0 if series_id in priorities else (1 if changed else (2 if cached is None else 3))
+        queue.append((rank, checked_at, series_id, cached, path, fingerprint))
     if session is not None and config is not None:
         budget = vod.DownloadBudget()
         for _, _, series_id, cached, path, fingerprint in sorted(queue, key=lambda entry: entry[:3]):
@@ -319,19 +435,13 @@ def enrich_series(
             requests_used += 1
             attempted_series_ids.append(series_id)
             episodes: list[dict[str, Any]] = []
+            complete = False
             try:
                 detail = vod.request_panel_json(session, config, "get_series_info", item_id=series_id, maximum_bytes=vod.MAX_DETAIL_RESPONSE_BYTES, budget=budget)
-                episodes = normalize_episodes(detail, config)
+                episodes, complete = _normalize_inventory(detail, config)
             except (vod.CatalogBuildError, requests.RequestException):
                 pass
-            if episodes:
-                result[series_id] = episodes
-                statuses[series_id] = "available"
-                fetched_at = timestamp
-            else:
-                statuses[series_id] = "stale" if result[series_id] else "unavailable"
-                fetched_at = cached.get("fetchedAt") if cached is not None else None
-            _write_cache(path, {"schemaVersion": CACHE_SCHEMA, "serverId": server_id, "seriesId": series_id, "sourceFingerprint": fingerprint, "checkedAt": timestamp, "fetchedAt": fetched_at, "status": statuses[series_id], "episodes": result[series_id]})
+            store_inventory(series_id, episodes, complete, cached, path, fingerprint)
     return result, {"requests": requests_used, "cacheHits": cache_hits, "statusBySeries": statuses,
                     "budgetDeferred": len(queue) - requests_used, "deadlineReached": deadline_reached,
-                    "attemptedSeriesIds": attempted_series_ids}
+                    "attemptedSeriesIds": attempted_series_ids, "inventoryBySeries": inventories}

@@ -114,6 +114,8 @@ jobs:
         id: skytvplayer_catalog
         shell: bash
         env:
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
           SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
           SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
@@ -132,7 +134,8 @@ jobs:
               --cache-dir .build/vod-cache
               --fetch-series-details
               --tmdb-workers 3
-              --max-tmdb-requests 0
+              --max-tmdb-requests 800
+              --series-facts-limit 200
           )
           if [[ "${ALLOW_INSECURE_PANEL_HTTP,,}" == "true" ]]; then
             app_command+=(--allow-insecure-http)
@@ -140,7 +143,7 @@ jobs:
           if [[ -x /usr/bin/time ]]; then
             app_command=(/usr/bin/time -f "SkyTVPlayer peak RSS KiB: %M" "${app_command[@]}")
           fi
-          timeout --signal=TERM --kill-after=30s 15m "${app_command[@]}"
+          timeout --signal=TERM --kill-after=30s 20m "${app_command[@]}"
 
       - name: Trace selected Server 3 source fields without retaining raw data
         env:
