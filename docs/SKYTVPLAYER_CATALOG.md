@@ -6,14 +6,15 @@ of scanning the provider's complete VOD library to build its browsing screens.
 Provider credentials remain in GitHub secrets and the app's signed-in session.
 Playback still uses that session.
 
-The publisher change is staged for review and has not been deployed. This
-repository supplies the database and the Android integration contract. The
-Android app reader is being implemented separately and must use the contract
-below before its screens can use these files.
+The VOD database is published independently of the live EPG refresh. This
+repository supplies its Android integration contract. The additive series
+metadata version 2 contract below is intended for the next app beta; publishing
+it does not itself update the Android reader. Confirm rollout from the hosted
+index and series manifests before relying on the new fields.
 
 ## Published location
 
-The app's stable entry point after deployment is:
+The app's stable entry point is:
 
 [SKYtvPlayer index](https://sky2135.github.io/skytv-epg/skytvplayer/index.json)
 
@@ -25,6 +26,15 @@ The index has `schemaVersion: 1`, `appName`, `generatedAt`, `serverCount`, and a
 `servers` array. Match the authenticated app server using its exact ID:
 `server_1`, `server_2`, or `server_3`. Provider identifiers are scoped to that
 server; a title on another server is not a playable substitute.
+
+The version 2 series contract adds `seriesMetadataVersion: 2` to the index and
+each series manifest. The primary `schemaVersion` remains `1`; this does not
+change movie, episode-file, EPG or playback identities. Normal full series
+records have 45 top-level fields: the existing 37 plus eight additive fields
+documented below. A reviewed correction can also carry `metadataEvidence`.
+Version 2 records include all eight additions together, including explicit
+`null`, `false` and empty-list values. Legacy records without the entire added
+set remain readable; do not interpret missing fields as confirmed facts.
 
 Each server contains these references:
 
@@ -94,7 +104,7 @@ playback URL with the prefixed `contentId`.
 
 Provider facts remain available when external enrichment has no confident
 match. Unknown adult status stays `null`. Unknown language stays `und`.
-Original language and provider language availability remain separate facts;
+Original language and provider edition classification remain separate facts;
 country or server market alone is not language evidence.
 
 Supplied TMDB IDs are hints. Title and year must independently corroborate both
@@ -112,14 +122,63 @@ their inherited synopsis, artwork and dates. Unverified provider TMDB IDs are
 withheld from the app catalog so they cannot join unrelated trending records.
 The release validator rejects known wrong IDs and lost reviewed facts.
 
-`language` and `languages` describe the known provider version. TMDB's
-`originalLanguage` describes the work's original language; it does not prove
-which audio tracks a provider supplies. Never offer a language option solely
-because TMDB lists it.
+`language` and `languages` classify the provider version. TMDB's
+`originalLanguage` describes the work's original language. Series use the
+reviewed provider naming convention in this order:
+
+1. Explicit `audio_languages` or `audio_language` evidence takes precedence.
+2. An anchored edition suffix such as `(Hindi)` or `(Hindi/Tamil)` identifies
+   the named version, ahead of generic provider language and category labels.
+   Bounded year, quality and codec wrappers do not hide that suffix. A language
+   word inside a title, such as *Hindi Medium*, is not an edition suffix.
+3. A multilingual marker retains the verified original and any explicitly
+   named languages, with unknown additional languages left unspecified.
+4. A bare title means the original version under this provider convention,
+   using `originalLanguage` only after the work's external identity is verified.
+   If that evidence is unavailable, publish `und` and `["und"]`.
+
+An `ENGLISH | AMAZON PRIME` folder cannot override a Hindi edition or a verified
+Hindi original under this convention. The original display title and category
+remain unchanged. Naming-based classification is not a probe of playable audio
+tracks; the app must not invent additional language options from it. Movie
+language classification is unchanged by these series rules.
+
+The eight added full-series fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `isMultilingual` | Whether the edition declares multiple languages, including unnamed additional languages |
+| `languageListComplete` | Whether the named component-language list is complete under the available evidence |
+| `languageSource` | `provider_audio`, `title_suffix`, `provider_multilingual`, `verified_original`, or `unknown` |
+| `originalPlatforms` | Verified original networks/distributors; an array of `{name, type, tmdbNetworkId?}` |
+| `airedEpisodeCount` | TMDB regular-season episodes whose known air date is on or before the current UTC date, or `null` |
+| `serverEpisodeCount` | Distinct provider season/episode pairs from a checked inventory, or `null` when unknown |
+| `episodeInventoryComplete` | Whether the current provider inventory was successfully and completely checked |
+| `episodeInventoryCheckedAt` | UTC timestamp of the last successful inventory check, or `null` |
+
+Keep the existing language-vector contract: `und` has exactly `["und"]`;
+`mul` requires at least two concrete named component codes. For a Hindi original
+labelled `(Multi Audio)`, use `language: "hi"`, `languages: ["hi"]`,
+`isMultilingual: true` and `languageListComplete: false`. Do not add guessed
+English or Tamil tracks. An explicit `(Hindi/Tamil)` edition can use `mul`,
+`["hi", "ta"]` and a complete list. Unknown language remains incomplete.
+
+For the reported examples, a verified bare *Dupahiya* is classified `hi`,
+bare *Stranger Things* is `en`, and bare *Anupamaa* is `hi`. A `(Hindi)` edition
+of *Stranger Things* is `hi` while its `originalLanguage` remains `en`. These
+examples describe classification, not measured provider episode counts.
+
+Each `originalPlatforms` item has a `name`, a `type` of `streaming_service`,
+`tv_channel` or `network`, and optionally a string `tmdbNetworkId`. These are
+verified original distribution networks, not current country-specific watch
+availability. Prime Video and Netflix may be streaming originals; Star Plus
+is a linear TV channel. Disney+ Hotstar/JioHotstar streaming availability is a
+different fact and must not be inferred from Star Plus or a provider folder.
+Unverified or not-yet-refreshed platform facts remain `[]`.
 
 Matching removes observed provider wrappers such as `IN -`, `ENG -`, `PB -`,
 language labels and `(CAM)` before extracting a wrapped or trailing release
-year. These wrappers do not determine the provider's audio language. Reviewed
+year. Search normalization is separate from the series edition rules above. Reviewed
 search-only corrections prioritize the checked records without supplying an
 unverified TMDB ID or changing their display titles.
 
@@ -148,7 +207,8 @@ with any provider artwork keep the existing refresh policy.
 
 Series details are fetched incrementally and keep sanitized episode IDs,
 season numbers, episode numbers, and container extensions. `episodesStatus`
-distinguishes `available`, `stale`, `pending`, and `unavailable`. An empty
+distinguishes a checked `available` inventory, retained `stale` data, `pending`
+work and `unavailable` usable details after an attempt. An empty
 episode list is not proof that a show has no episodes. When details are pending
 or unavailable, the app may request that selected show's details privately
 from the provider. TMDB's next-airing episode is display information, not
@@ -159,9 +219,35 @@ Full series records have `episodes`, `episodeFiles`, and
 `episodeFiles: []`. More than 500 episodes, or a series record that exceeds
 256 KiB compressed with inline episodes, triggers separate episode shards:
 `episodes: []` and `episodeFiles` holds verified artifact references.
-`availableEpisodeCount` counts the provider inventory across both forms; it is
-separate from TMDB's `episodeCount`, which describes the show and may include
-episodes the provider does not offer.
+`availableEpisodeCount` remains the integer count of published provider episode
+stream records across both forms. Two quality versions of the same season and
+episode count as two stream records, but one logical `serverEpisodeCount`.
+Preserve the existing arrays, status values and integer field for older readers.
+
+Do not confuse the three episode measures:
+
+| Field | Scope |
+| --- | --- |
+| `episodeCount` | TMDB's declared show total, which may include episodes the provider does not offer |
+| `airedEpisodeCount` | Date-based count from complete regular-season TMDB episode dates; season 0 specials are excluded |
+| `serverEpisodeCount` | Distinct season/episode pairs observed in the selected server's provider inventory |
+
+`airedEpisodeCount` is `null` if season coverage or episode dates are incomplete,
+unknown or inconsistent. A count must pass the current UTC-date freshness
+guard; yesterday's cached count is not published as today's count. An air date
+on the current UTC date is included, without claiming that its broadcast time
+has passed. This is show metadata, never provider availability or playback
+evidence. Expired `nextEpisode` dates are cleared before publication.
+
+A complete successful empty provider inventory has `serverEpisodeCount: 0`,
+`episodeInventoryComplete: true` and a check timestamp. Pending or failed work
+without usable prior evidence has a `null` server count, not a confirmed zero.
+A stale inventory may retain its historical count and last successful check
+timestamp with `episodeInventoryComplete: false`. An old cache without this
+evidence stays unknown. An empty published `episodes` array alone cannot
+establish either a zero count or completeness. For a pending record, the legacy
+`availableEpisodeCount: 0` means no published inventory records; the app should
+display the new server count as unknown.
 
 Fetch episode files only after selecting a series or resolving its local Up
 Next state. Their `file` paths are relative to the index directory. Each gzip
@@ -199,8 +285,9 @@ Preview records contain these common keys when present: `id`, `contentId`,
 `title`, `category`, `language`, `languages`, `genres`, `adult`, `tmdbId`,
 `artwork`, `releaseDate`, `rating`, and `addedAt`. Movies add `providerStreamId`
 and `containerExtension`; series add `providerSeriesId`,
-`latestEpisodeAddedAt`, and `episodesStatus`. Previews can also retain
-`firstSeenAt`, `lastAirDate`, and `status` from the full record. Eligible series
+`latestEpisodeAddedAt`, and `episodesStatus`. Series previews also retain all
+eight version 2 fields, plus `originalLanguage`, `seasonCount` and `episodeCount`.
+Previews can also retain `firstSeenAt`, `lastAirDate`, and `status` from the full record. Eligible series
 previews add `discoveryAvailability: {"evidence": "provider_episode_inventory",
 "episodeCount": N}` for a positive observed provider episode count. This
 compact evidence does not claim a playback test or include episode details.
@@ -338,6 +425,16 @@ failures are cached for one day so one failing title cannot monopolize later
 runs; titles deferred by a budget remain eligible on the next run. Cached
 trending results older than seven days are not published as current trends.
 
+The daily VOD workflow also supports a bounded series-facts backfill for
+already verified identities. A durable cursor advances through work across
+runs; failed work retains a retry state instead of permanently dropping a
+title. It reuses verified identity/facts caches and shares pacing at up to
+20 requests per second, including HTTP 429 `Retry-After` handling. This refresh
+fills original-platform and aired-episode facts without repeating title
+matching for each server copy. It does not fetch provider episode inventories
+or publish current streaming availability. Unfinished facts stay `[]`/`null`
+until successfully refreshed; one run does not promise complete coverage.
+
 Before the normal app build, the workflow runs a separate release-date backfill
 for Server 1 movies tagged English-only (`languages == ["en"]`) whose displayed
 year is the current build year and whose full release date is missing. This
@@ -404,9 +501,16 @@ is a separate catalog join key. Keep classification in the publisher.
 
 Home is at most 512 KiB gzip. Rows have up to 20 candidates; every known safe
 language has up to 12 candidates. Preview fields come from home_preview() and
-exclude full episodes and rich detail metadata. Full series records contain
+include the eight additive series metadata version 2 fields plus originalLanguage,
+seasonCount and episodeCount. They exclude episodes, episodeFiles and the
+legacy availableEpisodeCount. Full series records contain
 episodes, episodeFiles, and availableEpisodeCount. Large inventories use
 lazy vod-episodes shards; fetch those only for the selected series or Up Next.
+Check seriesMetadataVersion: 2 in the index and series manifest; schemaVersion
+stays 1. Render unknown serverEpisodeCount as unknown, not 0; keep show total,
+aired and server counts separate. Naming conventions classify editions and
+never prove actual audio tracks or playback. originalPlatforms describes
+original distribution, not current regional streaming rights.
 
 Movies order: Featured, Continue Watching, Trending in Your Languages,
 Newly Added, language rows, Browse All.
@@ -420,6 +524,7 @@ and selected languages. Add TMDB attribution. Keep EPG and playback usable if
 optional metadata refresh fails. Follow the project's AGENTS.md, including
 Kotlin compilation, unit tests, debug APK and Android-test APK builds, then
 real emulator screenshots and D-pad verification for viewer-facing changes.
-The publisher is staged for review; do not assume its public index is deployed
-until the GitHub Pages publication succeeds.
+The VOD index is independently published. Confirm the new series contract from
+the hosted version fields and verify its Android rendering in the next beta;
+do not assume a publisher update has updated the app reader.
 ```

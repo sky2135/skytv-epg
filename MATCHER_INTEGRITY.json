@@ -65,8 +65,8 @@
   "programmeDetailsSha256": "b815e7bfb69395b384f9726bc144814cea60b04a913f21f1b0d00200c13eab3b",
   "liveEnrichmentAuditSha256": "57679d496c58470729d081b43ad77e8d66a2b8712212c839070ad1d347fae6fe",
   "vodCatalogBuilderSha256": "8f54201e5e99e6f22740a92db47d74169507c77c01879f11ed99dee25a1e01b0",
-  "appCatalogBuilderSha256": "2f9a8dbef48a63efaaead3a13bacafec01c5ca602ad0c527668634065ae31eca",
-  "vodTmdbSha256": "4fbc4f6f5bc613addd0720bb03b7c4905ab35fb7e34105ad3224c5d69d4fbea7",
+  "appCatalogBuilderSha256": "5f87b8c4091904337a6ca534813656fad5990a44988548cb6f57076238fe8ce0",
+  "vodTmdbSha256": "ea22e92801faacaa41f71b02d9388160665aedadcd7877907680cbbb7375c514",
   "vodReviewedCorrectionsSha256": "ac77c54fff1893a35cc1744ff6b3f44bf6bb786d348f54cb488f707663f57234",
   "vodReviewedFactsSha256": "a7359507a5c0767997b5a00a3945bb3bf24e44d8524f7ddbb3b44f11d4f52def",
   "channelMetadataFactsSha256": "09762eb11b2973dd33c3d5367dbcf25a632b9f7c0e87ff664f108da3586b576e",
@@ -76,7 +76,7 @@
   "vodResolutionQueueSha256": "76e1f60504e3130bd7aee456b22172fd85d3b8d99350fc3631fcf1b312ae7a2c",
   "vodProviderEvidenceSha256": "3eef3b2341b651dedf786b0af71439be217419da3fa262d56bd63cd1af159c2e",
   "vodPreparedInstallerSha256": "c6f44200e4c13be9cfe297c5cec63739d6ae8ec3bce611d55a34949a3a9bacfb",
-  "vodSeriesSha256": "2586964d5abd267dd48ac50629c4d2af7ddb8892da1928f43ab721580719daaa",
+  "vodSeriesSha256": "46299f40e7627d5afb57cae7c7aba0fafdebd38d327bec3fc90409209e8d8b86",
   "vodProviderEvidenceDiagnosticSha256": "aa7b8f315dd52ab7382f639170b38aaec967fbad5db975f64a95c27f5aa82c26",
   "vodProviderEvidenceDiagnosticWorkflowSha256": "9be4e128769ea70288a05ac8b9cbcda68977b7f5b57b2705d45980702754a1a8",
   "vodIdentityCoverageDiagnosticSha256": "f77c5add6abc2ef11b13c8cbd7cee2634866e60d8af5fd6620879d43c3527ab7",
@@ -88,7 +88,7 @@
   "componentArtifactsSha256": "dc6727d35f024e320077952ca03ed60a430944f73e1d7b208c5e669696643028",
   "publicSecretScannerSha256": "1f7edf7aeca61475072f5e4860abf2d18f6f3d5be72b98cac852de42d317331d",
   "publicationChecksSha256": "bb054a238ac7d0d48f2d1d2cba1e3c3af2f3a76d2389aeff124f72b9c6366e83",
-  "vodWorkflowSha256": "33294eceb63c2fa355cb281ac8b3fd5379e64377add59bde05af05d4f97dc5ea",
+  "vodWorkflowSha256": "4767e471199d1e24ff45ea87ac2c4561996395a12c79d773afb60b49494d91bf",
   "componentPublisherWorkflowSha256": "e040928d5fd5cb0c775c1ce637c0ac7083e4e4476fe4cfdb1862c6d3cd34bd2c",
   "vodPosterIndexSha256": "dce1e7bd7ff1602bc0fc2ba0160d46a3c881f599de1207504fae97f677372a72",
   "vodIdentityCoverageAuditSha256": "d858304d8d83256153abe49a3b9cbbb7708e3dffc1752c3c40e54e54a57ad825",
@@ -109,5 +109,7 @@
   "vodVerificationWorkflowSha256": "4d3d3a349a5c86e14978124b7632db474bdabd60342087965e4c9df5d8cce66c",
   "providerGuideLinksSha256": "1b4348e6d1c41016dd0adfb024c74008600f52ec301eade97780590dcc475d05",
   "verifiedGuideConnectionsSha256": "d66c2935e455c3293fcf8608fa8344111e5177aa9a24ed4031e8b56a0652f3c2",
-  "tivimateGuideHealthSha256": "2ef38280d5309afdd2c3e3cb82f996be4482596cbe58320b9df037f17f27aee0"
+  "tivimateGuideHealthSha256": "2ef38280d5309afdd2c3e3cb82f996be4482596cbe58320b9df037f17f27aee0",
+  "vodSeriesLanguageSha256": "d6a0ecfb9d837972e73502ac54dae89e0d71183062df85aec6fec095379cafd7",
+  "vodSeriesFactsSha256": "51ee4be630d29ba4e4650d28710f5ba41e9a3f4cecd5a7dbce9462cb42caaba5"
 }

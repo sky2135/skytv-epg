@@ -87,15 +87,16 @@ class IndependentPublicationTests(unittest.TestCase):
                 self.assertEqual(row['metadataMatch'], 'matched_id')
             self.assertEqual(session.calls, [])
 
-    def test_workflow_keeps_api_work_separate_and_seals_before_continuing(self):
+    def test_workflow_bounds_series_facts_and_worker_seals_before_continuing(self):
         root = Path(__file__).resolve().parents[1]
         publisher = (root / '.github/workflows/vod.yml').read_text()
         worker = (root / '.github/workflows/enrich-vod.yml').read_text()
         self.assertIn('actions: read', publisher)
-        self.assertIn('--max-tmdb-requests 0', publisher)
+        self.assertIn('--max-tmdb-requests 800', publisher)
+        self.assertIn('--series-facts-limit 200', publisher)
         self.assertNotIn('--backfill-release-dates', publisher)
         build_step = publisher.split('- name: Build SKYTVPlayer movie and TV home database', 1)[1].split('      - name:', 1)[0]
-        self.assertNotIn('TMDB_READ_ACCESS_TOKEN:', build_step)
+        self.assertIn('TMDB_READ_ACCESS_TOKEN:', build_step)
         self.assertNotIn('publish-component.yml', worker)
         self.assertNotIn('deploy-pages@', worker)
         self.assertLess(worker.index('Retain the sealed checkpoint'), worker.index('Continue due work'))

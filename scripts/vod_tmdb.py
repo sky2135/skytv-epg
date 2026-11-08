@@ -30,6 +30,10 @@ API_ROOT = "https://api.themoviedb.org/3"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_CACHE_BYTES = 512 * 1024
 DETAIL_TTL = 14 * 24 * 60 * 60
+SERIES_FACTS_TTL = 6 * 60 * 60
+SERIES_FACTS_PARTIAL_TTL = 15 * 60
+MAX_SERIES_FACT_SEASONS = 200
+MAX_SERIES_SEASON_EPISODES = 10_000
 MISS_TTL = TRENDING_TTL = 24 * 60 * 60
 MAX_TRENDING_AGE = 7 * 24 * 60 * 60
 MAX_RETRY_DELAY = 5.0
@@ -513,6 +517,62 @@ def _strings(values: object, limit: int = 40) -> list[str]:
     return result
 
 
+_PLATFORM_TYPES = frozenset({"streaming_service", "tv_channel", "network"})
+_KNOWN_PLATFORM_NAMES = {
+    "netflix": ("Netflix", "streaming_service"),
+    "prime video": ("Prime Video", "streaming_service"),
+    "amazon prime video": ("Prime Video", "streaming_service"),
+    "starplus": ("Star Plus", "tv_channel"),
+    "star plus": ("Star Plus", "tv_channel"),
+    "disney+": ("Disney+", "streaming_service"),
+    "apple tv+": ("Apple TV+", "streaming_service"),
+    "hulu": ("Hulu", "streaming_service"),
+    "max": ("Max", "streaming_service"),
+    "hbo max": ("HBO Max", "streaming_service"),
+    "paramount+": ("Paramount+", "streaming_service"),
+    "peacock": ("Peacock", "streaming_service"),
+    "sonyliv": ("SonyLIV", "streaming_service"),
+    "zee5": ("ZEE5", "streaming_service"),
+    "star+": ("Star+", "streaming_service"),
+}
+
+
+def _platforms(values: object, *, cached: bool = False) -> list[dict[str, str]]:
+    """Original TMDB networks, not regional watch providers or provider folders."""
+    result = []
+    seen = set()
+    for network in values[:40] if isinstance(values, list) else []:
+        if not isinstance(network, dict):
+            continue
+        name = _text(network.get("name"), 100)
+        if not name or "://" in name or re.search(r"[<>]|(?:password|username)=", name, re.I):
+            continue
+        if cached:
+            if set(network) - {"name", "type", "tmdbNetworkId"} or network.get("type") not in _PLATFORM_TYPES:
+                continue
+            identifier = _identifier(network.get("tmdbNetworkId"))
+            if "tmdbNetworkId" in network and identifier is None:
+                continue
+            kind = network["type"]
+        else:
+            identifier = _identifier(network.get("id"))
+            if identifier is None:
+                continue
+            key = " ".join(unicodedata.normalize("NFKC", name).casefold().split())
+            name, kind = _KNOWN_PLATFORM_NAMES.get(key, (name, "network"))
+            if key == "amazon" and identifier == "1024":
+                name, kind = "Prime Video", "streaming_service"
+        signature = identifier, name, kind
+        if signature in seen:
+            continue
+        seen.add(signature)
+        value = {"name": name, "type": kind}
+        if identifier is not None:
+            value["tmdbNetworkId"] = identifier
+        result.append(value)
+    return result
+
+
 def _empty(identifier: str | None, status: str = "unavailable") -> dict[str, Any]:
     return {
         "tmdbId": identifier, "matchStatus": status, "overview": None,
@@ -521,6 +581,7 @@ def _empty(identifier: str | None, status: str = "unavailable") -> dict[str, Any
         "voteCount": None, "popularity": None, "runtimeMinutes": None,
         "cast": [], "directors": [], "trailerUrl": None, "seasonCount": None,
         "episodeCount": None, "status": None, "lastAirDate": None, "nextEpisode": None,
+        "originalPlatforms": [], "airedEpisodeCount": None,
         "adult": None, "rejectedIdentity": False,
     }
 
@@ -547,6 +608,7 @@ def _metadata(details: Mapping[str, Any], kind: str, match_status: str) -> dict[
     if kind == "movie":
         result["runtimeMinutes"] = _integer(details.get("runtime"), 1, 10_000)
     else:
+        result["originalPlatforms"] = _platforms(details.get("networks"))
         runtimes = details.get("episode_run_time")
         if isinstance(runtimes, list):
             result["runtimeMinutes"] = next((value for raw in runtimes[:100] if (value := _integer(raw, 1, 10_000)) is not None), None)
@@ -584,7 +646,9 @@ def _metadata(details: Mapping[str, Any], kind: str, match_status: str) -> dict[
 
 def _cached_metadata(data: object) -> dict[str, Any] | None:
     """Revalidate restored cache files before they enter a public catalog."""
-    if not isinstance(data, dict) or set(data) not in (set(_empty(None)), set(_empty(None)) - {"rejectedIdentity"}) or data.get("matchStatus") not in STATUSES:
+    fields = set(_empty(None))
+    optional = {"rejectedIdentity", "originalPlatforms", "airedEpisodeCount"}
+    if not isinstance(data, dict) or not fields - optional <= set(data) <= fields or data.get("matchStatus") not in STATUSES:
         return None
     identifier = _identifier(data.get("tmdbId"))
     if data["matchStatus"].startswith("matched_") and identifier is None:
@@ -615,6 +679,8 @@ def _cached_metadata(data: object) -> dict[str, Any] | None:
     result["runtimeMinutes"] = _integer(data.get("runtimeMinutes"), 1, 10_000)
     result["seasonCount"] = _integer(data.get("seasonCount"), 0, 100_000)
     result["episodeCount"] = _integer(data.get("episodeCount"), 0, 1_000_000)
+    result["originalPlatforms"] = _platforms(data.get("originalPlatforms"), cached=True)
+    result["airedEpisodeCount"] = _integer(data.get("airedEpisodeCount"), 0, 1_000_000)
     result["adult"] = data.get("adult") if isinstance(data.get("adult"), bool) else None
     cast = data.get("cast")
     for person in cast[:10] if isinstance(cast, list) else []:
@@ -657,6 +723,10 @@ class TmdbClient:
         seed_collision_file(self.poster_index, self.cache_dir.parent.parent / "enrichment-collisions.json")
         self._poster_cache_state = {}
         self._identity_cache_files = {}
+        self._series_facts_memo: dict[str, dict[str, Any] | None] = {}
+        self._series_facts_status_memo: dict[str, str] = {}
+        self._series_facts_read_memo: dict[str, tuple[object, bool]] = {}
+        self.last_series_facts_status = "unverified"
 
     def __enter__(self) -> "TmdbClient":
         return self
@@ -1083,6 +1153,213 @@ class TmdbClient:
             return 3
         return 1 if cached["matchStatus"].startswith("matched_") else 2
 
+    def _series_season_dates(self, identifier: str, season: int, count: int):
+        key = f"series:episode-dates-v1:{identifier}:season:{season}"
+
+        def valid(value):
+            if (not isinstance(value, dict) or set(value) != {"tmdbId", "season", "episodeCount", "episodes"}
+                    or value["tmdbId"] != identifier or type(value["season"]) is not int
+                    or value["season"] != season or type(value["episodeCount"]) is not int
+                    or value["episodeCount"] != count or not isinstance(value["episodes"], list)
+                    or len(value["episodes"]) != count):
+                return False
+            return all(isinstance(pair, list) and len(pair) == 2 and type(pair[0]) is int
+                       and pair[0] == index and (pair[1] is None or _date(pair[1]) == pair[1])
+                       for index, pair in enumerate(value["episodes"], 1))
+
+        cached, fresh = self._read_cache(key)
+        if fresh and valid(cached):
+            return cached["episodes"]
+        before = self.stats["budgetExhausted"], self.stats["elapsedBudgetExhausted"]
+        state, details = self._request(f"/tv/{identifier}/season/{season}")
+        if (state != "ok" or not isinstance(details, dict)
+                or _integer(details.get("season_number"), 1, MAX_SERIES_FACT_SEASONS) != season):
+            self.last_series_facts_status = self._series_failure_status(state, before)
+            return None
+        episodes = details.get("episodes")
+        if not isinstance(episodes, list) or len(episodes) != count:
+            self.last_series_facts_status = "failed"
+            return None
+        dates = {}
+        for episode in episodes:
+            if not isinstance(episode, dict):
+                self.last_series_facts_status = "failed"
+                return None
+            number = _integer(episode.get("episode_number"), 1, MAX_SERIES_SEASON_EPISODES)
+            if (number is None or number in dates
+                    or _integer(episode.get("season_number"), 1, MAX_SERIES_FACT_SEASONS) != season
+                    or (episode.get("show_id") is not None and _identifier(episode["show_id"]) != identifier)):
+                self.last_series_facts_status = "failed"
+                return None
+            dates[number] = _date(episode.get("air_date"))
+        if set(dates) != set(range(1, count + 1)):
+            self.last_series_facts_status = "failed"
+            return None
+        payload = {"tmdbId": identifier, "season": season, "episodeCount": count,
+                   "episodes": [[number, dates[number]] for number in sorted(dates)]}
+        # Active and future season dates can change; every date is recomputed
+        # against UTC today when facts are refreshed, never inferred from last #.
+        self._write_cache(key, payload, SERIES_FACTS_TTL if any(d is None or d >= self._utc_today() for d in dates.values()) else DETAIL_TTL)
+        return payload["episodes"]
+
+    def _utc_today(self) -> str:
+        return datetime.fromtimestamp(self._timestamp(), timezone.utc).date().isoformat()
+
+    def _series_failure_status(self, state, before):
+        return "deferred" if (state == "disabled" or before != (
+            self.stats["budgetExhausted"], self.stats["elapsedBudgetExhausted"]
+        )) else "failed"
+
+    def _aired_episode_count(self, identifier: str, details: Mapping[str, Any]) -> int | None:
+        """Count fully enumerated dated regular episodes; season 0 is excluded.
+
+        TV/season summary counts and last/next episode numbers are completeness
+        checks only, never substitutes for episode-level air dates. Missing
+        seasons, missing dates, partial responses and budget deferral yield null.
+        """
+        seasons = details.get("seasons")
+        total = _integer(details.get("number_of_seasons"), 0, MAX_SERIES_FACT_SEASONS)
+        if not isinstance(seasons, list) or total is None or len(seasons) > MAX_SERIES_FACT_SEASONS + 1:
+            return None
+        regular = {}
+        for summary in seasons:
+            if not isinstance(summary, dict):
+                return None
+            season = _integer(summary.get("season_number"), 0, MAX_SERIES_FACT_SEASONS)
+            if season is None:
+                return None
+            if season == 0:
+                continue
+            count = _integer(summary.get("episode_count"), 0, MAX_SERIES_SEASON_EPISODES)
+            if count is None or season in regular:
+                return None
+            regular[season] = count
+        if set(regular) != set(range(1, total + 1)):
+            return None
+        if not regular:
+            return 0 if _integer(details.get("number_of_episodes")) == 0 else None
+        aired = 0
+        today = self._utc_today()
+        for season, count in sorted(regular.items()):
+            episodes = self._series_season_dates(identifier, season, count)
+            if episodes is None or any(air_date is None for _number, air_date in episodes):
+                return None
+            aired += sum(air_date <= today for _number, air_date in episodes)
+        declared = _integer(details.get("number_of_episodes"), 0, 1_000_000)
+        if declared is not None and aired > declared:
+            self.last_series_facts_status = "failed"
+            return None
+        return aired
+
+    @staticmethod
+    def _series_facts_agree(facts, metadata, query):
+        if (not isinstance(facts, dict) or set(facts) != {"policyVersion", "asOfDate", "identity", "metadata", "completionStatus"}
+                or type(facts.get("policyVersion")) is not int or facts["policyVersion"] != 1
+                or facts.get("completionStatus") not in {"available", "failed", "deferred"}):
+            return False
+        fresh = _cached_metadata(facts.get("metadata"))
+        proof = facts.get("identity")
+        if (fresh is None or not fresh["matchStatus"].startswith("matched_")
+                or not isinstance(proof, dict) or fresh["tmdbId"] != metadata["tmdbId"]
+                or proof.get("tmdbId") != metadata["tmdbId"]
+                or (fresh["releaseDate"] or "")[:4] != (metadata["releaseDate"] or "")[:4]
+                or proof.get("year") != ((fresh["releaseDate"] or "")[:4] or None)):
+            return False
+        original = _normalized_title(metadata["originalTitle"])
+        if original:
+            return original == _normalized_title(fresh["originalTitle"]) == proof.get("originalTitle")
+        return _identity_matches(proof, *query)
+
+    def _series_metadata_with_current_facts(self, metadata, query):
+        """Do not publish yesterday's aired count as a verified count today."""
+        result = dict(metadata)
+        result["airedEpisodeCount"] = None
+        identifier = metadata["tmdbId"]
+        if identifier in self._series_facts_memo:
+            facts, fresh = self._series_facts_memo[identifier], True
+        else:
+            # A parallel publishing worker may see a legacy identity variant
+            # after another client refreshed this same verified work. Facts
+            # remain ID-scoped, but every application still checks its title
+            # and year proof below. Cache negative reads only in this no-wire
+            # path so they cannot suppress a later targeted refresh.
+            if identifier not in self._series_facts_read_memo:
+                self._series_facts_read_memo[identifier] = self._read_cache(f"series:facts-v1:{identifier}")
+            facts, fresh = self._series_facts_read_memo[identifier]
+        if (fresh and isinstance(facts, dict) and facts.get("asOfDate") == self._utc_today()
+                and self._series_facts_agree(facts, metadata, query)):
+            safe = _cached_metadata(facts["metadata"])
+            for field in ("originalPlatforms", "airedEpisodeCount", "seasonCount", "episodeCount", "status", "lastAirDate", "nextEpisode"):
+                result[field] = safe[field]
+        return result
+
+    def refresh_series_facts(self, item: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Backfill facts for an already corroborated series, without matching.
+
+        No search or provider category is used. All detail/season requests share
+        this client's ordinary request/deadline limits. Each item first passes
+        the existing identity-cache validator; complete facts are shared by
+        canonical TMDB ID and UTC date across servers and persisted separately.
+        """
+        key, identifier, title, year = _enrichment_identity(item, "series")
+        self.last_series_facts_status = "unverified"
+        cached, _fresh, _rejected = self._identity_cache(key, item, "series", identifier, title, year)
+        if cached is None or not cached["matchStatus"].startswith("matched_"):
+            return None
+        identifier = cached["tmdbId"]
+        stored, _fresh = self._read_identity_cache(key, item, "series", title, year)
+        proof = stored.get("identity") if isinstance(stored, dict) else None
+        query = _current_query_identity(proof, item, "series", title, year) if isinstance(proof, dict) else (title, year)
+        if query is None:
+            self.last_series_facts_status = "failed"
+            return cached
+        facts_key = f"series:facts-v1:{identifier}"
+        reused = True
+        memo = self._series_facts_memo.get(identifier)
+        if identifier in self._series_facts_memo and (memo is None or memo.get("asOfDate") == self._utc_today()):
+            facts = self._series_facts_memo[identifier]
+        else:
+            facts, fresh = self._read_cache(facts_key)
+            if not fresh or not isinstance(facts, dict) or facts.get("asOfDate") != self._utc_today() or not self._series_facts_agree(facts, cached, query):
+                facts = None
+                reused = False
+                before = self.stats["budgetExhausted"], self.stats["elapsedBudgetExhausted"]
+                state, details = self._request(f"/tv/{identifier}", {"append_to_response": "alternative_titles,translations"})
+                self.last_series_facts_status = self._series_failure_status(state, before)
+                if state == "ok" and isinstance(details, dict) and _identifier(details.get("id")) == identifier:
+                    identity, _translation = _detail_identity_for_query(details, "series", query[0])
+                    fresh_metadata = _metadata(details, "series", "matched_id")
+                    candidate = {"policyVersion": 1, "asOfDate": self._utc_today(), "identity": identity, "metadata": fresh_metadata, "completionStatus": "available"}
+                    if (self._series_facts_agree(candidate, cached, query)
+                            and _identity_matches(identity, *query)):
+                        self.last_series_facts_status = "available"
+                        fresh_metadata["airedEpisodeCount"] = self._aired_episode_count(identifier, details)
+                        candidate["completionStatus"] = self.last_series_facts_status
+                        facts = candidate
+                        self._write_cache(facts_key, facts, SERIES_FACTS_TTL if fresh_metadata["airedEpisodeCount"] is not None else SERIES_FACTS_PARTIAL_TTL)
+            self._series_facts_memo[identifier] = facts
+            self._series_facts_status_memo[identifier] = self.last_series_facts_status
+        if facts is None or not self._series_facts_agree(facts, cached, query):
+            self.last_series_facts_status = self._series_facts_status_memo.get(identifier, "failed") if facts is None else "failed"
+            return self._series_metadata_with_current_facts(cached, query)
+        self.last_series_facts_status = "cache_hit" if reused and facts["completionStatus"] == "available" else facts["completionStatus"]
+        metadata = dict(cached)
+        safe_facts = _cached_metadata(facts["metadata"])
+        for field in ("originalPlatforms", "airedEpisodeCount", "seasonCount", "episodeCount", "status", "lastAirDate", "nextEpisode"):
+            metadata[field] = safe_facts[field]
+        if not isinstance(proof, dict):
+            proof = facts["identity"]
+        cache_key = _identity_cache_key(key, item, "series", title, year)
+        previous_diagnostic = self.last_match_diagnostic
+        if isinstance(stored, dict):
+            self.last_match_diagnostic = _match_diagnostic(stored.get("matchDiagnostic"))
+        errors_before = self.stats["cacheWriteErrors"]
+        self._write_identity_cache(cache_key, metadata, DETAIL_TTL, proof)
+        if self.stats["cacheWriteErrors"] != errors_before:
+            self.last_series_facts_status = "failed"
+        self.last_match_diagnostic = previous_diagnostic
+        return metadata
+
     def _undated_poster_candidate(self, item, title, year, rejected_ids, evidence):
         """Discover one undated movie without relaxing ordinary year matching."""
         state, search = self._request("/search/movie", {"query": title, "page": 1, "include_adult": "true"})
@@ -1154,6 +1431,8 @@ class TmdbClient:
         rejected_ids = correction.get("rejectedTmdbIds", []) if correction else []
         requests_before = self.stats["requests"]
         cached, fresh, rejected = self._identity_cache(key, item, kind, identifier, title, year)
+        if kind == "series" and cached and cached["matchStatus"].startswith("matched_"):
+            cached = self._series_metadata_with_current_facts(cached, (title, year))
         rejected = rejected or bool(correction and correction["rejectIdentity"])
         poster_attempt = None
         if cached is None:
@@ -1463,6 +1742,8 @@ class TmdbClient:
         if not _identity_binding_valid(proof):
             return unavailable("incomplete_search")
         result = _metadata(details, kind, match_status)
+        if kind == "series":
+            result = self._series_metadata_with_current_facts(result, (title, year))
         self._remember_poster(kind, result, proof)
         result["rejectedIdentity"] = rejected
         self.stats["matches"] += 1
