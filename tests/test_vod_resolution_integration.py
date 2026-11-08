@@ -221,7 +221,7 @@ class ResolutionIntegrationTests(unittest.TestCase):
         seen = []
         lock = threading.Lock()
 
-        def refresh(_source, server_id, cache, config, session, *, max_requests, now, deadline_seconds, previous=None):
+        def refresh(_source, server_id, cache, config, session, *, max_requests, now, deadline_seconds, previous=None, priority_series_ids=()):
             with lock:
                 seen.append((server_id, max_requests, previous))
             count = max_requests if server_id == "server_3" else 0
@@ -245,7 +245,7 @@ class ResolutionIntegrationTests(unittest.TestCase):
         lock = threading.Lock()
         observed = []
 
-        def refresh(_source, server_id, cache, config, session, *, max_requests, now, deadline_seconds, previous=None):
+        def refresh(_source, server_id, cache, config, session, *, max_requests, now, deadline_seconds, previous=None, priority_series_ids=()):
             with lock:
                 observed.append((server_id, id(session), max_requests, session))
             barrier.wait(timeout=3)
