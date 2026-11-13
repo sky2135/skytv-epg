@@ -1,50 +1,102 @@
-name: Inspect unmatched VOD metadata
-
+# PROPOSAL ONLY: branch-only replacement of this already-dispatchable workflow.
+# Install the companion helper at scripts/prepare_series_resume_upload_bridge.py
+# on that reviewed bridge branch. Never merge this replacement into main.
+name: Prepare private series resume upload
 on:
   workflow_dispatch:
-
+    inputs:
+      approved_code_sha:
+        description: Exact reviewed commit containing approved BFD integration and primitive dependencies
+        required: true
+        type: string
+      pins_json:
+        description: Exact current/lastGood artifact ZIP, snapshot/index pins and reviewed expected output SHA (see bridge README)
+        required: true
+        type: string
 permissions:
   contents: read
-
+  actions: read
 concurrency:
-  group: ${{ github.repository }}-vod-match-diagnostics
+  group: ${{ github.repository }}-series-resume-private-preparation
   cancel-in-progress: false
-
 jobs:
-  inspect:
-    name: Replay public movie identities without publishing
+  prepare-private:
+    name: Prepare private resume bundle only
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      PYTHONHASHSEED: "0"
     steps:
-      - name: Check out repository
+      - name: Check exact source selection syntax
+        env:
+          APPROVED_SHA: ${{ inputs.approved_code_sha }}
+        run: |
+          [[ "$APPROVED_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+      - name: Check out reviewed bridge branch at dispatch revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
+          path: bridge
+          persist-credentials: false
+      - name: Check out approved runtime code at its exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.approved_code_sha }}
+          path: approved
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Install pinned metadata client dependency
+      - name: Install approved pinned dependencies
+        working-directory: approved
         run: |
-          python -m pip install --only-binary=:all: requests==2.32.5
-      - name: Run offline diagnostic tests
-        run: python -m unittest discover -s tests -p test_vod_match_diagnostics.py -v
-      - name: Replay the reviewed public input snapshot
+          python -m pip install --only-binary=:all: -r requirements.txt -r requirements-sync.txt
+          python -m pip check
+      - name: Prepare from exact existing VOD components without provider work
+        id: prepare
         env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVED_SHA: ${{ inputs.approved_code_sha }}
+          BRIDGE_PINS_JSON: ${{ inputs.pins_json }}
+        run: |
+          python bridge/scripts/prepare_series_resume_upload_bridge.py \
+            --approved-dir "$GITHUB_WORKSPACE/approved" \
+            --approved-code-sha "$APPROVED_SHA" \
+            --pins-json "$BRIDGE_PINS_JSON" \
+            --work-dir "$RUNNER_TEMP/series-resume-bridge-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      - name: Run configured secret scan on materialized data and preparation report
+        working-directory: approved
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
+          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
+          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
+          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
+          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-        run: |
-          timeout --signal=TERM --kill-after=30s 12m \
-            python -u scripts/diagnose_vod_matches.py \
-              --input data/diagnostics/server1-unmatched-2026-10-21.json \
-              --output .build/vod-match-diagnostics/report.json \
-              --max-requests 900 \
-              --max-seconds 600
-      - name: Retain public identity diagnostic report
-        if: always()
+        run: python scripts/scan_public_secrets.py
+      - name: Upload only the private preparation bundle after successful scanning
+        id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: vod-match-diagnostic-${{ github.run_id }}
-          path: .build/vod-match-diagnostics/report.json
-          if-no-files-found: warn
-          retention-days: 7
+          name: series-resume-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare.outputs.bundle-dir }}/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+      - name: Record private handoff identifiers
+        env:
+          PREPARED_ID: ${{ steps.upload.outputs.artifact-id }}
+          SNAPSHOT_SHA: ${{ steps.prepare.outputs.snapshot-sha256 }}
+        run: |
+          printf 'Private preparation artifact: %s\nSnapshot SHA256: %s\nNo publication performed.\n' "$PREPARED_ID" "$SNAPSHOT_SHA" >> "$GITHUB_STEP_SUMMARY"
