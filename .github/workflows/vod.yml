@@ -6,6 +6,17 @@ on:
     - cron: "47 4 * * *"
       timezone: "America/New_York"
   workflow_dispatch:
+    inputs:
+      prepared_component_artifact_id:
+        description: Reviewed private series-resume-preparation artifact ID; empty keeps ordinary refresh
+        required: false
+        type: string
+        default: ""
+      prepared_snapshot_sha256:
+        description: Exact reviewed snapshot/snapshot.json SHA256 for the prepared artifact
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.repository }}-skytv-vod-v1
@@ -28,12 +39,21 @@ env:
 jobs:
   build:
     name: Build movies, series, languages and release metadata
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && inputs.prepared_component_artifact_id == ''
     runs-on: ubuntu-latest
     timeout-minutes: 75
     outputs:
       artifact_id: ${{ steps.component_snapshot.outputs.artifact-id }}
     steps:
+      - name: Reject incomplete prepared-bundle selection
+        env:
+          PREPARED_PIN: ${{ inputs.prepared_snapshot_sha256 }}
+        run: |
+          if [[ -n "$PREPARED_PIN" ]]; then
+            echo '::error::A prepared snapshot pin requires its private artifact ID.'
+            exit 1
+          fi
+
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -145,6 +165,43 @@ jobs:
           fi
           timeout --signal=TERM --kill-after=30s 20m "${app_command[@]}"
 
+      # Default off. Set this repository variable only after the controlled rollout gates.
+      - name: Retain catalogue closures and optionally attach series resume lookup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SERIES_RESUME_LOOKUP_ENABLED: ${{ vars.SERIES_RESUME_LOOKUP_ENABLED || 'false' }}
+          EPG_PUBLIC_BASE_URL: ${{ vars.EPG_PUBLIC_BASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/component_artifacts.py previous --component vod --destination .build/resume-last-good
+          python - <<'PY'
+          import hashlib, os, subprocess, sys
+          from pathlib import Path
+          sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+          enabled = os.environ['SERIES_RESUME_LOOKUP_ENABLED']
+          if enabled not in {'true', 'false'}:
+              raise SystemExit('The lookup setting must be true or false.')
+          mode = ['--enabled'] if enabled == 'true' else []
+          bundle = Path('.build/resume-prepared')
+          subprocess.run([sys.executable, 'scripts/prepare_series_resume_component.py', 'prepare',
+              '--candidate-public-dir', 'public',
+              '--last-good-app-dir', '.build/resume-last-good/files/skytvplayer',
+              '--output-dir', str(bundle),
+              '--index-sha256', sha('public/skytvplayer/index.json'),
+              '--last-good-index-sha256', sha('.build/resume-last-good/files/skytvplayer/index.json')] + mode, check=True)
+          pin = sha(bundle / 'snapshot/snapshot.json')
+          subprocess.run([sys.executable, 'scripts/prepare_series_resume_component.py', 'materialize',
+              '--bundle-dir', str(bundle), '--output-dir', '.build/resume-public',
+              '--snapshot-sha256', pin], check=True)
+          # Both names are owned private job directories, not deployed storage.
+          before = Path('.build/resume-public-before')
+          if before.exists():
+              raise SystemExit('Private source backup already exists.')
+          Path('public').rename(before)
+          Path('.build/resume-public').rename('public')
+          PY
+
       - name: Trace selected Server 3 source fields without retaining raw data
         env:
           SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
@@ -217,9 +274,111 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  prepared:
+    # The existing component restorer validates this exact workflow/job name.
+    name: Build movies, series, languages and release metadata
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.prepared_component_artifact_id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      artifact_id: ${{ steps.component_snapshot.outputs.artifact-id }}
+    steps:
+      - name: Check out reviewed current source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-sync.txt
+
+      - name: Install pinned dependencies
+        shell: bash
+        run: |
+          python -m pip install --only-binary=:all: \
+            -r requirements.txt -r requirements-sync.txt
+          python -m pip check
+
+      - name: Materialize checksum-pinned private bundle without provider work
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARED_ARTIFACT_ID: ${{ inputs.prepared_component_artifact_id }}
+          PREPARED_SNAPSHOT_SHA256: ${{ inputs.prepared_snapshot_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, re, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from component_artifacts import GitHubArtifacts, extract_zip
+          value = os.environ['PREPARED_ARTIFACT_ID']
+          pin = os.environ['PREPARED_SNAPSHOT_SHA256']
+          if not re.fullmatch(r'[1-9][0-9]{0,19}', value) or not re.fullmatch(r'[0-9a-f]{64}', pin):
+              raise SystemExit('Prepared artifact ID and exact lowercase snapshot SHA256 are required.')
+          client = GitHubArtifacts()
+          artifact = client.get('/actions/artifacts/' + value)
+          if (artifact.get('id') != int(value) or artifact.get('expired') is not False
+                  or not re.fullmatch(r'series-resume-preparation-[A-Za-z0-9._-]{1,100}', str(artifact.get('name', '')))):
+              raise SystemExit('Expected a current private preparation artifact, not a production component.')
+          Path('.build').mkdir(exist_ok=True)
+          archive = Path('.build/resume-preparation.zip')
+          client.download(artifact, archive)
+          extract_zip(archive, Path('.build/resume-preparation'))
+          subprocess.run([sys.executable, 'scripts/prepare_series_resume_component.py', 'materialize',
+              '--bundle-dir', '.build/resume-preparation', '--output-dir', 'public',
+              '--snapshot-sha256', pin], check=True)
+          PY
+
+      - name: Verify files contain no passwords, private URLs, or credential fields
+        id: public_secret_scan
+        if: always()
+        shell: bash
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SERVER_1_BASE_URL: ${{ secrets.SERVER_1_BASE_URL }}
+          SERVER_1_USERNAME: ${{ secrets.SERVER_1_USERNAME }}
+          SERVER_1_PASSWORD: ${{ secrets.SERVER_1_PASSWORD }}
+          SERVER_2_BASE_URL: ${{ secrets.SERVER_2_BASE_URL }}
+          SERVER_2_USERNAME: ${{ secrets.SERVER_2_USERNAME }}
+          SERVER_2_PASSWORD: ${{ secrets.SERVER_2_PASSWORD }}
+          SERVER_3_BASE_URL: ${{ secrets.SERVER_3_BASE_URL }}
+          SERVER_3_USERNAME: ${{ secrets.SERVER_3_USERNAME }}
+          SERVER_3_PASSWORD: ${{ secrets.SERVER_3_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TMDB_READ_ACCESS_TOKEN: ${{ secrets.TMDB_READ_ACCESS_TOKEN }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          set -euo pipefail
+          python scripts/scan_public_secrets.py
+
+      - name: Validate prepared VOD component
+        run: bash scripts/check_publication.sh vod
+
+      - name: Seal fresh prepared or compensating VOD component
+        run: python scripts/publication_snapshots.py package --component vod --source-dir public --output-dir .build/vod-snapshot
+
+      - name: Retain fresh validated VOD component
+        id: component_snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vod-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/vod-snapshot/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
   publish:
     name: Publish vod with the last valid counterpart
-    needs: build
+    needs: [build, prepared]
+    if: always() && !cancelled() && (needs.build.result == 'success' || needs.prepared.result == 'success')
     permissions:
       contents: read
       actions: read
@@ -228,5 +387,5 @@ jobs:
     uses: ./.github/workflows/publish-component.yml
     with:
       component: vod
-      artifact-id: ${{ needs.build.outputs.artifact_id }}
+      artifact-id: ${{ needs.build.outputs.artifact_id || needs.prepared.outputs.artifact_id }}
     secrets: inherit
