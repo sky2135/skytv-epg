@@ -24,6 +24,8 @@ if [[ "$component" != live ]]; then
   app_check=(python scripts/build_skytvplayer_catalog.py --validate-only --output-dir public/skytvplayer)
   if [[ "$component" == all ]]; then app_check+=(--epg-dir public/EPG); fi
   "${app_check[@]}"
+  # Optional remains compatible when absent; every advertised graph is strict.
+  python scripts/series_resume_publication.py validate --app-dir public/skytvplayer
 fi
 while IFS= read -r -d '' file; do gzip -t "$file"; done < <(find public -type f -name '*.gz' -print0)
 PUBLICATION_COMPONENT="$component" python - <<'PY'
