@@ -384,8 +384,10 @@ class ResumeStagingTests(ResumeLookupFixture):
     def test_deep_staging_paths_remain_usable(self):
         self.temporary.name = str(staging._filesystem_path(Path(self.temporary.name)))
         target = self.root
-        for number in range(6):
+        number = 0
+        while len(str(target)) <= 300:
             target /= f"resume-long-path-{number}-" + "x" * 24
+            number += 1
         report = self.stage(target)
         self.assertEqual(report["status"], "validated_local_stage_only")
         self.assertGreater(len(str(target)), 300)
